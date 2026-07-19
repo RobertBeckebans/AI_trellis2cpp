@@ -950,26 +950,41 @@ $("pexport").addEventListener("click", async () => {
   const btn = $("pexport");
   btn.disabled = true;
   const wrapping = $("printwrap").checked;
-  btn.textContent = wrapping ? "wrapping…" : "preparing…";
-  setStatus(wrapping ? "constructing watertight CGAL Alpha Wrap…"
+  // A textured wrap previews the exact baked GLB (per-texel atlas), so the
+  // preview material is identical to the download instead of a per-vertex
+  // approximation. Untextured wraps and plain cleanup keep the light mesh path.
+  const texturedWrap = wrapping && !!originalExportMesh?.textured;
+  btn.textContent = texturedWrap ? "wrapping + baking…" : wrapping ? "wrapping…" : "preparing…";
+  setStatus(texturedWrap ? "baking watertight mesh + per-texel PBR (same as the download)…"
+          : wrapping ? "constructing watertight CGAL Alpha Wrap…"
                      : "preparing component-cleanup preview…");
   try {
-    const r = await fetch(`/api/export-preview/${glbJobId}?${exportQuery()}`);
-    if (!r.ok) throw new Error(await r.text());
-    const m = parseMesh(await r.arrayBuffer());
-    viewer.setMesh(m.verts, m.normals, m.tris, m.pbr);
-    $("meshinfo").textContent = meshDescription(m, "export preview · ");
-    const cleaned = $("exportcomponents").value !== "all";
-    $("exportinfo").textContent = wrapping
-      ? `${m.nt.toLocaleString()} triangles · watertight preview · ${originalExportMesh?.textured ? (m.textured ? "PBR projected per-vertex here; rebaked sharper per-texel on download" : "PBR will be projected per texel on download") : "no source material"}`
-      : cleaned
-        ? `${m.nt.toLocaleString()} triangles remain after explicit component cleanup`
-        : `${m.nt.toLocaleString()} triangles · exact original mesh, no cleanup`;
+    if (texturedWrap) {
+      const r = await fetch(`/api/glb/${glbJobId}?${exportQuery()}`);
+      if (!r.ok) throw new Error(r.headers.get("x-trellis-error") || await r.text());
+      const nt = await viewer.setTexturedGLB(await r.arrayBuffer());
+      $("meshinfo").textContent = `export preview · ${nt.toLocaleString()} tris`;
+      $("exportinfo").textContent =
+        `${nt.toLocaleString()} triangles · watertight · per-texel PBR (identical to the GLB download)`;
+      setStatus("previewing the exact GLB download — watertight, per-texel PBR");
+    } else {
+      const r = await fetch(`/api/export-preview/${glbJobId}?${exportQuery()}`);
+      if (!r.ok) throw new Error(await r.text());
+      const m = parseMesh(await r.arrayBuffer());
+      viewer.setMesh(m.verts, m.normals, m.tris, m.pbr);
+      $("meshinfo").textContent = meshDescription(m, "export preview · ");
+      const cleaned = $("exportcomponents").value !== "all";
+      $("exportinfo").textContent = wrapping
+        ? `${m.nt.toLocaleString()} triangles · watertight preview · no source material`
+        : cleaned
+          ? `${m.nt.toLocaleString()} triangles remain after explicit component cleanup`
+          : `${m.nt.toLocaleString()} triangles · exact original mesh, no cleanup`;
+      setStatus(wrapping ? "previewing watertight CGAL print mesh"
+                        : cleaned ? "previewing component-cleaned export mesh"
+                                  : "export preview matches the original mesh");
+    }
     previewingExport = true;
     btn.textContent = "show original";
-    setStatus(wrapping ? "previewing watertight CGAL print mesh"
-                      : cleaned ? "previewing component-cleaned export mesh"
-                                : "export preview matches the original mesh");
   } catch (e) {
     setStatus("export preview failed: " + e.message, true);
     btn.textContent = "preview export";
@@ -1164,8 +1179,9 @@ const viewer = (() => {
   layout(location=1) in vec3 nrm;
   layout(location=2) in vec3 baseColor;
   layout(location=3) in vec3 metalRoughAlpha;
+  layout(location=4) in vec2 uv;
   uniform mat4 mvp, viewModel;
-  out vec3 vN; out vec3 vV; out vec3 vNw; out vec3 vCol; out vec2 vMR; out float vA;
+  out vec3 vN; out vec3 vV; out vec3 vNw; out vec3 vCol; out vec2 vMR; out float vA; out vec2 vUV;
   void main() {
     gl_Position = mvp * vec4(pos, 1.0);
     vec4 vp = viewModel * vec4(pos, 1.0);
@@ -1175,6 +1191,7 @@ const viewer = (() => {
     vCol = baseColor;
     vMR = metalRoughAlpha.xy;
     vA = metalRoughAlpha.z;
+    vUV = uv;
   }`;
   // Lightweight metallic-roughness PBR in view space. The dual-grid mesh has
   // unoriented winding (faithful to TRELLIS.2), so a normal is a direction line,
@@ -1189,9 +1206,12 @@ const viewer = (() => {
   // they sweep the faceted surface.
   const FS = `#version 300 es
   precision highp float;
-  in vec3 vN; in vec3 vV; in vec3 vNw; in vec3 vCol; in vec2 vMR; in float vA;
+  in vec3 vN; in vec3 vV; in vec3 vNw; in vec3 vCol; in vec2 vMR; in float vA; in vec2 vUV;
   uniform int wire;
   uniform int textured;   // 1 = per-vertex PBR (base_color/metallic/roughness)
+  uniform int useTex;     // 1 = sample base/metal/rough from the baked UV atlas (glTF)
+  uniform sampler2D uBaseTex;   // baseColor (sRGB-encoded rgb + alpha)
+  uniform sampler2D uMRTex;     // glTF packing: G = roughness, B = metallic
   out vec4 frag;
   // procedural environment radiance in a direction (view space; +y = up)
   vec3 envColor(vec3 d) {
@@ -1205,11 +1225,22 @@ const viewer = (() => {
     if (dot(N, V) < 0.0) N = -N;   // face the camera (mesh is unoriented)
     // The network/baseColorTexture convention stores gamma-encoded base color.
     // PBR math must operate on linear reflectance, as in upstream (** 2.2).
-    vec3  base  = (textured == 1) ? pow(clamp(vCol, 0.0, 1.0), vec3(2.2))
-                                  : vec3(0.62, 0.66, 0.72);
-    float metal = (textured == 1) ? clamp(vMR.x, 0.0, 1.0) : 0.0;
-    float rough = (textured == 1) ? clamp(vMR.y, 0.06, 1.0) : 0.5;
-    float opacity = (textured == 1) ? clamp(vA, 0.0, 1.0) : 1.0;
+    vec3 base; float metal, rough, opacity;
+    if (useTex == 1) {                       // per-texel baked atlas — the download material
+      vec4 bc = texture(uBaseTex, vUV);
+      base = pow(clamp(bc.rgb, 0.0, 1.0), vec3(2.2));
+      opacity = bc.a;
+      vec4 mr = texture(uMRTex, vUV);
+      rough = clamp(mr.g, 0.06, 1.0);
+      metal = clamp(mr.b, 0.0, 1.0);
+    } else if (textured == 1) {               // per-vertex PBR
+      base = pow(clamp(vCol, 0.0, 1.0), vec3(2.2));
+      metal = clamp(vMR.x, 0.0, 1.0);
+      rough = clamp(vMR.y, 0.06, 1.0);
+      opacity = clamp(vA, 0.0, 1.0);
+    } else {                                  // untextured grey
+      base = vec3(0.62, 0.66, 0.72); metal = 0.0; rough = 0.5; opacity = 1.0;
+    }
     if (opacity < 0.01) discard;
     float nv = max(dot(N, V), 1e-3);
 
@@ -1256,10 +1287,123 @@ const viewer = (() => {
   const uViewModel = gl.getUniformLocation(prog, "viewModel");
   const uWire = gl.getUniformLocation(prog, "wire");
   const uTextured = gl.getUniformLocation(prog, "textured");
+  const uUseTex = gl.getUniformLocation(prog, "useTex");
+  gl.useProgram(prog);
+  gl.uniform1i(gl.getUniformLocation(prog, "uBaseTex"), 0);   // texture unit 0
+  gl.uniform1i(gl.getUniformLocation(prog, "uMRTex"), 1);     // texture unit 1
 
   const vao = gl.createVertexArray();
   const vbo = gl.createBuffer(), nbo = gl.createBuffer(), cbo = gl.createBuffer(), ibo = gl.createBuffer();
   let nIndices = 0, wireIbo = gl.createBuffer(), nWire = 0, wireStride = 1, hasPBR = false;
+
+  // ── textured GLB path (per-texel atlas, identical to the GLB download) ──────
+  // The wrap preview renders the exact baked GLB the download produces, so the
+  // preview material matches the file byte-for-byte instead of the per-vertex
+  // approximation. Only positions/normals/uv + two PNG maps are needed.
+  let texVao = null, texVbo, texNbo, texUbo, texIbo, texWireIbo, texNIndices = 0, texNWire = 0;
+  let texBaseTex = null, texMRTex = null;
+
+  // Parse the fixed-shape glTF 2.0 binary we emit (write_glb): one mesh, one
+  // primitive with POSITION/NORMAL/TEXCOORD_0/indices and a metallic-roughness
+  // material with baseColor + metallicRoughness PNG textures.
+  function parseGLB(buf) {
+    const dv = new DataView(buf);
+    if (dv.getUint32(0, true) !== 0x46546C67) throw new Error("not a GLB");
+    let off = 12, json = null, bin = null;
+    while (off + 8 <= dv.byteLength) {
+      const len = dv.getUint32(off, true), type = dv.getUint32(off + 4, true), start = off + 8;
+      if (type === 0x4E4F534A) json = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, start, len)));
+      else if (type === 0x004E4942) bin = new Uint8Array(buf, start, len);
+      off = start + len + ((len % 4) ? 4 - (len % 4) : 0);
+    }
+    if (!json || !bin) throw new Error("GLB missing JSON or BIN chunk");
+    const CTOR = { 5121: Uint8Array, 5123: Uint16Array, 5125: Uint32Array, 5126: Float32Array };
+    const NCOMP = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4 };
+    const accessor = i => {
+      const a = json.accessors[i], bv = json.bufferViews[a.bufferView];
+      const start = bin.byteOffset + (bv.byteOffset || 0) + (a.byteOffset || 0);
+      return new CTOR[a.componentType](bin.buffer, start, a.count * NCOMP[a.type]);
+    };
+    const bvBytes = k => {
+      const bv = json.bufferViews[k];
+      return new Uint8Array(bin.buffer, bin.byteOffset + (bv.byteOffset || 0), bv.byteLength);
+    };
+    const prim = json.meshes[0].primitives[0];
+    const mat = json.materials[prim.material].pbrMetallicRoughness;
+    const srcOf = ti => json.textures[ti].source;
+    const pngOf = imgIdx => bvBytes(json.images[imgIdx].bufferView);
+    return {
+      positions: accessor(prim.attributes.POSITION),
+      normals:   accessor(prim.attributes.NORMAL),
+      uvs:       accessor(prim.attributes.TEXCOORD_0),
+      indices:   accessor(prim.indices),
+      basePng:   pngOf(srcOf(mat.baseColorTexture.index)),
+      mrPng:     pngOf(srcOf(mat.metallicRoughnessTexture.index)),
+    };
+  }
+
+  function uploadAtlasTex(unit, bmp, old) {
+    if (old) gl.deleteTexture(old);
+    const t = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bmp);
+    // Match the GLB sampler exactly: LINEAR, CLAMP, no mipmaps (mipmaps would
+    // bleed across the dilated xatlas chart seams).
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return t;
+  }
+
+  // Render a baked GLB (ArrayBuffer). Returns the triangle count. Async: the PNG
+  // maps are decoded off-thread before upload.
+  async function setTexturedGLB(buf) {
+    disposeShowcaseMeshes();
+    const g = parseGLB(buf);
+    const bmpOpts = { imageOrientation: "none", premultiplyAlpha: "none", colorSpaceConversion: "none" };
+    const [baseBmp, mrBmp] = await Promise.all([
+      createImageBitmap(new Blob([g.basePng], { type: "image/png" }), bmpOpts),
+      createImageBitmap(new Blob([g.mrPng], { type: "image/png" }), bmpOpts),
+    ]);
+    if (!texVao) {
+      texVao = gl.createVertexArray();
+      texVbo = gl.createBuffer(); texNbo = gl.createBuffer();
+      texUbo = gl.createBuffer(); texIbo = gl.createBuffer(); texWireIbo = gl.createBuffer();
+    }
+    gl.bindVertexArray(texVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, texVbo);
+    gl.bufferData(gl.ARRAY_BUFFER, g.positions, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, texNbo);
+    gl.bufferData(gl.ARRAY_BUFFER, g.normals, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, texUbo);
+    gl.bufferData(gl.ARRAY_BUFFER, g.uvs, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(4); gl.vertexAttribPointer(4, 2, gl.FLOAT, false, 0, 0);
+    gl.disableVertexAttribArray(2); gl.disableVertexAttribArray(3);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, texIbo);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, g.indices, gl.STATIC_DRAW);
+    // wireframe edges (3 per triangle) so the wire toggle works on the preview too
+    const idx = g.indices, nTri = idx.length / 3;
+    const wireIdx = new Uint32Array(nTri * 6);
+    let o = 0;
+    for (let t = 0; t < idx.length; t += 3) {
+      wireIdx[o++] = idx[t];     wireIdx[o++] = idx[t + 1];
+      wireIdx[o++] = idx[t + 1]; wireIdx[o++] = idx[t + 2];
+      wireIdx[o++] = idx[t + 2]; wireIdx[o++] = idx[t];
+    }
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, texWireIbo);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, wireIdx, gl.STATIC_DRAW);
+    texNWire = o;
+    gl.bindVertexArray(null);
+    texBaseTex = uploadAtlasTex(0, baseBmp, texBaseTex);
+    texMRTex = uploadAtlasTex(1, mrBmp, texMRTex);
+    texNIndices = g.indices.length;
+    renderMode = "textured";
+    return g.indices.length / 3;
+  }
 
   // Showcase finals use one compact GPU resource per station. The focused
   // station's intermediate frame continues to use the ordinary mesh/voxel
@@ -1637,6 +1781,7 @@ const viewer = (() => {
         gl.uniformMatrix4fv(uViewModel, false, matrices.viewModel);
         gl.uniform1i(uWire, 0);
         gl.uniform1i(uTextured, r.hasPBR ? 1 : 0);
+        gl.uniform1i(uUseTex, 0);
         gl.bindVertexArray(r.vao);
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, r.ibo);
         gl.drawElements(gl.TRIANGLES, r.nIndices, gl.UNSIGNED_INT, 0);
@@ -1674,6 +1819,7 @@ const viewer = (() => {
         gl.useProgram(prog);
         gl.uniformMatrix4fv(uMVP, false, matrices.mvp);
         gl.uniformMatrix4fv(uViewModel, false, matrices.viewModel);
+        gl.uniform1i(uUseTex, 0);
         gl.bindVertexArray(vao);
         if (wire) {
           // hidden-line wireframe: a depth-only prepass (pushed back a hair via
@@ -1702,6 +1848,40 @@ const viewer = (() => {
           gl.drawElements(gl.TRIANGLES, nIndices, gl.UNSIGNED_INT, 0);
         }
         gl.bindVertexArray(null);
+      } else if (renderMode === "textured" && texNIndices) {
+        const matrices = matricesAt(0);
+        gl.useProgram(prog);
+        gl.uniformMatrix4fv(uMVP, false, matrices.mvp);
+        gl.uniformMatrix4fv(uViewModel, false, matrices.viewModel);
+        gl.bindVertexArray(texVao);
+        if (wire) {
+          // Same hidden-line pass as the mesh branch: a color-masked depth prepass
+          // occludes back edges, then the front-surface edges draw at equal depth.
+          gl.enable(gl.POLYGON_OFFSET_FILL);
+          gl.polygonOffset(1.0, 1.0);
+          gl.colorMask(false, false, false, false);
+          gl.uniform1i(uWire, 0);
+          gl.uniform1i(uTextured, 0);
+          gl.uniform1i(uUseTex, 0);
+          gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, texIbo);
+          gl.drawElements(gl.TRIANGLES, texNIndices, gl.UNSIGNED_INT, 0);
+          gl.colorMask(true, true, true, true);
+          gl.disable(gl.POLYGON_OFFSET_FILL);
+          gl.uniform1i(uWire, 1);
+          gl.depthFunc(gl.LEQUAL);
+          gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, texWireIbo);
+          gl.drawElements(gl.LINES, texNWire, gl.UNSIGNED_INT, 0);
+          gl.depthFunc(gl.LESS);
+        } else {
+          gl.uniform1i(uWire, 0);
+          gl.uniform1i(uTextured, 0);
+          gl.uniform1i(uUseTex, 1);
+          gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, texBaseTex);
+          gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, texMRTex);
+          gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, texIbo);
+          gl.drawElements(gl.TRIANGLES, texNIndices, gl.UNSIGNED_INT, 0);
+        }
+        gl.bindVertexArray(null);
       }
     }
     requestAnimationFrame(frame);
@@ -1709,7 +1889,7 @@ const viewer = (() => {
   requestAnimationFrame(frame);
 
   return {
-    setMesh, setVoxels, clear, setShowcaseAssets, setShowcaseFrame,
+    setMesh, setTexturedGLB, setVoxels, clear, setShowcaseAssets, setShowcaseFrame,
     setShowcaseFocus, finishShowcase, clearShowcase,
   };
 })();
