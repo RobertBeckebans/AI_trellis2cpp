@@ -71,6 +71,11 @@ add_executable(test_large_rows test_large_rows.cpp)
 target_link_libraries(test_large_rows PRIVATE trellis2)
 target_compile_features(test_large_rows PRIVATE cxx_std_14)
 
+# The block-wise finest level must match the single-graph one voxel for voxel.
+add_executable(test_chunked_decode test_chunked_decode.cpp)
+target_link_libraries(test_chunked_decode PRIVATE trellis2)
+target_compile_features(test_chunked_decode PRIVATE cxx_std_14)
+
 if(TRELLIS2_HAVE_CGAL)
     add_executable(test_print_remesh test_print_remesh.cpp)
     target_link_libraries(test_print_remesh PRIVATE trellis2)
@@ -103,6 +108,9 @@ add_test(NAME background_removal COMMAND test_background_removal)
 # Skips (77) when no GPU backend is compiled in; slow because it moves ~1 GB.
 add_test(NAME large_rows COMMAND test_large_rows)
 set_tests_properties(large_rows PROPERTIES SKIP_RETURN_CODE 77 LABELS "gpu;slow")
+
+add_test(NAME chunked_decode COMMAND test_chunked_decode "${T2_GGUFS}/tex_dec_f16.gguf")
+set_tests_properties(chunked_decode PROPERTIES SKIP_RETURN_CODE 77 LABELS "model")
 
 add_test(NAME preprocess COMMAND test_preprocess
          "${T2_DUMPS}/fixture_rgba.png" "${T2_DUMPS}/fixture_512.png")

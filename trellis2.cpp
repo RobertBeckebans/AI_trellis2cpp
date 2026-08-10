@@ -2590,6 +2590,185 @@ void build_neighbor_indices(const std::vector<int32_t> & coords, int L,
 
 } // namespace
 
+// ggml_mul_mat on the CUDA/HIP backend silently stops writing its result past a
+// fixed column count — 2^21 columns with f16 weights, 2^19 with f32 (measured by
+// tests/test_large_rows). Past the limit the output stays 0 and the graph still
+// reports GGML_STATUS_SUCCESS. That is what broke the 1024^3 cascade: its finest
+// level carries ~2.9M voxels, so every voxel past 2^21 came out of conv() as the
+// bias alone (a dead accumulator plus b), the dual grid found no edge crossings
+// there, and the mesh lost every face in that slab. Keep every graph well under
+// both thresholds; TRELLIS2_CHUNK_ROWS forces a smaller block for testing.
+// How many columns one mul_mat survives, by weight type: f16 weights reach 2^21,
+// f32 only 2^19 (the GEMM tiles the column dimension differently per type).
+// Quantized weights take a third path and are unmeasured, so assume the stricter
+// bound. This is a ceiling on what a single graph can compute, not a target.
+static int64_t mul_mat_max_rows(ggml_type wt) {
+    return (wt == GGML_TYPE_F16 || wt == GGML_TYPE_BF16) ? (int64_t) 1 << 21
+                                                         : (int64_t) 1 << 19;
+}
+
+// Voxels per block for the levels that can be split, kept well under either
+// ceiling. TRELLIS2_CHUNK_ROWS forces a smaller block so a test can exercise the
+// block-wise path on a small model; re-read per call rather than cached, so one
+// process can decode the same input both ways (tests/test_chunked_decode).
+static int64_t chunk_rows_limit() {
+    if (const char * e = std::getenv("TRELLIS2_CHUNK_ROWS")) {
+        const long long n = std::atoll(e);
+        if (n > 0) return (int64_t) n;
+    }
+    return (int64_t) 1 << 18;   // 262144
+}
+
+// The finest decoder level, evaluated in voxel blocks so no mul_mat ever sees
+// more columns than the backend can write.
+//
+// This is the only level that outgrows the limit in practice, and the only one
+// that splits without materialising a full-length intermediate: num_blocks is 0
+// at the finest level for both shipped decoders, so the level is a single
+// submanifold conv wrapped in per-row ops. norm and silu are per-row, so they
+// commute with the neighbour gather — gathering raw rows and normalising after
+// is exactly what the unchunked graph computes, including for the clamped
+// missing-neighbour rows, which the mask zeroes either way. Only the gather
+// source has to see all L rows, so it stays resident on the device for the whole
+// pass while each block allocates just its own slice.
+static bool shape_dec_final_level_chunked(trellis2_shape_dec_model * m,
+                                          const trellis2_shape_dec_hparams & hp,
+                                          int lvl, int C, int prev_C, int L,
+                                          const std::vector<std::vector<int32_t>> & nidx,
+                                          const std::vector<float> & up_hch,
+                                          const std::vector<float> & up_xch,
+                                          bool pbr_scale, int64_t chunk,
+                                          std::vector<float> & out_feats,
+                                          std::string * error) {
+    const size_t es = sizeof(float);
+    const int    xC = prev_C / 8;          // skip channels
+    const int    r  = C / xC;              // repeat_interleave factor
+    const int    OC = hp.out_channels;
+    const std::string up = "blocks." + std::to_string(lvl - 1) + "." +
+                           std::to_string(hp.num_blocks[lvl - 1]);
+
+    auto W = [&](const std::string & n) -> ggml_tensor * {
+        auto it = m->tensors.find(n);
+        return it == m->tensors.end() ? nullptr : it->second;
+    };
+    ggml_tensor * cw = W(up + ".conv2.weight");   // [Ci, 27, Co]
+    ggml_tensor * cb = W(up + ".conv2.bias");
+    ggml_tensor * ow = W("output_layer.weight");
+    ggml_tensor * ob = W("output_layer.bias");
+    if (!cw || !cb || !ow) {
+        set_error(error, "missing tensor for the chunked final level");
+        return false;
+    }
+
+    // Resident level input: the neighbour gather reads arbitrary rows, so this
+    // cannot be sliced per block, and re-uploading it per block would move
+    // hundreds of MB across the bus for nothing.
+    ggml_init_params pip{ ggml_tensor_overhead() * 4, nullptr, true };
+    ggml_context * pctx = ggml_init(pip);
+    if (!pctx) { set_error(error, "ggml_init failed (resident level input)"); return false; }
+    ggml_tensor * hch_full = ggml_new_tensor_2d(pctx, GGML_TYPE_F32, C, L);
+    ggml_backend_buffer_t pbuf = ggml_backend_alloc_ctx_tensors(pctx, m->backend);
+    if (!pbuf) {
+        set_error(error, "failed to allocate the resident level input (" +
+                         std::to_string((size_t) C * L * es >> 20) + " MiB)");
+        ggml_free(pctx);
+        return false;
+    }
+    ggml_backend_tensor_set(hch_full, up_hch.data(), 0, up_hch.size() * es);
+
+    out_feats.resize((size_t) OC * L);
+
+    const int64_t Ci = cw->ne[0], Co = cw->ne[2];
+    bool ok = true;
+
+    for (int64_t v0 = 0; v0 < L && ok; v0 += chunk) {
+        const int n = (int) std::min<int64_t>(chunk, (int64_t) L - v0);
+
+        const size_t gsize = 512;
+        ggml_init_params ip{ ggml_tensor_overhead() * gsize + ggml_graph_overhead_custom(gsize, false),
+                             nullptr, true };
+        ggml_context * ctx = ggml_init(ip);
+        ggml_cgraph * gf = ggml_new_graph_custom(ctx, gsize, false);
+
+        std::vector<ggml_tensor *> idx_t(27), mask_t(27);
+        for (int k = 0; k < 27; ++k) {
+            idx_t[k]  = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n);
+            mask_t[k] = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, n);
+            ggml_set_input(idx_t[k]);
+            ggml_set_input(mask_t[k]);
+        }
+        ggml_tensor * xch = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, xC, n);
+        ggml_set_input(xch);
+
+        // conv2 with norm/silu pulled behind the gather (see the note above).
+        ggml_tensor * acc = nullptr;
+        for (int k = 0; k < 27; ++k) {
+            ggml_tensor * wk = ggml_cont(ctx, ggml_view_3d(ctx, cw, Ci, 1, Co,
+                                                           cw->nb[1], cw->nb[2], (size_t) k * cw->nb[1]));
+            wk = ggml_reshape_2d(ctx, wk, Ci, Co);
+            ggml_tensor * g = ggml_get_rows(ctx, hch_full, idx_t[k]);   // [C, n]
+            g = ggml_norm(ctx, g, hp.norm_eps);
+            g = ggml_silu(ctx, g);
+            g = ggml_mul(ctx, g, mask_t[k]);                            // zero missing
+            ggml_tensor * y = ggml_mul_mat(ctx, wk, g);                 // [C_out, n]
+            acc = acc ? ggml_add(ctx, acc, y) : y;
+        }
+        acc = ggml_add(ctx, acc, cb);
+
+        ggml_tensor * skip = ggml_reshape_3d(ctx, xch, 1, xC, n);
+        skip = ggml_repeat(ctx, skip, ggml_new_tensor_3d(ctx, GGML_TYPE_F32, r, xC, n));
+        skip = ggml_reshape_2d(ctx, skip, C, n);
+
+        ggml_tensor * h = ggml_add(ctx, acc, skip);
+        h = ggml_norm(ctx, h, 1e-5f);                 // final affine-free LN
+        ggml_tensor * o = ggml_mul_mat(ctx, ow, h);   // output_layer
+        if (ob) o = ggml_add(ctx, o, ob);
+        o = ggml_cont(ctx, o);                        // [OC, n]
+        ggml_set_output(o);
+        ggml_build_forward_expand(gf, o);
+
+        ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(m->backend));
+        if (!ggml_gallocr_alloc_graph(alloc, gf)) {
+            set_error(error, "ggml_gallocr_alloc_graph failed (final level, voxels from " +
+                             std::to_string(v0) + ")");
+            ok = false;
+        } else {
+            std::vector<int32_t> clamped((size_t) n);
+            std::vector<float>   mask((size_t) n);
+            for (int k = 0; k < 27; ++k) {
+                const std::vector<int32_t> & ik = nidx[k];
+                for (int i = 0; i < n; ++i) {
+                    const int32_t nb = ik[(size_t) (v0 + i)];
+                    const bool miss = nb >= L;
+                    clamped[(size_t) i] = miss ? 0 : nb;
+                    mask[(size_t) i]    = miss ? 0.0f : 1.0f;
+                }
+                ggml_backend_tensor_set(idx_t[k],  clamped.data(), 0, (size_t) n * sizeof(int32_t));
+                ggml_backend_tensor_set(mask_t[k], mask.data(),    0, (size_t) n * sizeof(float));
+            }
+            ggml_backend_tensor_set(xch, up_xch.data() + (size_t) v0 * xC, 0, (size_t) xC * n * es);
+
+            if (ggml_backend_graph_compute(m->backend, gf) != GGML_STATUS_SUCCESS) {
+                set_error(error, "graph compute failed (final level, voxels from " +
+                                 std::to_string(v0) + ")");
+                ok = false;
+            } else {
+                ggml_backend_tensor_get(o, out_feats.data() + (size_t) v0 * OC, 0,
+                                        (size_t) OC * n * es);
+            }
+        }
+        ggml_gallocr_free(alloc);
+        ggml_free(ctx);
+    }
+
+    ggml_backend_buffer_free(pbuf);
+    ggml_free(pctx);
+
+    if (ok && pbr_scale)   // tex decoder: map to [0,1] like the reference *0.5+0.5
+        for (float & f : out_feats) f = f * 0.5f + 0.5f;
+    return ok;
+}
+
 // Shared driver for the shape decoder. upsample_times < 0 runs the full decode
 // (all levels + output layer; fills out_feats and out_coords) — the validated
 // behavior. upsample_times in [1, n_levels-1] runs only that many subdivision
@@ -2677,6 +2856,48 @@ static bool shape_dec_run(trellis2_shape_dec_model * m,
             auto t0 = t_now();
             build_neighbor_indices(coords, L, nidx);
             ms_nbr += ms_since(t0);
+        }
+
+        // ── too many voxels for one graph? ──────────────────────────────────
+        // Only the finest level splits (see shape_dec_final_level_chunked); any
+        // other level would need its predecessor materialised over all L. A
+        // level that is both unsplittable and past the ceiling has to fail
+        // loudly — that is exactly the case that used to cost the 1024^3 mesh a
+        // quarter of its faces without a word. The ceiling follows the type of
+        // the weights this level's matmuls actually use.
+        {
+            const std::string wname =
+                lvl == 0 ? std::string("from_latent.weight")
+                         : ("blocks." + std::to_string(lvl - 1) + "." +
+                            std::to_string(hp.num_blocks[lvl - 1]) + ".conv2.weight");
+            auto wit = m->tensors.find(wname);
+            const int64_t max_rows = wit == m->tensors.end() ? mul_mat_max_rows(GGML_TYPE_F32)
+                                                             : mul_mat_max_rows(wit->second->type);
+            const int64_t block = std::min(chunk_rows_limit(), max_rows);
+
+            if ((int64_t) L > block) {
+                const bool splittable = !has_up && lvl > 0 && hp.num_blocks[lvl] == 0 && !taps;
+                if (splittable) {
+                    if (!shape_dec_final_level_chunked(m, hp, lvl, C, prev_C, L, nidx,
+                                                       up_hch, up_xch, pbr_scale, block,
+                                                       out_feats, error)) {
+                        return false;
+                    }
+                    out_coords = coords;
+                    if (t2_timing)
+                        std::fprintf(stderr, "[shape_dec] nbr=%.0f graph=%.0f gather=%.0f ms\n",
+                                     ms_nbr, ms_graph, ms_gather);
+                    return true;
+                }
+                if ((int64_t) L > max_rows) {
+                    set_error(error, "level " + std::to_string(lvl) + " has " + std::to_string(L) +
+                                     " voxels, past this backend's mul_mat column limit (" +
+                                     std::to_string(max_rows) + "), and only the finest level "
+                                     "can be split");
+                    return false;
+                }
+                // Under the ceiling: a single graph is still correct here.
+            }
         }
 
         // ── graph: [child head from previous level] + blocks + up part A ────
