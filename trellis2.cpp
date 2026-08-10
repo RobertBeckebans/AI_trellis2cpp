@@ -1,5 +1,9 @@
 #include "trellis2.h"
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 #include "ggml.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
