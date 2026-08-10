@@ -1,8 +1,8 @@
 // trellis2 demo server: upload an image, get a 3D mesh back.
 //
-//	cmake -B build-shared -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Release && cmake --build build-shared -j
+//	cmake -B build -DBUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 //	cd server && CGO_ENABLED=0 go build -o trellis2-server .
-//	./trellis2-server -lib ../build-shared/libtrellis2.so -ggufs ../ggufs
+//	./trellis2-server -lib ../build/libtrellis2.so -ggufs ../ggufs
 //
 // API:
 //
@@ -1006,9 +1006,9 @@ func formFloat(r *http.Request, key string, def float32) float32 {
 }
 
 func main() {
-	libDefault := "../build-shared/libtrellis2.so"
+	libDefault := "../build/libtrellis2.so"
 	if runtime.GOOS == "windows" {
-		libDefault = "../build-shared/bin/Release/trellis2.dll"
+		libDefault = "../build/bin/Release/trellis2.dll"
 	}
 	libPath := flag.String("lib", libDefault, "path to libtrellis2 shared library (.so / .dll)")
 	ggufDir := flag.String("ggufs", "../ggufs", "directory with the model ggufs")

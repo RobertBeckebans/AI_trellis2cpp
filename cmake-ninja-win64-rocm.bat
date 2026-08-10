@@ -3,7 +3,7 @@ setlocal
 
 rem --- Shared-library build for the Go demo server (libtrellis2.dll) ---
 rem   Static build for the CLI examples (trellis2.lib) is the regular
-rem   cmake-ninja-win64-rocm.bat. This one builds the DLL into build-shared/
+rem   cmake-ninja-win64-rocm.bat. This one builds the DLL into build/
 rem   so the Go server can LoadLibrary it.
 
 set ROCM_ROOT=C:\Program Files\AMD\ROCm\6.4
@@ -13,11 +13,11 @@ set PATH=%ROCM_BIN%;%PATH%
 
 rem CMAKE_RUNTIME_OUTPUT_DIRECTORY must be absolute (relative paths get
 rem reinterpreted per-subdir by ggml's nested CMakeLists).
-set DLL_OUT=%CD%\build-shared\bin
+set DLL_OUT=%CD%\build\bin
 
-rmdir /s /q build-shared 2>nul
+rmdir /s /q build 2>nul
 
-cmake -B build-shared ^
+cmake -B build ^
   -G "Ninja Multi-Config" ^
   -DCMAKE_C_COMPILER="%ROCM_BIN%\clang.exe" ^
   -DCMAKE_CXX_COMPILER="%ROCM_BIN%\clang++.exe" ^
@@ -37,9 +37,9 @@ if errorlevel 1 (
   exit /b 1
 )
 
-cmake --build build-shared --config Release
+cmake --build build --config Release
 
 echo.
-echo Fertig: build-shared\bin\Release\libtrellis2.dll  (+ ggml.dll, ggml-base.dll, ggml-cpu.dll, ggml-hip.dll)
+echo Fertig: build\bin\Release\libtrellis2.dll  (+ ggml.dll, ggml-base.dll, ggml-cpu.dll, ggml-hip.dll)
 pause
 endlocal

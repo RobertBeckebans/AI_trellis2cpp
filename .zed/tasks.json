@@ -134,7 +134,7 @@
   {
     "label": "trellis2: Build Shared Release (libtrellis2.dll)",
     "command": "cmake",
-    "args": ["--build", "build-shared", "--config", "Release", "-j", "24"],
+    "args": ["--build", "build", "--config", "Release", "-j", "24"],
     "env": {
       "PATH": "C:/Program Files/AMD/ROCm/6.4/bin;${PATH}"
     },
@@ -152,14 +152,14 @@
     "label": "trellis2: Run server (HTTP :8742, full pipeline)",
     "command": "./trellis2-server.exe",
     "args": [
-      "-lib", "../build-shared/bin/Release/trellis2.dll",
+      "-lib", "../build/bin/Release/trellis2.dll",
       "-ggufs", "../ggufs",
       "-store", "../generations",
       "-unload-idle",
       "-addr", ":8742"
     ],
     "env": {
-      "PATH": "C:/Program Files/AMD/ROCm/6.4/bin;../build-shared/bin/Release;${PATH}"
+      "PATH": "C:/Program Files/AMD/ROCm/6.4/bin;../build/bin/Release;${PATH}"
     },
     "cwd": "$ZED_WORKTREE_ROOT/server",
     "use_new_terminal": true
@@ -168,7 +168,7 @@
     "label": "trellis2: Run server (coarse-only, no GGUFs needed)",
     "command": "./trellis2-server.exe",
     "args": [
-      "-lib", "../build-shared/bin/Release/trellis2.dll",
+      "-lib", "../build/bin/Release/trellis2.dll",
       "-ggufs", "../ggufs",
       "-coarse",
       "-store", "",
@@ -176,7 +176,7 @@
       "-addr", ":8742"
     ],
     "env": {
-      "PATH": "C:/Program Files/AMD/ROCm/6.4/bin;../build-shared/bin/Release;${PATH}"
+      "PATH": "C:/Program Files/AMD/ROCm/6.4/bin;../build/bin/Release;${PATH}"
     },
     "cwd": "$ZED_WORKTREE_ROOT/server",
     "use_new_terminal": true
