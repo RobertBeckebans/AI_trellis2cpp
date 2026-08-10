@@ -61,3 +61,5 @@ slow-unit-*
 assets/
 data_toolkit/
 *.log
+
+server/trellis2-server.exe

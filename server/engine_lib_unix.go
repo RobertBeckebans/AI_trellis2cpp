@@ -9,3 +9,7 @@ import "github.com/ebitengine/purego"
 func openLib(path string) (uintptr, error) {
 	return purego.Dlopen(path, purego.RTLD_NOW|purego.RTLD_GLOBAL)
 }
+
+// setNativeEnv is only needed on Windows, where the CRT keeps its own copy of
+// the environment; elsewhere os.Setenv already reaches the library's getenv().
+func setNativeEnv(name, value string) error { return nil }

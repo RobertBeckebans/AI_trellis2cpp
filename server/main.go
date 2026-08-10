@@ -1038,6 +1038,21 @@ func main() {
 		os.Setenv("T2_PREVIEW_STRIDE", "1")
 	}
 
+	// ggml's CUDA-graph capture overflows the stack of the thread purego calls
+	// the library on and takes the whole process down with STATUS_STACK_OVERFLOW
+	// (0xc00000fd) on the very first graph compute. Not workload-dependent: the
+	// coarse 64^3 path dies as readily as the 1024^3 cascade, and the same DLL
+	// driven from a native executable is fine, so it is the small Go-managed
+	// thread stack rather than the graph itself. os.Setenv alone does not reach
+	// the library's getenv() on Windows — see setNativeEnv. Respect an explicit
+	// override so the crash stays reproducible for anyone investigating it.
+	if os.Getenv("GGML_CUDA_DISABLE_GRAPHS") == "" {
+		os.Setenv("GGML_CUDA_DISABLE_GRAPHS", "1")
+		if err := setNativeEnv("GGML_CUDA_DISABLE_GRAPHS", "1"); err != nil {
+			log.Printf("warning: could not disable CUDA graphs (%v); a GPU generation may crash", err)
+		}
+	}
+
 	pick := func(explicit, name string) string {
 		if explicit != "" {
 			return explicit
