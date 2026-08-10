@@ -11,7 +11,14 @@
 // finest level, enough to force several blocks at a small TRELLIS2_CHUNK_ROWS
 // while staying fast.
 //
-// Usage: test_chunked_decode [tex_dec.gguf]
+// Both the forced small block and the production block size are checked, the
+// latter because an end-to-end A/B is useless here: the flow samplers are not
+// reproducible run to run, so two full generations differ in voxel count for
+// reasons that have nothing to do with the split. This is the deterministic
+// instrument for that question.
+//
+// Usage: test_chunked_decode [tex_dec.gguf] [latent extent, default 2]
+//        extent 5 gives 512000 fine voxels, the scale of a real 512^3 decode.
 // Exit:  0 identical, 1 diverged, 77 model missing.
 
 #include "trellis2.h"
@@ -25,11 +32,14 @@
 
 namespace {
 
+// An empty value clears the override, so the decoder falls back to the block
+// size a real generation uses.
 void set_chunk(const char * value) {
 #ifdef _WIN32
     _putenv_s("TRELLIS2_CHUNK_ROWS", value);
 #else
-    setenv("TRELLIS2_CHUNK_ROWS", value, 1);
+    if (value[0]) setenv("TRELLIS2_CHUNK_ROWS", value, 1);
+    else          unsetenv("TRELLIS2_CHUNK_ROWS");
 #endif
 }
 
@@ -61,6 +71,8 @@ trellis2_subdiv_level full_subdivision(const std::vector<int32_t> & coarse) {
 
 int main(int argc, char ** argv) {
     const std::string path = argc > 1 ? argv[1] : "ggufs/tex_dec_f16.gguf";
+    const int extent = argc > 2 ? std::atoi(argv[2]) : 2;
+    if (extent < 1) { std::fprintf(stderr, "bad extent\n"); return 1; }
 
     std::string err;
     trellis2_shape_dec_model * m = trellis2_tex_dec_load(path, true, &err);
@@ -70,11 +82,11 @@ int main(int argc, char ** argv) {
     }
     const trellis2_shape_dec_hparams & hp = trellis2_shape_dec_hparams_of(m);
 
-    // 2x2x2 latent block; four full subdivisions -> 8 * 8^4 = 32768 fine voxels.
+    // Solid latent block; four full subdivisions multiply it by 8^4 = 4096.
     std::vector<int32_t> coords;
-    for (int x = 0; x < 2; ++x)
-    for (int y = 0; y < 2; ++y)
-    for (int z = 0; z < 2; ++z) { coords.push_back(x); coords.push_back(y); coords.push_back(z); }
+    for (int x = 0; x < extent; ++x)
+    for (int y = 0; y < extent; ++y)
+    for (int z = 0; z < extent; ++z) { coords.push_back(x); coords.push_back(y); coords.push_back(z); }
     const int L = (int) (coords.size() / 3);
 
     std::vector<trellis2_subdiv_level> subs;
@@ -95,8 +107,8 @@ int main(int argc, char ** argv) {
     std::printf("latent voxels %d -> %zu fine voxels over %d levels\n\n",
                 L, fine, hp.n_levels);
 
-    std::vector<float> ref, got;
-    std::vector<int32_t> rc, gc;
+    std::vector<float> ref;
+    std::vector<int32_t> rc;
 
     set_chunk("100000000");   // far above `fine`: single graph, the old path
     if (!trellis2_tex_dec_decode(m, slat.data(), L, coords.data(), subs, ref, rc, &err)) {
@@ -105,32 +117,41 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    set_chunk("997");         // deliberately not a divisor of the voxel count
-    if (!trellis2_tex_dec_decode(m, slat.data(), L, coords.data(), subs, got, gc, &err)) {
-        std::printf("chunked decode failed: %s\n", err.c_str());
-        trellis2_shape_dec_free(m);
-        return 1;
+    // "" restores the production block size, which is the configuration a real
+    // generation runs; "997" is not a divisor, so the last block is ragged.
+    const char * cases[] = { "", "997" };
+    int failures = 0;
+    for (const char * c : cases) {
+        std::vector<float> got;
+        std::vector<int32_t> gc;
+        set_chunk(c);
+        if (!trellis2_tex_dec_decode(m, slat.data(), L, coords.data(), subs, got, gc, &err)) {
+            std::printf("  block=%-9s decode failed: %s\n", c[0] ? c : "default", err.c_str());
+            ++failures;
+            continue;
+        }
+        if (ref.size() != got.size() || rc != gc) {
+            std::printf("  block=%-9s SHAPE MISMATCH feats %zu vs %zu -> FAIL\n",
+                        c[0] ? c : "default", ref.size(), got.size());
+            ++failures;
+            continue;
+        }
+        // Both runs do the same float ops per row; only the graph partitioning
+        // differs, so any drift would come from the backend picking a different
+        // GEMM tiling for a narrower matrix.
+        double worst = 0.0;
+        size_t at = 0, nbad = 0;
+        for (size_t i = 0; i < ref.size(); ++i) {
+            const double d = std::fabs((double) got[i] - (double) ref[i]);
+            if (d > worst) { worst = d; at = i; }
+            if (d > 1e-5) ++nbad;
+        }
+        std::printf("  block=%-9s %zu values, %zu over 1e-5, max|d| = %.3g "
+                    "(voxel %zu channel %zu) -> %s\n",
+                    c[0] ? c : "default", ref.size(), nbad, worst,
+                    at / hp.out_channels, at % hp.out_channels, nbad ? "FAIL" : "OK");
+        if (nbad) ++failures;
     }
     trellis2_shape_dec_free(m);
-
-    if (ref.size() != got.size() || rc != gc) {
-        std::printf("SHAPE MISMATCH feats %zu vs %zu, coords %zu vs %zu -> FAIL\n",
-                    ref.size(), got.size(), rc.size(), gc.size());
-        return 1;
-    }
-
-    // Both runs do the same float ops per row; only the graph partitioning
-    // differs, so any drift comes from the backend picking a different GEMM
-    // tiling for a narrower matrix.
-    double worst = 0.0;
-    size_t at = 0, nbad = 0;
-    for (size_t i = 0; i < ref.size(); ++i) {
-        const double d = std::fabs((double) got[i] - (double) ref[i]);
-        if (d > worst) { worst = d; at = i; }
-        if (d > 1e-5) ++nbad;
-    }
-    std::printf("%zu values compared, %zu over 1e-5, max|d| = %.3g at voxel %zu channel %zu -> %s\n",
-                ref.size(), nbad, worst, at / hp.out_channels, at % hp.out_channels,
-                nbad ? "FAIL" : "OK");
-    return nbad ? 1 : 0;
+    return failures ? 1 : 0;
 }
