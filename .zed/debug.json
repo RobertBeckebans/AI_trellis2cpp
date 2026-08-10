@@ -1,0 +1,82 @@
+[
+  {
+    "label": "trellis2: Debug dino_encode (CodeLLDB)",
+    "adapter": "CodeLLDB",
+    "request": "launch",
+    "program": "$ZED_WORKTREE_ROOT\\build\\examples\\Debug\\dino_encode.exe",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "args": [
+      "assets/example_image/example.png",
+      "out.dinodata",
+      "ggufs/dino_f16.gguf"
+    ],
+    "env": {
+      "PATH": "C:\\Program Files\\AMD\\ROCm\\6.4\\bin;${env:PATH}",
+      "_NO_DEBUG_HEAP": "1"
+    }
+  },
+  {
+    "label": "trellis2: Debug ss_sample (CodeLLDB)",
+    "adapter": "CodeLLDB",
+    "request": "launch",
+    "program": "$ZED_WORKTREE_ROOT\\build\\examples\\Debug\\ss_sample.exe",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "args": [
+      "ggufs/ss_flow_f16.gguf",
+      "out.dinodata",
+      "z_s.latent"
+    ],
+    "env": {
+      "PATH": "C:\\Program Files\\AMD\\ROCm\\6.4\\bin;${env:PATH}",
+      "_NO_DEBUG_HEAP": "1"
+    }
+  },
+  {
+    "label": "trellis2: Debug ss_mesh (CodeLLDB)",
+    "adapter": "CodeLLDB",
+    "request": "launch",
+    "program": "$ZED_WORKTREE_ROOT\\build\\examples\\Debug\\ss_mesh.exe",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "args": [
+      "ggufs/ss_dec_f16.gguf",
+      "z_s.latent",
+      "shape.obj",
+      "--normalize"
+    ],
+    "env": {
+      "PATH": "C:\\Program Files\\AMD\\ROCm\\6.4\\bin;${env:PATH}",
+      "_NO_DEBUG_HEAP": "1"
+    }
+  },
+  {
+    "label": "trellis2: Debug ss_decode (CodeLLDB)",
+    "adapter": "CodeLLDB",
+    "request": "launch",
+    "program": "$ZED_WORKTREE_ROOT\\build\\examples\\Debug\\ss_decode.exe",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "args": [
+      "ggufs/ss_dec_f16.gguf",
+      "z_s.latent",
+      "out.occ"
+    ],
+    "env": {
+      "PATH": "C:\\Program Files\\AMD\\ROCm\\6.4\\bin;${env:PATH}",
+      "_NO_DEBUG_HEAP": "1"
+    }
+  },
+  {
+    "label": "trellis2: Debug mesh2glb (CodeLLDB)",
+    "adapter": "CodeLLDB",
+    "request": "launch",
+    "program": "$ZED_WORKTREE_ROOT\\build\\examples\\Debug\\mesh2glb.exe",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "args": [
+      "in.t2mesh",
+      "out.glb"
+    ],
+    "env": {
+      "PATH": "C:\\Program Files\\AMD\\ROCm\\6.4\\bin;${env:PATH}",
+      "_NO_DEBUG_HEAP": "1"
+    }
+  }
+]

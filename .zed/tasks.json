@@ -1,0 +1,191 @@
+[
+  {
+    "label": "trellis2: Configure (Clean, Ninja + clang + HIP, RDNA4)",
+    "command": "cmd.exe",
+    "args": ["/c", "call .\\cmake-ninja-win64-rocm.bat"],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": true
+  },
+  {
+    "label": "trellis2: Configure (Incremental, Ninja + clang + HIP)",
+    "command": "cmake",
+    "args": [
+      "-B", "build",
+      "-G", "Ninja Multi-Config",
+      "-DCMAKE_C_COMPILER=C:/Program Files/AMD/ROCm/6.4/bin/clang.exe",
+      "-DCMAKE_CXX_COMPILER=C:/Program Files/AMD/ROCm/6.4/bin/clang++.exe",
+      "-DGGML_VULKAN=OFF",
+      "-DGGML_HIP=ON",
+      "-DAMDGPU_TARGETS=gfx1201",
+      "-DBUILD_SHARED_LIBS=OFF",
+      "-DTRELLIS2_BUILD_TESTS=ON",
+      "-Dhipblas_DIR=C:/Program Files/AMD/ROCm/6.4/lib/cmake/hipblas",
+      "."
+    ],
+    "env": {
+      "PATH": "C:/Program Files/AMD/ROCm/6.4/bin;${PATH}"
+    },
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": true
+  },
+  {
+    "label": "trellis2: Build Release",
+    "command": "cmake",
+    "args": ["--build", "build", "--config", "Release", "-j", "24"],
+    "env": {
+      "PATH": "C:/Program Files/AMD/ROCm/6.4/bin;${PATH}"
+    },
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": true
+  },
+  {
+    "label": "trellis2: Build Debug",
+    "command": "cmake",
+    "args": ["--build", "build", "--config", "Debug", "-j", "24"],
+    "env": {
+      "PATH": "C:/Program Files/AMD/ROCm/6.4/bin;${PATH}"
+    },
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": true
+  },
+  {
+    "label": "trellis2: Build RelWithDebInfo",
+    "command": "cmake",
+    "args": ["--build", "build", "--config", "RelWithDebInfo", "-j", "24"],
+    "env": {
+      "PATH": "C:/Program Files/AMD/ROCm/6.4/bin;${PATH}"
+    },
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": true
+  },
+  {
+    "label": "trellis2: Clean",
+    "command": "cmake",
+    "args": ["--build", "build", "--target", "clean"],
+    "env": {
+      "PATH": "C:/Program Files/AMD/ROCm/6.4/bin;${PATH}"
+    },
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": true
+  },
+  {
+    "label": "trellis2: Run dino_encode (img -> dinodata)",
+    "command": "build/examples/Release/dino_encode.exe",
+    "args": [
+      "${ZED_FILE:-assets/example_image/example.png}",
+      "out.dinodata",
+      "ggufs/dino_f16.gguf"
+    ],
+    "env": {
+      "PATH": "C:/Program Files/AMD/ROCm/6.4/bin;${PATH}"
+    },
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": true
+  },
+  {
+    "label": "trellis2: Run ss_sample (dinodata -> z_s latent)",
+    "command": "build/examples/Release/ss_sample.exe",
+    "args": [
+      "ggufs/ss_flow_f16.gguf",
+      "out.dinodata",
+      "z_s.latent"
+    ],
+    "env": {
+      "PATH": "C:/Program Files/AMD/ROCm/6.4/bin;${PATH}"
+    },
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": true
+  },
+  {
+    "label": "trellis2: Run ss_mesh (z_s -> OBJ)",
+    "command": "build/examples/Release/ss_mesh.exe",
+    "args": [
+      "ggufs/ss_dec_f16.gguf",
+      "z_s.latent",
+      "shape.obj",
+      "--normalize"
+    ],
+    "env": {
+      "PATH": "C:/Program Files/AMD/ROCm/6.4/bin;${PATH}"
+    },
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": true
+  },
+  {
+    "label": "trellis2: Run mesh2glb (T2MESH -> GLB)",
+    "command": "build/examples/Release/mesh2glb.exe",
+    "args": [
+      "in.t2mesh",
+      "out.glb"
+    ],
+    "env": {
+      "PATH": "C:/Program Files/AMD/ROCm/6.4/bin;${PATH}"
+    },
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": true
+  },
+  {
+    "label": "trellis2: Configure (Clean, Ninja + clang + HIP, RDNA4, SHARED lib)",
+    "command": "cmd.exe",
+    "args": ["/c", "call .\\cmake-ninja-win64-rocm-shared.bat"],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": true
+  },
+  {
+    "label": "trellis2: Build Shared Release (libtrellis2.dll)",
+    "command": "cmake",
+    "args": ["--build", "build-shared", "--config", "Release", "-j", "24"],
+    "env": {
+      "PATH": "C:/Program Files/AMD/ROCm/6.4/bin;${PATH}"
+    },
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": true
+  },
+  {
+    "label": "trellis2: Build Go server",
+    "command": "go",
+    "args": ["build", "-o", "trellis2-server.exe", "."],
+    "cwd": "$ZED_WORKTREE_ROOT/server",
+    "use_new_terminal": true
+  },
+  {
+    "label": "trellis2: Run server (HTTP :8742, full pipeline)",
+    "command": "./trellis2-server.exe",
+    "args": [
+      "-lib", "../build-shared/bin/Release/trellis2.dll",
+      "-ggufs", "../ggufs",
+      "-store", "../generations",
+      "-unload-idle",
+      "-addr", ":8742"
+    ],
+    "env": {
+      "PATH": "C:/Program Files/AMD/ROCm/6.4/bin;../build-shared/bin/Release;${PATH}"
+    },
+    "cwd": "$ZED_WORKTREE_ROOT/server",
+    "use_new_terminal": true
+  },
+  {
+    "label": "trellis2: Run server (coarse-only, no GGUFs needed)",
+    "command": "./trellis2-server.exe",
+    "args": [
+      "-lib", "../build-shared/bin/Release/trellis2.dll",
+      "-ggufs", "../ggufs",
+      "-coarse",
+      "-store", "",
+      "-unload-idle",
+      "-addr", ":8742"
+    ],
+    "env": {
+      "PATH": "C:/Program Files/AMD/ROCm/6.4/bin;../build-shared/bin/Release;${PATH}"
+    },
+    "cwd": "$ZED_WORKTREE_ROOT/server",
+    "use_new_terminal": true
+  },
+  {
+    "label": "trellis2: Download prebuilt GGUFs (bash)",
+    "command": "bash",
+    "args": ["scripts/download_ggufs.sh"],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": true
+  }
+]

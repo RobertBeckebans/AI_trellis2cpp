@@ -35,6 +35,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -727,7 +728,7 @@ type exportOptions struct {
 func parseExportOptions(r *http.Request) exportOptions {
 	o := exportOptions{
 		textureSize:     2048,
-		componentFilter: 2, // safe default: preserve every connected component
+		componentFilter: 2,          // safe default: preserve every connected component
 		alphaRatio:      0.005,      // detail size: 0.5% of the bbox diagonal
 		offsetRatio:     0.005 / 30, // shell standoff ~alpha/30 (CGAL guideline)
 	}
@@ -1005,7 +1006,11 @@ func formFloat(r *http.Request, key string, def float32) float32 {
 }
 
 func main() {
-	libPath := flag.String("lib", "../build-shared/libtrellis2.so", "path to libtrellis2.so")
+	libDefault := "../build-shared/libtrellis2.so"
+	if runtime.GOOS == "windows" {
+		libDefault = "../build-shared/bin/Release/trellis2.dll"
+	}
+	libPath := flag.String("lib", libDefault, "path to libtrellis2 shared library (.so / .dll)")
 	ggufDir := flag.String("ggufs", "../ggufs", "directory with the model ggufs")
 	dino := flag.String("dino", "", "dino gguf (default <ggufs>/dino_f16.gguf)")
 	flow := flag.String("flow", "", "ss_flow gguf (default <ggufs>/ss_flow_f16.gguf)")

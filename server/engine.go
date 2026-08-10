@@ -1,8 +1,12 @@
 package main
 
-// engine.go — in-process FFI to libtrellis2.so via purego (no cgo), following
-// the depth-anything.cpp server pattern. The C ABI is trellis2_capi.h; the
-// t2_abi_version binding guards against header/library drift.
+// engine.go — in-process FFI to libtrellis2 (libtrellis2.so on Linux/macOS,
+// libtrellis2.dll on Windows) via purego (no cgo), following the depth-anything.cpp
+// server pattern. The C ABI is trellis2_capi.h; the t2_abi_version binding
+// guards against header/library drift.
+//
+// The platform-specific library handle is acquired in engine_lib_{unix,windows}.go
+// (build-tagged) — purego.Dlopen on Unix, syscall.LoadLibrary on Windows.
 
 import (
 	"fmt"
@@ -131,9 +135,9 @@ var (
 // disable the 1024 cascade (512 fine only).
 func newEngine(libPath, dinoGGUF, flowGGUF, decGGUF, slatGGUF, slatHRGGUF, shapeDecGGUF,
 	shapeEncGGUF, texDecGGUF, texFlowGGUF, texFlowHRGGUF string, startUnloaded bool) (*engine, error) {
-	lib, err := purego.Dlopen(libPath, purego.RTLD_NOW|purego.RTLD_GLOBAL)
+	lib, err := openLib(libPath)
 	if err != nil {
-		return nil, fmt.Errorf("dlopen %s: %w", libPath, err)
+		return nil, fmt.Errorf("load library %s: %w", libPath, err)
 	}
 
 	e := &engine{models: engineModels{

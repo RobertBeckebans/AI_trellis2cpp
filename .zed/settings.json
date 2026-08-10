@@ -1,0 +1,17 @@
+{
+  "lsp": {
+    "clangd": {
+      "binary": {
+        "path": "clangd",
+        "arguments": [
+          "--fallback-style=llvm",
+          "--background-index",
+          "--clang-tidy",
+          "--header-insertion=never",
+          "--pch-storage=memory",
+          "--query-driver=C:/Program Files/AMD/ROCm/6.4/bin/clang++.exe"
+        ]
+      }
+    }
+  }
+}
