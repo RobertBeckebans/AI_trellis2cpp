@@ -10,8 +10,16 @@
 // with identical inputs, and reports the FIRST row where they diverge. If the
 // hypothesis holds, exactly one op reports first_bad_row = 2097152.
 //
+// The ceilings are not going to be fixed here, so failing merely because the
+// backend is broken would leave a permanently red test. What this guards instead
+// is the assumption the workaround rests on: trellis2.cpp's mul_mat_max_rows()
+// hard-codes these numbers to decide where the decoder has to split. A ceiling
+// that moved would silently invalidate that, so a *different* break row fails
+// while the known one passes. A backend that stopped breaking also passes — the
+// split just becomes unnecessarily conservative.
+//
 // Usage: test_large_rows [L]        (default 2200000, just above 2^21)
-// Exit:  0 all ops agree, 1 a divergence was found, 77 no GPU backend.
+// Exit:  0 as expected, 1 an assumption broke, 77 no GPU backend.
 
 #include "ggml.h"
 #include "ggml-alloc.h"
@@ -30,21 +38,33 @@ namespace {
 // Channels of the finest shape-decoder level (hp.channels[4]).
 const int C = 64;
 
-enum op_id { OP_GET_ROWS, OP_MUL_MASK, OP_MUL_MAT, OP_MUL_MAT_F16, OP_ADD, OP_NORM, OP_SILU,
-             OP_REPEAT, OP_COUNT };
+enum op_id { OP_GET_ROWS, OP_MUL_MASK, OP_MUL_MAT, OP_MUL_MAT_F16, OP_MUL_MAT_BF16,
+             OP_ADD, OP_NORM, OP_SILU, OP_REPEAT, OP_COUNT };
 
 const char * op_name(int op) {
     switch (op) {
-        case OP_GET_ROWS:    return "get_rows";
-        case OP_MUL_MASK:    return "mul(mask bcast)";
-        case OP_MUL_MAT:     return "mul_mat f32";
-        case OP_MUL_MAT_F16: return "mul_mat f16";   // what the shipped GGUF actually uses
-        case OP_ADD:         return "add";
-        case OP_NORM:        return "norm";
-        case OP_SILU:        return "silu";
-        case OP_REPEAT:      return "repeat";
+        case OP_GET_ROWS:     return "get_rows";
+        case OP_MUL_MASK:     return "mul(mask bcast)";
+        case OP_MUL_MAT:      return "mul_mat f32";
+        case OP_MUL_MAT_F16:  return "mul_mat f16";   // what the shipped GGUF actually uses
+        case OP_MUL_MAT_BF16: return "mul_mat bf16";  // decides what the fix may assume for bf16
+        case OP_ADD:          return "add";
+        case OP_NORM:         return "norm";
+        case OP_SILU:         return "silu";
+        case OP_REPEAT:       return "repeat";
     }
     return "?";
+}
+
+// The row where this op is known to start dropping output, mirroring
+// mul_mat_max_rows() in trellis2.cpp. 0 means "must never diverge".
+int64_t expected_break(int op) {
+    switch (op) {
+        case OP_MUL_MAT:      return (int64_t) 1 << 19;
+        case OP_MUL_MAT_F16:
+        case OP_MUL_MAT_BF16: return (int64_t) 1 << 21;
+        default:              return 0;
+    }
 }
 
 // Data movement must match bit-exactly; arithmetic may legitimately differ in
@@ -52,7 +72,8 @@ const char * op_name(int op) {
 double op_tol(int op) {
     switch (op) {
         case OP_MUL_MAT:
-        case OP_MUL_MAT_F16: return 1e-2;   // f16 weights carry ~1e-3 of their own
+        case OP_MUL_MAT_F16:  return 1e-2;   // f16 weights carry ~1e-3 of their own
+        case OP_MUL_MAT_BF16: return 1e-1;   // bf16 has 8 mantissa bits, so much coarser
         case OP_NORM:
         case OP_SILU:        return 1e-4;
         default:             return 0.0;    // get_rows / mul / add / repeat
@@ -109,6 +130,11 @@ bool run_op(ggml_backend_t backend, int op, int64_t L,
                 ggml_set_input(w);
                 y = ggml_mul_mat(ctx, w, x);
                 break;
+            case OP_MUL_MAT_BF16:
+                w = ggml_new_tensor_2d(ctx, GGML_TYPE_BF16, C, C);
+                ggml_set_input(w);
+                y = ggml_mul_mat(ctx, w, x);
+                break;
             case OP_ADD:
                 y = ggml_add(ctx, x, x);
                 break;
@@ -138,6 +164,10 @@ bool run_op(ggml_backend_t backend, int op, int64_t L,
         std::vector<ggml_fp16_t> wf16((size_t) C * C);
         ggml_fp32_to_fp16_row(wdata.data(), wf16.data(), (int64_t) C * C);
         ggml_backend_tensor_set(w, wf16.data(), 0, ggml_nbytes(w));
+    } else if (w && w->type == GGML_TYPE_BF16) {
+        std::vector<ggml_bf16_t> wbf16((size_t) C * C);
+        ggml_fp32_to_bf16_row(wdata.data(), wbf16.data(), (int64_t) C * C);
+        ggml_backend_tensor_set(w, wbf16.data(), 0, ggml_nbytes(w));
     } else if (w) {
         ggml_backend_tensor_set(w, wdata.data(), 0, ggml_nbytes(w));
     }
@@ -216,24 +246,36 @@ int main(int argc, char ** argv) {
                 if (first_bad < 0) first_bad = (int64_t) i;
             }
         }
+        const int64_t bad_row  = first_bad < 0 ? -1 : first_bad / row;
+        const int64_t expected = expected_break(op);
+
         if (first_bad < 0) {
-            std::printf("  %-16s OK        (max|d| = %.3g, tol %g)\n", op_name(op), worst, tol);
-        } else {
-            const int64_t bad_row = first_bad / row;
-            // Powers of two are the interesting ones: they point at a 32-bit
-            // index wrapping rather than at accumulated numerical drift.
-            const bool pow2 = bad_row > 0 && (bad_row & (bad_row - 1)) == 0;
-            char note[64] = "";
-            if (pow2) {
-                int e = 0; for (int64_t v = bad_row; v > 1; v >>= 1) ++e;
-                std::snprintf(note, sizeof(note), "  == 2^%d <<<", e);
+            if (expected && L > expected) {
+                std::printf("  %-16s NO BREAK  expected one at row %" PRId64 " -- backend appears "
+                            "fixed, the decoder's split is now conservative\n",
+                            op_name(op), expected);
+            } else {
+                std::printf("  %-16s OK        (max|d| = %.3g, tol %g)\n", op_name(op), worst, tol);
             }
-            std::printf("  %-16s DIVERGES  first bad row %" PRId64 "%s  (%" PRId64 "/%zu bad, "
-                        "max|d| = %.3g)\n",
-                        op_name(op), bad_row, note, nbad, g.size(), worst);
-            std::printf("  %-16s   at elem %" PRId64 ": gpu=%.6g cpu=%.6g   next: gpu=%.6g cpu=%.6g\n",
-                        "", first_bad, (double) g[(size_t) first_bad], (double) c[(size_t) first_bad],
-                        (double) g[(size_t) first_bad + 1], (double) c[(size_t) first_bad + 1]);
+            continue;
+        }
+
+        // Powers of two are the interesting ones: they point at a 32-bit index
+        // wrapping rather than at accumulated numerical drift.
+        char note[64] = "";
+        if ((bad_row & (bad_row - 1)) == 0 && bad_row > 0) {
+            int e = 0; for (int64_t v = bad_row; v > 1; v >>= 1) ++e;
+            std::snprintf(note, sizeof(note), " == 2^%d", e);
+        }
+        const bool as_expected = bad_row == expected;
+        std::printf("  %-16s %s  first bad row %" PRId64 "%s  (%" PRId64 "/%zu bad, max|d| = %.3g)\n",
+                    op_name(op), as_expected ? "KNOWN   " : "CHANGED!",
+                    bad_row, note, nbad, g.size(), worst);
+        if (!as_expected) {
+            std::printf("  %-16s   expected %" PRId64 " (mul_mat_max_rows in trellis2.cpp assumes "
+                        "this) -- at elem %" PRId64 ": gpu=%.6g cpu=%.6g\n",
+                        "", expected, first_bad,
+                        (double) g[(size_t) first_bad], (double) c[(size_t) first_bad]);
             ++failures;
         }
     }

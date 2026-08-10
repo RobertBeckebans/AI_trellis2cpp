@@ -14,6 +14,8 @@
 // T2GLB_XATLAS to opt into a conventional image atlas on clean meshes. No ggml /
 // CUDA dependency: plain float/int arrays.
 
+#include "trellis2.h"   // TRELLIS2_API
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -42,7 +44,7 @@ struct PreparedMesh {
     std::vector<float>   pbr;
 };
 
-bool prepare_mesh(const float * verts, int nv,
+TRELLIS2_API bool prepare_mesh(const float * verts, int nv,
                   const int32_t * tris, int nt,
                   const float * pbr,
                   const MeshExportOptions & opt,
@@ -55,8 +57,8 @@ bool prepare_mesh(const float * verts, int nv,
 // 2-manifold. Wrapping creates a new enclosing surface, so a textured source is
 // sampled onto the wrap vertices (approximate per-vertex preview); the sharper
 // per-texel rebake stays in mesh_to_projected_glb for the GLB download.
-bool print_remesh_available();
-bool prepare_print_mesh(const float * verts, int nv,
+TRELLIS2_API bool print_remesh_available();
+TRELLIS2_API bool prepare_print_mesh(const float * verts, int nv,
                         const int32_t * tris, int nt,
                         const float * pbr,
                         const MeshExportOptions & opt,
@@ -74,7 +76,7 @@ bool prepare_print_mesh(const float * verts, int nv,
 // On success fills `out` with the GLB bytes and returns true. On failure returns
 // false with a message in `err`. Not reentrant (Simplify.h uses global state):
 // serialized internally by a mutex.
-bool mesh_to_glb(const float * verts, int nv,
+TRELLIS2_API bool mesh_to_glb(const float * verts, int nv,
                  const int32_t * tris, int nt,
                  const float * pbr,
                  const MeshExportOptions & opt,
@@ -85,7 +87,7 @@ bool mesh_to_glb(const float * verts, int nv,
 // the closest triangle of the dense PBR `source`.  Intended for assigning the
 // generated material to Alpha Wrap geometry; always uses xatlas and the CGAL
 // CPU closest-surface backend regardless of T2GLB_XATLAS.
-bool mesh_to_projected_glb(const float * target_verts, int target_nv,
+TRELLIS2_API bool mesh_to_projected_glb(const float * target_verts, int target_nv,
                            const int32_t * target_tris, int target_nt,
                            const float * source_verts, int source_nv,
                            const int32_t * source_tris, int source_nt,

@@ -15,6 +15,7 @@ The ceiling depends on the *weight* (`src0`) type:
 | `src0` type | last column written |
 |-------------|---------------------|
 | f16         | 2^21 = 2 097 152    |
+| bf16        | 2^21 = 2 097 152    |
 | f32         | 2^19 = 524 288      |
 
 It is a fixed threshold, not a fraction of the matrix: a matmul with exactly
@@ -28,7 +29,7 @@ row of output.
   to this shape rather than universal.
 - NVIDIA/CUDA was not tested at all. The title says ROCm/HIP because that is
   where it was observed, not because CUDA was checked and found healthy.
-- bf16 `src0` was not tested; only f16 and f32.
+- Quantized `src0` types were not tested; they take a different kernel path.
 
 ## Environment
 
@@ -48,7 +49,7 @@ y = ggml_mul_mat(ctx, w /* [64, 64] */, x /* [64, L] */);   // -> [64, L]
 
 With `L = 2 200 000` and f16 `w`, GPU and CPU agree exactly up to output row
 2 097 151 and then diverge; on the GPU every value from row 2 097 152 on is `0`.
-With f32 `w` the same happens from row 524 288.
+bf16 `w` behaves identically. With f32 `w` the same happens from row 524 288.
 
 For contrast, in the same harness `get_rows`, `mul` (with a broadcast mask),
 `add`, `norm`, `silu` and `repeat` all agree over the full 2.2M rows, so the
@@ -65,6 +66,7 @@ tree unchanged.
   mul(mask bcast)  OK        (max|d| = 0, tol 0)
   mul_mat f32      DIVERGES  first bad row 524288  == 2^19 <<<
   mul_mat f16      DIVERGES  first bad row 2097152  == 2^21 <<<
+  mul_mat bf16     DIVERGES  first bad row 2097152  == 2^21 <<<
   add              OK        (max|d| = 0, tol 0)
   norm             OK        (max|d| = 7.15e-07, tol 0.0001)
   silu             OK        (max|d| = 5.96e-08, tol 0.0001)

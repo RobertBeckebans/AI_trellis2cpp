@@ -2596,12 +2596,14 @@ void build_neighbor_indices(const std::vector<int32_t> & coords, int L,
 // reports GGML_STATUS_SUCCESS. That is what broke the 1024^3 cascade: its finest
 // level carries ~2.9M voxels, so every voxel past 2^21 came out of conv() as the
 // bias alone (a dead accumulator plus b), the dual grid found no edge crossings
-// there, and the mesh lost every face in that slab. Keep every graph well under
-// both thresholds; TRELLIS2_CHUNK_ROWS forces a smaller block for testing.
-// How many columns one mul_mat survives, by weight type: f16 weights reach 2^21,
-// f32 only 2^19 (the GEMM tiles the column dimension differently per type).
-// Quantized weights take a third path and are unmeasured, so assume the stricter
-// bound. This is a ceiling on what a single graph can compute, not a target.
+// there, and the mesh lost every face in that slab. The two functions below keep
+// every graph clear of that cliff.
+
+// How many columns one mul_mat survives, by weight type: f16 and bf16 both reach
+// 2^21, f32 only 2^19 (the GEMM tiles the column dimension differently per type).
+// All three are measured by tests/test_large_rows. Quantized weights take yet
+// another kernel path and are not, so they get the stricter bound. This is a
+// ceiling on what a single graph can compute, not a target.
 static int64_t mul_mat_max_rows(ggml_type wt) {
     return (wt == GGML_TYPE_F16 || wt == GGML_TYPE_BF16) ? (int64_t) 1 << 21
                                                          : (int64_t) 1 << 19;
