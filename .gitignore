@@ -59,3 +59,5 @@ __pycache__/
 /generations/
 slow-unit-*
 assets/
+data_toolkit/
+*.log

@@ -65,6 +65,12 @@ add_executable(test_mesh_export test_mesh_export.cpp)
 target_link_libraries(test_mesh_export PRIVATE trellis2)
 target_compile_features(test_mesh_export PRIVATE cxx_std_14)
 
+# GPU-vs-CPU agreement of the finest decoder level's ops past 2^21 rows, where
+# the 1024^3 cascade's output turns to garbage on ROCm/HIP. No model assets.
+add_executable(test_large_rows test_large_rows.cpp)
+target_link_libraries(test_large_rows PRIVATE trellis2)
+target_compile_features(test_large_rows PRIVATE cxx_std_14)
+
 if(TRELLIS2_HAVE_CGAL)
     add_executable(test_print_remesh test_print_remesh.cpp)
     target_link_libraries(test_print_remesh PRIVATE trellis2)
@@ -93,6 +99,10 @@ if(TRELLIS2_HAVE_CGAL)
     add_test(NAME print_remesh COMMAND test_print_remesh)
 endif()
 add_test(NAME background_removal COMMAND test_background_removal)
+
+# Skips (77) when no GPU backend is compiled in; slow because it moves ~1 GB.
+add_test(NAME large_rows COMMAND test_large_rows)
+set_tests_properties(large_rows PROPERTIES SKIP_RETURN_CODE 77 LABELS "gpu;slow")
 
 add_test(NAME preprocess COMMAND test_preprocess
          "${T2_DUMPS}/fixture_rgba.png" "${T2_DUMPS}/fixture_512.png")
