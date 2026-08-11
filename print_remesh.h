@@ -4,13 +4,14 @@
 // soup into a closed solid.  The public wrapper stays dependency-free: builds
 // without CGAL compile the same API and report the feature as unavailable.
 
-#include "trellis2.h"   // TRELLIS2_API
+#include "trellis2.h" // TRELLIS2_API
 
 #include <cstdint>
 #include <string>
 #include <vector>
 
-namespace t2print {
+namespace t2print
+{
 
 TRELLIS2_API bool available();
 
@@ -19,25 +20,25 @@ TRELLIS2_API bool available();
 // and cavities the wrap can enter; offset controls how tightly it encloses the
 // source.  Alpha Wrap creates an entirely new surface, so material transfer is
 // a separate closest-surface projection step (project_pbr below).
-TRELLIS2_API bool alpha_wrap(const std::vector<float> & source_verts,
-                const std::vector<int32_t> & source_tris,
-                float alpha_ratio,
-                float offset_ratio,
-                std::vector<float> & out_verts,
-                std::vector<float> & out_normals,
-                std::vector<int32_t> & out_tris,
-                std::string & err);
+TRELLIS2_API bool alpha_wrap( const std::vector<float>& source_verts,
+	const std::vector<int32_t>&							source_tris,
+	float												alpha_ratio,
+	float												offset_ratio,
+	std::vector<float>&									out_verts,
+	std::vector<float>&									out_normals,
+	std::vector<int32_t>&								out_tris,
+	std::string&										err );
 
 // Project query points onto the closest source triangles and barycentrically
 // interpolate their six-channel per-vertex PBR values.  This is the portable
 // CPU counterpart of upstream's cuBVH texture reprojection.  Query/output order
 // is preserved; query_points contains xyz triples and out_pbr receives six
 // floats per query.
-TRELLIS2_API bool project_pbr(const std::vector<float> & source_verts,
-                 const std::vector<int32_t> & source_tris,
-                 const std::vector<float> & source_pbr,
-                 const std::vector<float> & query_points,
-                 std::vector<float> & out_pbr,
-                 std::string & err);
+TRELLIS2_API bool project_pbr( const std::vector<float>& source_verts,
+	const std::vector<int32_t>&							 source_tris,
+	const std::vector<float>&							 source_pbr,
+	const std::vector<float>&							 query_points,
+	std::vector<float>&									 out_pbr,
+	std::string&										 err );
 
 } // namespace t2print

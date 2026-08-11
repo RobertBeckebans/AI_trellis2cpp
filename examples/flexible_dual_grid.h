@@ -21,107 +21,120 @@
 #include <unordered_set>
 #include <vector>
 
-namespace fdg {
+namespace fdg
+{
 
 struct Mesh {
-    std::vector<float> verts;  // 3 per vertex
-    std::vector<int>   tris;   // 3 indices per triangle
-    size_t n_verts() const { return verts.size() / 3; }
-    size_t n_tris()  const { return tris.size() / 3; }
+	std::vector<float> verts; // 3 per vertex
+	std::vector<int>   tris;  // 3 indices per triangle
+	size_t			   n_verts() const { return verts.size() / 3; }
+	size_t			   n_tris() const { return tris.size() / 3; }
 };
 
-namespace detail {
+namespace detail
+{
 
-inline uint64_t key(int32_t x, int32_t y, int32_t z) {
-    return ((uint64_t) (uint32_t) x << 40) |
-           ((uint64_t) (uint32_t) y << 20) |
-           (uint64_t) (uint32_t) z;
-}
+	inline uint64_t key( int32_t x, int32_t y, int32_t z )
+	{
+		return ( ( uint64_t )( uint32_t )x << 40 ) | ( ( uint64_t )( uint32_t )y << 20 ) | ( uint64_t )( uint32_t )z;
+	}
 
-// The 4 neighbor-voxel offsets around an edge, per axis (matches
-// edge_neighbor_voxel_offset in the reference).
-static const int EDGE_OFF[3][4][3] = {
-    {{0,0,0},{0,0,1},{0,1,1},{0,1,0}},   // x-axis edge
-    {{0,0,0},{1,0,0},{1,0,1},{0,0,1}},   // y-axis edge
-    {{0,0,0},{0,1,0},{1,1,0},{1,0,0}},   // z-axis edge
-};
+	// The 4 neighbor-voxel offsets around an edge, per axis (matches
+	// edge_neighbor_voxel_offset in the reference).
+	static const int EDGE_OFF[3][4][3] = {
+		{ { 0, 0, 0 }, { 0, 0, 1 }, { 0, 1, 1 }, { 0, 1, 0 } }, // x-axis edge
+		{ { 0, 0, 0 }, { 1, 0, 0 }, { 1, 0, 1 }, { 0, 0, 1 } }, // y-axis edge
+		{ { 0, 0, 0 }, { 0, 1, 0 }, { 1, 1, 0 }, { 1, 0, 0 } }, // z-axis edge
+	};
 
-inline void cross(const float * a, const float * b, float * o) {
-    o[0] = a[1]*b[2] - a[2]*b[1];
-    o[1] = a[2]*b[0] - a[0]*b[2];
-    o[2] = a[0]*b[1] - a[1]*b[0];
-}
+	inline void cross( const float* a, const float* b, float* o )
+	{
+		o[0] = a[1] * b[2] - a[2] * b[1];
+		o[1] = a[2] * b[0] - a[0] * b[2];
+		o[2] = a[0] * b[1] - a[1] * b[0];
+	}
 
 } // namespace detail
 
 // feats: [n_voxels * 7], voxel-major (dec output). coords: [n_voxels * 3].
 // grid_size = input_res * decoder upscale (e.g. 32 * 16 = 512). margin 0.5.
-inline Mesh extract(const float * feats, const int32_t * coords, int n,
-                    int grid_size, float margin = 0.5f) {
-    using namespace detail;
-    Mesh m;
-    if (n <= 0) return m;
+inline Mesh extract( const float* feats, const int32_t* coords, int n, int grid_size, float margin = 0.5f )
+{
+	using namespace detail;
+	Mesh m;
+	if( n <= 0 ) return m;
 
-    const float vs = 1.0f / (float) grid_size;   // voxel size (aabb span 1)
-    const float aabb0 = -0.5f;
+	const float						  vs	= 1.0f / ( float )grid_size; // voxel size (aabb span 1)
+	const float						  aabb0 = -0.5f;
 
-    // dual vertices + hashmap
-    std::vector<float> V((size_t) n * 3);
-    std::unordered_map<uint64_t, int> idx;
-    idx.reserve((size_t) n * 2);
-    for (int v = 0; v < n; ++v) {
-        const float * f = feats + (size_t) v * 7;
-        for (int a = 0; a < 3; ++a) {
-            const float s = 1.0f / (1.0f + std::exp(-f[a]));          // sigmoid
-            const float off = (1.0f + 2.0f * margin) * s - margin;
-            V[(size_t) v * 3 + a] = ((float) coords[(size_t) v * 3 + a] + off) * vs + aabb0;
-        }
-        idx[key(coords[(size_t) v * 3], coords[(size_t) v * 3 + 1], coords[(size_t) v * 3 + 2])] = v;
-    }
-    m.verts = V;
+	// dual vertices + hashmap
+	std::vector<float>				  V( ( size_t )n * 3 );
+	std::unordered_map<uint64_t, int> idx;
+	idx.reserve( ( size_t )n * 2 );
+	for( int v = 0; v < n; ++v ) {
+		const float* f = feats + ( size_t )v * 7;
+		for( int a = 0; a < 3; ++a ) {
+			const float s		   = 1.0f / ( 1.0f + std::exp( -f[a] ) ); // sigmoid
+			const float off		   = ( 1.0f + 2.0f * margin ) * s - margin;
+			V[( size_t )v * 3 + a] = ( ( float )coords[( size_t )v * 3 + a] + off ) * vs + aabb0;
+		}
+		idx[key( coords[( size_t )v * 3], coords[( size_t )v * 3 + 1], coords[( size_t )v * 3 + 2] )] = v;
+	}
+	m.verts = V;
 
-    // quads from intersected edges
-    for (int v = 0; v < n; ++v) {
-        const float * f = feats + (size_t) v * 7;
-        const int32_t cx = coords[(size_t) v * 3];
-        const int32_t cy = coords[(size_t) v * 3 + 1];
-        const int32_t cz = coords[(size_t) v * 3 + 2];
-        for (int axis = 0; axis < 3; ++axis) {
-            if (f[3 + axis] <= 0.0f) continue;   // not intersected on this axis
-            int q[4];
-            bool ok = true;
-            for (int i = 0; i < 4; ++i) {
-                const int32_t nx = cx + EDGE_OFF[axis][i][0];
-                const int32_t ny = cy + EDGE_OFF[axis][i][1];
-                const int32_t nz = cz + EDGE_OFF[axis][i][2];
-                auto it = idx.find(key(nx, ny, nz));
-                if (it == idx.end()) { ok = false; break; }
-                q[i] = it->second;
-            }
-            if (!ok) continue;
+	// quads from intersected edges
+	for( int v = 0; v < n; ++v ) {
+		const float*  f	 = feats + ( size_t )v * 7;
+		const int32_t cx = coords[( size_t )v * 3];
+		const int32_t cy = coords[( size_t )v * 3 + 1];
+		const int32_t cz = coords[( size_t )v * 3 + 2];
+		for( int axis = 0; axis < 3; ++axis ) {
+			if( f[3 + axis] <= 0.0f ) continue; // not intersected on this axis
+			int	 q[4];
+			bool ok = true;
+			for( int i = 0; i < 4; ++i ) {
+				const int32_t nx = cx + EDGE_OFF[axis][i][0];
+				const int32_t ny = cy + EDGE_OFF[axis][i][1];
+				const int32_t nz = cz + EDGE_OFF[axis][i][2];
+				auto		  it = idx.find( key( nx, ny, nz ) );
+				if( it == idx.end() ) {
+					ok = false;
+					break;
+				}
+				q[i] = it->second;
+			}
+			if( !ok ) continue;
 
-            // Choose the quad diagonal by the decoder's learned split_weight
-            // (softplus of feat[6]), exactly as the reference eval path does
-            // (FlexiDualGridVaeDecoder -> flexible_dual_grid_to_mesh, train=False):
-            //   split 1: (0,1,2)+(0,2,3)   when sw0*sw2 >  sw1*sw3
-            //   split 2: (0,1,3)+(3,1,2)   otherwise
-            // (A geometric best-aligned-normals heuristic is the reference's
-            // split_weight=None fallback; the shipped decoder always emits
-            // feat[6], so we follow the learned choice.)
-            auto sw = [&](int i) {
-                const float x = feats[(size_t) q[i] * 7 + 6];
-                return x > 20.0f ? x : std::log1p(std::exp(x));   // softplus
-            };
-            if (sw(0) * sw(2) > sw(1) * sw(3)) {
-                m.tris.push_back(q[0]); m.tris.push_back(q[1]); m.tris.push_back(q[2]);
-                m.tris.push_back(q[0]); m.tris.push_back(q[2]); m.tris.push_back(q[3]);
-            } else {
-                m.tris.push_back(q[0]); m.tris.push_back(q[1]); m.tris.push_back(q[3]);
-                m.tris.push_back(q[3]); m.tris.push_back(q[1]); m.tris.push_back(q[2]);
-            }
-        }
-    }
-    return m;
+			// Choose the quad diagonal by the decoder's learned split_weight
+			// (softplus of feat[6]), exactly as the reference eval path does
+			// (FlexiDualGridVaeDecoder -> flexible_dual_grid_to_mesh, train=False):
+			//   split 1: (0,1,2)+(0,2,3)   when sw0*sw2 >  sw1*sw3
+			//   split 2: (0,1,3)+(3,1,2)   otherwise
+			// (A geometric best-aligned-normals heuristic is the reference's
+			// split_weight=None fallback; the shipped decoder always emits
+			// feat[6], so we follow the learned choice.)
+			auto sw = [&]( int i ) {
+				const float x = feats[( size_t )q[i] * 7 + 6];
+				return x > 20.0f ? x : std::log1p( std::exp( x ) ); // softplus
+			};
+			if( sw( 0 ) * sw( 2 ) > sw( 1 ) * sw( 3 ) ) {
+				m.tris.push_back( q[0] );
+				m.tris.push_back( q[1] );
+				m.tris.push_back( q[2] );
+				m.tris.push_back( q[0] );
+				m.tris.push_back( q[2] );
+				m.tris.push_back( q[3] );
+			} else {
+				m.tris.push_back( q[0] );
+				m.tris.push_back( q[1] );
+				m.tris.push_back( q[3] );
+				m.tris.push_back( q[3] );
+				m.tris.push_back( q[1] );
+				m.tris.push_back( q[2] );
+			}
+		}
+	}
+	return m;
 }
 
 // Per-vertex shading normals for the dual grid's *unoriented*, heavily
@@ -148,95 +161,131 @@ inline Mesh extract(const float * feats, const int32_t * coords, int n,
 // smoothness matters, not a globally correct outward sign. (Winding unification
 // and sign diffusion were both tried and are worse on this mesh: 2-colouring the
 // >2-face non-manifold edges frustrates more, and Jacobi diffusion checkerboards.)
-inline std::vector<float> vertex_normals(const Mesh & m) {
-    const size_t nv = m.n_verts();
-    std::vector<double> A((size_t) nv * 6, 0.0);   // sym structure tensor per vertex
-    std::vector<float>  seed((size_t) nv * 3, 0.0f); // signed area sum: a sign hint
-    for (size_t t = 0; t < m.tris.size(); t += 3) {
-        const int i0 = m.tris[t], i1 = m.tris[t + 1], i2 = m.tris[t + 2];
-        const float * a = &m.verts[(size_t) i0 * 3];
-        const float * b = &m.verts[(size_t) i1 * 3];
-        const float * c = &m.verts[(size_t) i2 * 3];
-        float e1[3], e2[3], fn[3];
-        for (int k = 0; k < 3; ++k) { e1[k] = b[k]-a[k]; e2[k] = c[k]-a[k]; }
-        detail::cross(e1, e2, fn);
-        const double area = std::sqrt((double) fn[0]*fn[0] + (double) fn[1]*fn[1] + (double) fn[2]*fn[2]);
-        if (area <= 1e-20) continue;
-        const double inv = 1.0 / area;
-        const double xx = fn[0]*fn[0]*inv, yy = fn[1]*fn[1]*inv, zz = fn[2]*fn[2]*inv;
-        const double xy = fn[0]*fn[1]*inv, xz = fn[0]*fn[2]*inv, yz = fn[1]*fn[2]*inv;
-        for (int i : {i0, i1, i2}) {
-            double * Av = &A[(size_t) i * 6];
-            Av[0]+=xx; Av[1]+=yy; Av[2]+=zz; Av[3]+=xy; Av[4]+=xz; Av[5]+=yz;
-            float * sv = &seed[(size_t) i * 3];
-            sv[0]+=fn[0]; sv[1]+=fn[1]; sv[2]+=fn[2];
-        }
-    }
-    // (1) smooth, sign-ambiguous direction per vertex
-    std::vector<float> dir((size_t) nv * 3, 0.0f);
-    for (size_t v = 0; v < nv; ++v) {
-        const double * Av = &A[v * 6];
-        double x = seed[v*3], y = seed[v*3+1], z = seed[v*3+2];
-        double l = std::sqrt(x*x + y*y + z*z);
-        if (l < 1e-20) { x = Av[0]; y = Av[3]; z = Av[4]; l = std::sqrt(x*x+y*y+z*z); }
-        if (l < 1e-20) { dir[v*3+2] = 1.0f; continue; }
-        x/=l; y/=l; z/=l;
-        for (int it = 0; it < 8; ++it) {
-            const double nx = Av[0]*x + Av[3]*y + Av[4]*z;
-            const double ny = Av[3]*x + Av[1]*y + Av[5]*z;
-            const double nz = Av[4]*x + Av[5]*y + Av[2]*z;
-            const double nl = std::sqrt(nx*nx + ny*ny + nz*nz);
-            if (nl < 1e-20) break;
-            x = nx/nl; y = ny/nl; z = nz/nl;
-        }
-        dir[v*3] = (float) x; dir[v*3+1] = (float) y; dir[v*3+2] = (float) z;
-    }
-    // (2) Resolve the arbitrary per-vertex sign *consistently* via a parity
-    //     union-find over mesh edges: two edge-adjacent vertices whose directions
-    //     are anti-aligned must end up with opposite signs (and vice versa), so
-    //     within each connected component neighbours share a hemisphere. Only
-    //     genuinely frustrated (odd-cycle / non-manifold) edges are left flipped.
-    std::vector<int>     ufp(nv), ufr(nv, 0);
-    std::vector<uint8_t> ufb(nv, 0);   // parity of a vertex relative to its parent
-    for (size_t i = 0; i < nv; ++i) ufp[i] = (int) i;
-    auto find = [&](int v, int & parity) {
-        int p = 0;
-        while (ufp[v] != v) { p ^= ufb[v]; v = ufp[v]; }
-        parity = p; return v;
-    };
-    auto join = [&](int a, int b) {
-        const float * na = &dir[(size_t) a * 3];
-        const float * nb = &dir[(size_t) b * 3];
-        const int rel = (na[0]*nb[0] + na[1]*nb[1] + na[2]*nb[2]) < 0.0f ? 1 : 0;
-        int pa, pb, ra = find(a, pa), rb = find(b, pb);
-        if (ra == rb) return;
-        if (ufr[ra] < ufr[rb]) { std::swap(ra, rb); std::swap(pa, pb); }
-        ufp[rb] = ra; ufb[rb] = (uint8_t) (pa ^ pb ^ rel);
-        if (ufr[ra] == ufr[rb]) ufr[ra]++;
-    };
-    for (size_t t = 0; t < m.tris.size(); t += 3) {
-        const int a = m.tris[t], b = m.tris[t+1], c = m.tris[t+2];
-        join(a, b); join(b, c); join(c, a);
-    }
-    // (3) pick each component's global sign toward the signed-sum seed (so the
-    //     result is deterministic and roughly outward), then emit oriented normals
-    std::unordered_map<int, double> comp_sign;
-    for (size_t v = 0; v < nv; ++v) {
-        int p, r = find((int) v, p);
-        const double s = p ? -1.0 : 1.0;
-        const float * sv = &seed[v*3];
-        comp_sign[r] += s * (dir[v*3]*sv[0] + dir[v*3+1]*sv[1] + dir[v*3+2]*sv[2]);
-    }
-    std::vector<float> nrm((size_t) nv * 3, 0.0f);
-    for (size_t v = 0; v < nv; ++v) {
-        int p, r = find((int) v, p);
-        double s = p ? -1.0 : 1.0;
-        if (comp_sign[r] < 0.0) s = -s;
-        nrm[v*3]   = (float) (s * dir[v*3]);
-        nrm[v*3+1] = (float) (s * dir[v*3+1]);
-        nrm[v*3+2] = (float) (s * dir[v*3+2]);
-    }
-    return nrm;
+inline std::vector<float> vertex_normals( const Mesh& m )
+{
+	const size_t		nv = m.n_verts();
+	std::vector<double> A( ( size_t )nv * 6, 0.0 );		// sym structure tensor per vertex
+	std::vector<float>	seed( ( size_t )nv * 3, 0.0f ); // signed area sum: a sign hint
+	for( size_t t = 0; t < m.tris.size(); t += 3 ) {
+		const int	 i0 = m.tris[t], i1 = m.tris[t + 1], i2 = m.tris[t + 2];
+		const float* a = &m.verts[( size_t )i0 * 3];
+		const float* b = &m.verts[( size_t )i1 * 3];
+		const float* c = &m.verts[( size_t )i2 * 3];
+		float		 e1[3], e2[3], fn[3];
+		for( int k = 0; k < 3; ++k ) {
+			e1[k] = b[k] - a[k];
+			e2[k] = c[k] - a[k];
+		}
+		detail::cross( e1, e2, fn );
+		const double area = std::sqrt( ( double )fn[0] * fn[0] + ( double )fn[1] * fn[1] + ( double )fn[2] * fn[2] );
+		if( area <= 1e-20 ) continue;
+		const double inv = 1.0 / area;
+		const double xx = fn[0] * fn[0] * inv, yy = fn[1] * fn[1] * inv, zz = fn[2] * fn[2] * inv;
+		const double xy = fn[0] * fn[1] * inv, xz = fn[0] * fn[2] * inv, yz = fn[1] * fn[2] * inv;
+		for( int i : { i0, i1, i2 } ) {
+			double* Av = &A[( size_t )i * 6];
+			Av[0] += xx;
+			Av[1] += yy;
+			Av[2] += zz;
+			Av[3] += xy;
+			Av[4] += xz;
+			Av[5] += yz;
+			float* sv = &seed[( size_t )i * 3];
+			sv[0] += fn[0];
+			sv[1] += fn[1];
+			sv[2] += fn[2];
+		}
+	}
+	// (1) smooth, sign-ambiguous direction per vertex
+	std::vector<float> dir( ( size_t )nv * 3, 0.0f );
+	for( size_t v = 0; v < nv; ++v ) {
+		const double* Av = &A[v * 6];
+		double		  x = seed[v * 3], y = seed[v * 3 + 1], z = seed[v * 3 + 2];
+		double		  l = std::sqrt( x * x + y * y + z * z );
+		if( l < 1e-20 ) {
+			x = Av[0];
+			y = Av[3];
+			z = Av[4];
+			l = std::sqrt( x * x + y * y + z * z );
+		}
+		if( l < 1e-20 ) {
+			dir[v * 3 + 2] = 1.0f;
+			continue;
+		}
+		x /= l;
+		y /= l;
+		z /= l;
+		for( int it = 0; it < 8; ++it ) {
+			const double nx = Av[0] * x + Av[3] * y + Av[4] * z;
+			const double ny = Av[3] * x + Av[1] * y + Av[5] * z;
+			const double nz = Av[4] * x + Av[5] * y + Av[2] * z;
+			const double nl = std::sqrt( nx * nx + ny * ny + nz * nz );
+			if( nl < 1e-20 ) break;
+			x = nx / nl;
+			y = ny / nl;
+			z = nz / nl;
+		}
+		dir[v * 3]	   = ( float )x;
+		dir[v * 3 + 1] = ( float )y;
+		dir[v * 3 + 2] = ( float )z;
+	}
+	// (2) Resolve the arbitrary per-vertex sign *consistently* via a parity
+	//     union-find over mesh edges: two edge-adjacent vertices whose directions
+	//     are anti-aligned must end up with opposite signs (and vice versa), so
+	//     within each connected component neighbours share a hemisphere. Only
+	//     genuinely frustrated (odd-cycle / non-manifold) edges are left flipped.
+	std::vector<int>	 ufp( nv ), ufr( nv, 0 );
+	std::vector<uint8_t> ufb( nv, 0 ); // parity of a vertex relative to its parent
+	for( size_t i = 0; i < nv; ++i )
+		ufp[i] = ( int )i;
+	auto find = [&]( int v, int& parity ) {
+		int p = 0;
+		while( ufp[v] != v ) {
+			p ^= ufb[v];
+			v = ufp[v];
+		}
+		parity = p;
+		return v;
+	};
+	auto join = [&]( int a, int b ) {
+		const float* na	 = &dir[( size_t )a * 3];
+		const float* nb	 = &dir[( size_t )b * 3];
+		const int	 rel = ( na[0] * nb[0] + na[1] * nb[1] + na[2] * nb[2] ) < 0.0f ? 1 : 0;
+		int			 pa, pb, ra = find( a, pa ), rb = find( b, pb );
+		if( ra == rb ) return;
+		if( ufr[ra] < ufr[rb] ) {
+			std::swap( ra, rb );
+			std::swap( pa, pb );
+		}
+		ufp[rb] = ra;
+		ufb[rb] = ( uint8_t )( pa ^ pb ^ rel );
+		if( ufr[ra] == ufr[rb] ) ufr[ra]++;
+	};
+	for( size_t t = 0; t < m.tris.size(); t += 3 ) {
+		const int a = m.tris[t], b = m.tris[t + 1], c = m.tris[t + 2];
+		join( a, b );
+		join( b, c );
+		join( c, a );
+	}
+	// (3) pick each component's global sign toward the signed-sum seed (so the
+	//     result is deterministic and roughly outward), then emit oriented normals
+	std::unordered_map<int, double> comp_sign;
+	for( size_t v = 0; v < nv; ++v ) {
+		int			 p, r = find( ( int )v, p );
+		const double s	= p ? -1.0 : 1.0;
+		const float* sv = &seed[v * 3];
+		comp_sign[r] += s * ( dir[v * 3] * sv[0] + dir[v * 3 + 1] * sv[1] + dir[v * 3 + 2] * sv[2] );
+	}
+	std::vector<float> nrm( ( size_t )nv * 3, 0.0f );
+	for( size_t v = 0; v < nv; ++v ) {
+		int	   p, r = find( ( int )v, p );
+		double s = p ? -1.0 : 1.0;
+		if( comp_sign[r] < 0.0 ) s = -s;
+		nrm[v * 3]	   = ( float )( s * dir[v * 3] );
+		nrm[v * 3 + 1] = ( float )( s * dir[v * 3 + 1] );
+		nrm[v * 3 + 2] = ( float )( s * dir[v * 3 + 2] );
+	}
+	return nrm;
 }
 
 // Remove triangles that belong to tiny disconnected islands (the floating
@@ -244,28 +293,44 @@ inline std::vector<float> vertex_normals(const Mesh & m) {
 // intact so a parallel per-vertex attribute array (e.g. baked PBR) stays
 // aligned. Components are face groups connected through shared vertices; a
 // component is dropped when its face count is below min_frac of the total.
-inline void drop_small_components(Mesh & m, float min_frac = 0.0005f) {
-    const size_t nt = m.n_tris();
-    if (nt == 0) return;
-    const size_t nv = m.n_verts();
-    std::vector<int> p(nv);
-    for (size_t i = 0; i < nv; ++i) p[i] = (int) i;
-    auto find = [&](int x) { while (p[x] != x) { p[x] = p[p[x]]; x = p[x]; } return x; };
-    auto uni  = [&](int a, int b) { a = find(a); b = find(b); if (a != b) p[a] = b; };
-    for (size_t t = 0; t < m.tris.size(); t += 3) {
-        uni(m.tris[t], m.tris[t+1]); uni(m.tris[t+1], m.tris[t+2]);
-    }
-    std::unordered_map<int, int> faces;
-    for (size_t t = 0; t < m.tris.size(); t += 3) faces[find(m.tris[t])]++;
-    const int min_faces = std::max(1, (int) (min_frac * (double) nt));
-    std::vector<int> keep;
-    keep.reserve(m.tris.size());
-    for (size_t t = 0; t < m.tris.size(); t += 3) {
-        if (faces[find(m.tris[t])] >= min_faces) {
-            keep.push_back(m.tris[t]); keep.push_back(m.tris[t+1]); keep.push_back(m.tris[t+2]);
-        }
-    }
-    m.tris.swap(keep);
+inline void drop_small_components( Mesh& m, float min_frac = 0.0005f )
+{
+	const size_t nt = m.n_tris();
+	if( nt == 0 ) return;
+	const size_t	 nv = m.n_verts();
+	std::vector<int> p( nv );
+	for( size_t i = 0; i < nv; ++i )
+		p[i] = ( int )i;
+	auto find = [&]( int x ) {
+		while( p[x] != x ) {
+			p[x] = p[p[x]];
+			x	 = p[x];
+		}
+		return x;
+	};
+	auto uni = [&]( int a, int b ) {
+		a = find( a );
+		b = find( b );
+		if( a != b ) p[a] = b;
+	};
+	for( size_t t = 0; t < m.tris.size(); t += 3 ) {
+		uni( m.tris[t], m.tris[t + 1] );
+		uni( m.tris[t + 1], m.tris[t + 2] );
+	}
+	std::unordered_map<int, int> faces;
+	for( size_t t = 0; t < m.tris.size(); t += 3 )
+		faces[find( m.tris[t] )]++;
+	const int		 min_faces = std::max( 1, ( int )( min_frac * ( double )nt ) );
+	std::vector<int> keep;
+	keep.reserve( m.tris.size() );
+	for( size_t t = 0; t < m.tris.size(); t += 3 ) {
+		if( faces[find( m.tris[t] )] >= min_faces ) {
+			keep.push_back( m.tris[t] );
+			keep.push_back( m.tris[t + 1] );
+			keep.push_back( m.tris[t + 2] );
+		}
+	}
+	m.tris.swap( keep );
 }
 
 // Fill the small holes extract() leaves where a dual-grid quad was skipped (a
@@ -274,72 +339,82 @@ inline void drop_small_components(Mesh & m, float min_frac = 0.0005f) {
 // `max_loop` vertices is fan-triangulated from its first vertex. Only triangles
 // are added — no new vertices — so a parallel per-vertex attribute array (baked
 // PBR) stays aligned. Large loops (genuine openings) are left unfilled.
-inline void fill_holes(Mesh & m, int max_loop = 64, int max_passes = 4) {
-    if (m.n_tris() == 0) return;
-    auto key = [](int a, int b) {
-        const uint32_t lo = a < b ? a : b, hi = a < b ? b : a;
-        return ((uint64_t) lo << 32) | hi;
-    };
-    // Iterate: the greedy loop walk misses some loops at non-manifold junctions,
-    // and each fill can expose newly closeable loops, so repeat until a pass
-    // adds nothing (or the pass cap is hit).
-    for (int pass = 0; pass < max_passes; ++pass) {
-        const size_t before = m.tris.size();
-        // run-length count of undirected edges via sort (lighter than a hashmap)
-        std::vector<uint64_t> ek;
-        ek.reserve(m.tris.size());
-        for (size_t t = 0; t < m.tris.size(); t += 3) {
-            ek.push_back(key(m.tris[t],   m.tris[t+1]));
-            ek.push_back(key(m.tris[t+1], m.tris[t+2]));
-            ek.push_back(key(m.tris[t+2], m.tris[t]));
-        }
-        std::sort(ek.begin(), ek.end());
-        std::unordered_map<int, std::vector<int>> adj;   // boundary-vertex adjacency
-        for (size_t i = 0; i < ek.size(); ) {
-            size_t j = i + 1;
-            while (j < ek.size() && ek[j] == ek[i]) ++j;
-            if (j - i == 1) {   // used by exactly one triangle -> boundary edge
-                const int a = (int) (ek[i] >> 32), b = (int) (ek[i] & 0xffffffffu);
-                adj[a].push_back(b); adj[b].push_back(a);
-            }
-            i = j;
-        }
-        if (adj.empty()) break;
+inline void fill_holes( Mesh& m, int max_loop = 64, int max_passes = 4 )
+{
+	if( m.n_tris() == 0 ) return;
+	auto key = []( int a, int b ) {
+		const uint32_t lo = a < b ? a : b, hi = a < b ? b : a;
+		return ( ( uint64_t )lo << 32 ) | hi;
+	};
+	// Iterate: the greedy loop walk misses some loops at non-manifold junctions,
+	// and each fill can expose newly closeable loops, so repeat until a pass
+	// adds nothing (or the pass cap is hit).
+	for( int pass = 0; pass < max_passes; ++pass ) {
+		const size_t		  before = m.tris.size();
+		// run-length count of undirected edges via sort (lighter than a hashmap)
+		std::vector<uint64_t> ek;
+		ek.reserve( m.tris.size() );
+		for( size_t t = 0; t < m.tris.size(); t += 3 ) {
+			ek.push_back( key( m.tris[t], m.tris[t + 1] ) );
+			ek.push_back( key( m.tris[t + 1], m.tris[t + 2] ) );
+			ek.push_back( key( m.tris[t + 2], m.tris[t] ) );
+		}
+		std::sort( ek.begin(), ek.end() );
+		std::unordered_map<int, std::vector<int>> adj; // boundary-vertex adjacency
+		for( size_t i = 0; i < ek.size(); ) {
+			size_t j = i + 1;
+			while( j < ek.size() && ek[j] == ek[i] )
+				++j;
+			if( j - i == 1 ) { // used by exactly one triangle -> boundary edge
+				const int a = ( int )( ek[i] >> 32 ), b = ( int )( ek[i] & 0xffffffffu );
+				adj[a].push_back( b );
+				adj[b].push_back( a );
+			}
+			i = j;
+		}
+		if( adj.empty() ) break;
 
-        std::unordered_set<uint64_t> used;   // consumed boundary edges
-        for (const auto & kv : adj) {
-            const int start = kv.first;
-            for (const int nb0 : kv.second) {
-                if (used.count(key(start, nb0))) continue;
-                std::vector<int> loop{start};
-                int prev = start, cur = nb0;
-                used.insert(key(prev, cur));
-                bool closed = false;
-                while ((int) loop.size() <= max_loop) {
-                    loop.push_back(cur);
-                    if (cur == start) { closed = true; break; }
-                    int next = -1;
-                    auto it = adj.find(cur);
-                    if (it != adj.end())
-                        for (const int c : it->second)
-                            if (c != prev && !used.count(key(cur, c))) { next = c; break; }
-                    if (next < 0) break;            // open chain / dead end
-                    used.insert(key(cur, next));
-                    prev = cur; cur = next;
-                }
-                if (!closed) continue;
-                loop.pop_back();                    // drop the repeated start vertex
-                const int k = (int) loop.size();
-                if (k < 3 || k > max_loop) continue;
-                for (int t = 1; t < k - 1; ++t) {   // fan-triangulate from loop[0]
-                    m.tris.push_back(loop[0]);
-                    m.tris.push_back(loop[t]);
-                    m.tris.push_back(loop[t + 1]);
-                }
-            }
-        }
-        if (m.tris.size() == before) break;         // converged
-    }
+		std::unordered_set<uint64_t> used; // consumed boundary edges
+		for( const auto& kv : adj ) {
+			const int start = kv.first;
+			for( const int nb0 : kv.second ) {
+				if( used.count( key( start, nb0 ) ) ) continue;
+				std::vector<int> loop { start };
+				int				 prev = start, cur = nb0;
+				used.insert( key( prev, cur ) );
+				bool closed = false;
+				while( ( int )loop.size() <= max_loop ) {
+					loop.push_back( cur );
+					if( cur == start ) {
+						closed = true;
+						break;
+					}
+					int	 next = -1;
+					auto it	  = adj.find( cur );
+					if( it != adj.end() )
+						for( const int c : it->second )
+							if( c != prev && !used.count( key( cur, c ) ) ) {
+								next = c;
+								break;
+							}
+					if( next < 0 ) break; // open chain / dead end
+					used.insert( key( cur, next ) );
+					prev = cur;
+					cur	 = next;
+				}
+				if( !closed ) continue;
+				loop.pop_back(); // drop the repeated start vertex
+				const int k = ( int )loop.size();
+				if( k < 3 || k > max_loop ) continue;
+				for( int t = 1; t < k - 1; ++t ) { // fan-triangulate from loop[0]
+					m.tris.push_back( loop[0] );
+					m.tris.push_back( loop[t] );
+					m.tris.push_back( loop[t + 1] );
+				}
+			}
+		}
+		if( m.tris.size() == before ) break; // converged
+	}
 }
 
 } // namespace fdg

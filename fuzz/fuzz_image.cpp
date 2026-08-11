@@ -18,16 +18,17 @@
 #include <cstring>
 #include <vector>
 
-extern "C" int LLVMFuzzerTestOneInput(const uint8_t * data, size_t size) {
-    if (size == 0 || size > (32u << 20)) {
-        return 0;
-    }
+extern "C" int LLVMFuzzerTestOneInput( const uint8_t* data, size_t size )
+{
+	if( size == 0 || size > ( 32u << 20 ) ) {
+		return 0;
+	}
 
-    // Small output target keeps per-input cost low; the resampler code path
-    // is identical for any out_size.
-    static thread_local std::vector<unsigned char> out(64 * 64 * 3);
-    char err[256] = {0};
+	// Small output target keeps per-input cost low; the resampler code path
+	// is identical for any out_size.
+	static thread_local std::vector<unsigned char> out( 64 * 64 * 3 );
+	char										   err[256] = { 0 };
 
-    (void) t2_preprocess_image_bytes(data, (int) size, 64, out.data(), err, sizeof(err));
-    return 0;
+	( void ) t2_preprocess_image_bytes( data, ( int )size, 64, out.data(), err, sizeof( err ) );
+	return 0;
 }

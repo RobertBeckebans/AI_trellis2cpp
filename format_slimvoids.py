@@ -135,6 +135,6 @@ if __name__ == "__main__":
         # Debugging
         simplify_void_parameters_file('engine/client/cl_keys.c')
     else:
-        skip_dirs = {".venv", "extern", "libs", "thirdparty", "build", "sys"}
+        skip_dirs = {".venv", "extern", "libs", "third_party", "build", "ggml"}
         skip_files = {}
         process_directory(skip_dirs, skip_files)

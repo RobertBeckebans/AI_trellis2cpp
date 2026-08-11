@@ -19,39 +19,41 @@
 #include <string>
 #include <unistd.h>
 
-extern "C" int LLVMFuzzerTestOneInput(const uint8_t * data, size_t size) {
-    if (size > (16u << 20)) {
-        return 0;
-    }
+extern "C" int LLVMFuzzerTestOneInput( const uint8_t* data, size_t size )
+{
+	if( size > ( 16u << 20 ) ) {
+		return 0;
+	}
 
-    char path[] = "/tmp/fuzz_dinodata_XXXXXX";
-    const int fd = mkstemp(path);
-    if (fd < 0) {
-        return 0;
-    }
-    const ssize_t written = write(fd, data, size);
-    close(fd);
-    if (written != (ssize_t) size) {
-        unlink(path);
-        return 0;
-    }
+	char	  path[] = "/tmp/fuzz_dinodata_XXXXXX";
+	const int fd	 = mkstemp( path );
+	if( fd < 0 ) {
+		return 0;
+	}
+	const ssize_t written = write( fd, data, size );
+	close( fd );
+	if( written != ( ssize_t )size ) {
+		unlink( path );
+		return 0;
+	}
 
-    trellis2_dino_cond cond;
-    std::string err;
-    if (trellis2_load_dinodata(path, cond, &err)) {
-        int64_t total = 1;
-        for (int64_t d : cond.shape) total *= d;
-        if (cond.shape.empty() || (size_t) total != cond.data.size()) {
-            abort();   // loader produced an inconsistent cond
-        }
-        const trellis2_dino_fingerprint fp = trellis2_dino_fingerprints(cond);
-        if (fp.count != cond.data.size()) {
-            abort();
-        }
-    } else if (err.empty()) {
-        abort();       // failure must come with a reason
-    }
+	trellis2_dino_cond cond;
+	std::string		   err;
+	if( trellis2_load_dinodata( path, cond, &err ) ) {
+		int64_t total = 1;
+		for( int64_t d : cond.shape )
+			total *= d;
+		if( cond.shape.empty() || ( size_t )total != cond.data.size() ) {
+			abort(); // loader produced an inconsistent cond
+		}
+		const trellis2_dino_fingerprint fp = trellis2_dino_fingerprints( cond );
+		if( fp.count != cond.data.size() ) {
+			abort();
+		}
+	} else if( err.empty() ) {
+		abort(); // failure must come with a reason
+	}
 
-    unlink(path);
-    return 0;
+	unlink( path );
+	return 0;
 }
