@@ -79,6 +79,11 @@ through vcpkg (`-DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake`
 as in `cmake-ninja-win64-rocm-cgal.bat`), on Linux through distro
 packages or the containers in `docker/`.
 
+CGAL is kept out of a default configure on purpose: it is a *feature*
+of the vcpkg manifest, pulled in only by
+`-DVCPKG_MANIFEST_FEATURES=cgal`, so the copyleft dependency below
+cannot be resolved by accident.
+
 ### CGAL — optional, **copyleft**
 
 - **Project:** <https://www.cgal.org/>
@@ -112,18 +117,18 @@ The LGPL components are consumed as unmodified shared libraries.
 - **License:** **MPL-2.0** (some bundled files under BSD or other
   MPL2-compatible terms; see `COPYING.README` upstream). Confirmed by
   vcpkg, which reports `MPL-2.0` for the `eigen3` port.
-- **Version:** 5.0.1 is the known-good version — it is what upstream
-  AutoRemesher bundles and what `vcpkg install eigen3` currently
-  resolves to.
+- **Version:** 5.0.1 — the version upstream AutoRemesher bundles and
+  what `vcpkg install eigen3` resolves to. The CMake floor is the whole
+  5.x line, which excludes the 3.4.0 shipped by Debian/Ubuntu.
 - **Planned use:** required by the AutoRemesher quad stage
   (see [`docs/plan/autoremesher-quad-remesh.md`](docs/plan/autoremesher-quad-remesh.md)).
-- **Deliberately not vendored.** Obtained via `vcpkg install eigen3`
-  (or a distro package) and consumed through
-  `find_package(Eigen3 3.4...<6 CONFIG)` → `Eigen3::Eigen`, so no MPL2
+- **Deliberately not vendored.** Declared in the project's `vcpkg.json`
+  manifest and consumed through
+  `find_package(Eigen3 5.0...<6 CONFIG)` → `Eigen3::Eigen`, so no MPL2
   file enters this MIT repository. A version *range* is required:
   Eigen's `Eigen3ConfigVersion.cmake` treats a single requested version
-  as an exact component match, so `find_package(Eigen3 3.4)` fails
-  against 5.0.1.
+  as an exact component match, so `find_package(Eigen3 5.0)` would
+  reject a later 5.1.
 - **Obligation:** Eigen is used unmodified. MPL-2.0 is file-level
   copyleft and explicitly permits combination with a differently
   licensed Larger Work (§3.3); the remaining duty is to retain this

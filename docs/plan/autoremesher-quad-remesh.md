@@ -1,10 +1,10 @@
 # AutoRemesher — MIT quad topology for the mid-poly export path
 
 - **Status:** planned
-- **GitHub Issue:** none yet — the roadmap `docs/PLAN.md` does not cover
-  the export/print path, so an issue should be opened and this file
-  renamed to `docs/plan/<issue>-autoremesher-quad-remesh.md`.
-- **Branch:** `<issue>-autoremesher-quad-remesh` / optional
+- **GitHub Issue:** none — deliberately tracked by plan key
+  (`autoremesher-quad-remesh`) instead, so progress entries use
+  `docs/progress/autoremesher-quad-remesh_<phase>-<short-name>.md`.
+- **Branch:** `autoremesher-quad-remesh` / optional
 - **Area:** print_remesh / mesh_export / trellis2_capi / third_party /
   server / docs
 - **Date:** 2026-08-11
@@ -180,32 +180,65 @@ the current `build/CMakeCache.txt` resolves CGAL, Boost, GMP and MPFR
 out of `C:/vcpkg/installed/x64-windows`. Eigen slots into exactly that
 mechanism:
 
-```sh
-vcpkg install eigen3      # header-only, no transitive deps; currently 5.0.1
-```
+**Decided: newest Eigen, Windows first.** The upstream AutoRemesher
+tree bundles Eigen **5.0.1** itself (`thirdparty/eigen/Eigen/Version`:
+`EIGEN_MAJOR_VERSION 5`, `EIGEN_MINOR_VERSION 0`,
+`EIGEN_PATCH_VERSION 1`), and `vcpkg install eigen3` resolves to exactly
+`eigen3:x64-windows@5.0.1`. Building against the same version upstream
+develops against removes the API-drift question entirely, so that is
+what we do rather than stretching for backwards compatibility:
 
 ```cmake
-# NOT find_package(Eigen3 3.4 ...): Eigen's own Eigen3ConfigVersion.cmake
-# treats a single version as an exact component match ("3.4 matches 3.4.0.0
-# to <3.5.0.0"), so a 3.4 request fails against 5.0.1. Use a range.
-find_package(Eigen3 3.4...<6 CONFIG QUIET)     # target: Eigen3::Eigen
+# A range, not a single version: Eigen's own Eigen3ConfigVersion.cmake
+# treats a single requested version as an exact component match
+# ("3.4 matches 3.4.0.0 to <3.5.0.0"), so find_package(Eigen3 5.0) would
+# reject a later 5.1. The range accepts the whole 5.x line.
+find_package(Eigen3 5.0...<6 CONFIG QUIET)     # target: Eigen3::Eigen
 ```
 
-**Known-good version: 5.0.1.** The upstream AutoRemesher tree bundles
-Eigen 5.0.1 itself (`thirdparty/eigen/Eigen/Version`:
-`EIGEN_MAJOR_VERSION 5`, `EIGEN_MINOR_VERSION 0`,
-`EIGEN_PATCH_VERSION 1`), and `vcpkg install eigen3` currently resolves
-to exactly `eigen3:x64-windows@5.0.1`. So the Windows path builds
-against the same version upstream develops against — no API drift.
+**Consequence for Linux, stated rather than hidden.** Debian/Ubuntu
+`libeigen3-dev` ships 3.4.0, which this floor excludes. The Linux
+containers in `docker/` therefore do not get the quad stage until they
+either install Eigen 5.x explicitly or use vcpkg as well. That is a
+deliberate deferral, not an oversight: the probe auto-disables the
+feature, so a Linux build stays green and simply reports the stage as
+unavailable. Nothing else in the pipeline regresses. Raising Linux to
+Eigen 5 is a follow-up whenever the Linux demo needs the stage.
 
-**Linux is the unverified half.** Debian/Ubuntu `libeigen3-dev` ships
-**3.4.0**, not 5.x, and whether the AutoRemesher core compiles against
-3.4 has not been tested by us or (visibly) by upstream. The range above
-is therefore optimistic on purpose: Phase 1 compiles against both 5.0.1
-and 3.4.0 and settles it. If 3.4 fails, the floor is raised to
-`5.0...<6` and Linux needs vcpkg or a manual Eigen — which must then be
-written into `docker/Dockerfile.demo` rather than papered over with the
-distro package.
+**Decided: vcpkg manifest mode.** A `vcpkg.json` in the project root
+pins the versions reproducibly instead of relying on whatever happens to
+sit in the global `C:/vcpkg/installed` tree:
+
+```json
+{
+  "name": "trellis2-cpp",
+  "builtin-baseline": "<vcpkg registry commit>",
+  "dependencies": [ { "name": "eigen3", "version>=": "5.0.1" } ],
+  "features": {
+    "cgal": {
+      "description": "CGAL Alpha Wrap print remeshing (GPL-3.0-or-later)",
+      "dependencies": [ "cgal" ]
+    }
+  }
+}
+```
+
+Putting CGAL behind a **manifest feature** rather than a plain
+dependency mirrors the encapsulation the code already enforces: a
+default configure resolves only Eigen, and only
+`-DVCPKG_MANIFEST_FEATURES=cgal` (in
+`cmake-ninja-win64-rocm-cgal.bat`) pulls in CGAL, Boost, GMP and MPFR.
+The copyleft dependency then cannot be dragged in by accident.
+
+**Migration warning.** Manifest mode is not a no-op for existing
+builds. As soon as `vcpkg.json` sits next to `CMakeLists.txt`, any
+configure using the vcpkg toolchain switches to manifest mode
+(`VCPKG_MANIFEST_MODE` is currently `OFF`), installs into
+`<build>/vcpkg_installed`, and **ignores the classic
+`C:/vcpkg/installed` tree**. The CGAL build therefore loses CGAL unless
+`-DVCPKG_MANIFEST_FEATURES=cgal` is added to that script in the same
+change. This is a one-line edit per script, but it must land together
+with `vcpkg.json`, not after it.
 
 **What this buys and what it does not.** It keeps every MPL2 file out
 of the MIT repository, so the `third_party/` rule in `AGENTS.md` holds
@@ -220,25 +253,20 @@ plus LGPL GMP/MPFR through the same vcpkg install, so MPL2 is strictly
 the lighter burden of the two.
 
 **Cost, stated honestly.** `TRELLIS2_AUTOREMESHER` becomes a probe like
-`TRELLIS2_CGAL` and switches itself off when Eigen is absent, so the
+`TRELLIS2_CGAL` and switches itself off when Eigen 5.x is absent, so the
 feature is not unconditionally present in an arbitrary clone. That was
-the objection against the non-vendored route in the first draft, and it
-does not fully disappear — it only shrinks: `eigen3` is header-only
-with no transitive dependencies and is packaged everywhere, whereas
-CGAL drags Boost, GMP and MPFR behind it. Missing Eigen is a one-line
-install, missing CGAL is an afternoon.
+the objection against the non-vendored route in the first draft and it
+does not disappear — with the 5.0 floor it is in fact sharper than the
+"any Eigen" version would have been, since distro packages no longer
+qualify. What keeps it acceptable is that the manifest resolves it
+automatically on the author's Windows path: `eigen3` is header-only
+with no transitive dependencies, so vcpkg fetches it in seconds,
+whereas CGAL drags Boost, GMP and MPFR behind it.
 
 Independent of the sourcing decision: the LGPL-adjacent optional Eigen
 backends (`EIGEN_USE_MKL_ALL`, SuperLU, UmfPack, Pardiso) stay off, and
 the Apple-only `Eigen/AccelerateSupport` include in the upstream tree is
 dropped together with the macOS `NL_USE_BLAS` block.
-
-Open sub-decision for Phase 0: the project currently uses vcpkg in
-**classic mode** (`VCPKG_MANIFEST_MODE:BOOL=OFF`, packages installed
-globally under `C:/vcpkg`). A `vcpkg.json` manifest with a
-`builtin-baseline` would pin CGAL and Eigen versions reproducibly, but
-it changes the author's established workflow, so it is offered rather
-than assumed.
 
 ### D3 — Drop TBB, ship a small shim
 
@@ -385,25 +413,32 @@ quad stream stays available for an OBJ/quad-preserving export later.
 
 ## Plan (phases)
 
-### Phase 0 — Decisions (blocking, human)
+### Phase 0 — Decisions (settled)
 
-- [ ] Confirm **Eigen from vcpkg / `libeigen3-dev`**, not vendored
-      (D2), and accept that `TRELLIS2_AUTOREMESHER` auto-disables when
-      Eigen is absent.
-- [ ] Decide vcpkg **classic vs. manifest mode** (`vcpkg.json` with a
-      `builtin-baseline` pinning `cgal` and `eigen3`).
-- [ ] Confirm the upstream import points (commit/tag) to pin in
-      `third_party/autoremesher/VERSION` and
-      `third_party/tinybvh/VERSION`.
-- [ ] Review the new root `THIRD_PARTY.md`. It documents the current
-      state; the components of this plan are listed there as *planned*
-      until their phase lands. (`xatlas`, `meshoptimizer`, and `stb`
-      have no separate `LICENSE` file, but each retains its upstream
-      notice inside the vendored file, so MIT/PD attribution is
-      satisfied — a per-directory `LICENSE` would be hygiene, not a
-      fix.)
+Recorded here so the phases below do not re-open them:
 
-Nothing is imported before this is answered.
+- **Eigen is external, never vendored** (D2), taken as the newest
+  release vcpkg offers — currently 5.0.1, the same version upstream
+  AutoRemesher bundles. CMake floor `5.0...<6`.
+- **vcpkg manifest mode** with a `vcpkg.json` in the project root, CGAL
+  behind a manifest *feature* so a default configure never resolves it.
+  The `-DVCPKG_MANIFEST_FEATURES=cgal` edit to
+  `cmake-ninja-win64-rocm-cgal.bat` ships in the same change.
+- **Windows first.** The Linux containers keep building; they simply
+  report the quad stage as unavailable until they get Eigen 5.x.
+- **No GitHub issue.** Tracked by plan key only; the file is not
+  renamed.
+
+Remaining before Phase 1 imports anything: pin the upstream import
+points (commit/tag) for `third_party/autoremesher/VERSION` and
+`third_party/tinybvh/VERSION`.
+
+`THIRD_PARTY.md` in the repository root documents the current state and
+carries this plan's components under *Planned additions* until their
+phase lands. (`xatlas`, `meshoptimizer`, and `stb` have no separate
+`LICENSE` file, but each retains its upstream notice inside the vendored
+file, so MIT/PD attribution is satisfied — a per-directory `LICENSE`
+would be hygiene, not a fix.)
 
 ### Phase 1 — Vendor and build in isolation
 
@@ -417,13 +452,17 @@ Nothing is imported before this is answered.
 - [ ] Route `std::cerr` through a single `AR_LOG(...)` macro that is
       silent unless `TRELLIS2_AUTOREMESHER_VERBOSE` is set (D-limitation
       "std::cerr logging"). Document each touched line in `PATCHES.md`.
-- [ ] `find_package(Eigen3 3.4...<6 CONFIG QUIET)` → link
+- [ ] Add `vcpkg.json` (D2) and extend
+      `cmake-ninja-win64-rocm-cgal.bat` with
+      `-DVCPKG_MANIFEST_FEATURES=cgal` **in the same commit**, so the
+      switch to manifest mode does not silently drop CGAL from that
+      build.
+- [ ] `find_package(Eigen3 5.0...<6 CONFIG QUIET)` → link
       `Eigen3::Eigen` `PRIVATE` (D2). No Eigen file is copied into the
       repository.
-- [ ] Compile the core against **both** Eigen 5.0.1 (vcpkg, upstream's
-      own bundled version) and 3.4.0 (Debian/Ubuntu `libeigen3-dev`).
-      Record the outcome; raise the CMake floor to `5.0...<6` if 3.4
-      does not build.
+- [ ] Verify the CGAL build still configures and links after the
+      manifest switch — this is the one existing path the change can
+      break.
 - [ ] `TRELLIS2_AUTOREMESHER` CMake option (default `ON`, but
       auto-disabled with a `message(STATUS ...)` when Eigen is missing,
       mirroring the existing `TRELLIS2_CGAL` probe), sources added to
@@ -563,15 +602,12 @@ reduction of the GPL surface in this plan.
 3. **Silent quality loss.** Dropped islands currently disappear into
    stderr. The Phase 3 failure policy exists specifically to stop a
    half-remeshed model from looking like a success.
-4. **Eigen availability and version, not Eigen license.** With D2 the
-   license question is settled (external, documented in
-   `THIRD_PARTY.md`). Two practical risks remain: a clone without
-   vcpkg/`libeigen3-dev` silently builds without the quad stage — the
+4. **Eigen availability, not Eigen license.** With D2 the license
+   question is settled (external, documented in `THIRD_PARTY.md`). What
+   remains is that the `5.0...<6` floor excludes distro packages, so a
+   clone without vcpkg builds without the quad stage. The
    `message(STATUS ...)` line and `t2quad::available()` have to make
-   that obvious rather than puzzling — and Linux distros ship Eigen
-   **3.4.0** while upstream AutoRemesher develops against **5.0.1**.
-   The Phase 1 compile matrix decides whether the Linux path works at
-   all or needs vcpkg there too.
+   that obvious rather than puzzling.
 5. **Repository growth** is now small — `tiny_bvh.h` (397 KB) plus the
    AutoRemesher core (~450 KB). No multi-megabyte header tree.
 6. **Determinism** is expected from reading the merge code but has not
@@ -596,6 +632,13 @@ reduction of the GPL surface in this plan.
     paths; check the effect on the shared-library size the Go server
     dlopens, and make sure no build-time `-mavx2` requirement leaks
     into the project's baseline flags.
+11. **The manifest-mode switch touches an existing, working build.**
+    Adding `vcpkg.json` changes dependency resolution for *every* vcpkg
+    configure, not just the new feature: the classic
+    `C:/vcpkg/installed` tree stops being consulted. This is the only
+    part of the plan that can regress something that works today, which
+    is why the `-DVCPKG_MANIFEST_FEATURES=cgal` edit is required in the
+    same commit and verified explicitly in Phase 1.
 
 ## Follow-ups (own plans, not in scope here)
 
