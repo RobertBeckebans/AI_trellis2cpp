@@ -48,10 +48,6 @@ crash-*
 /server/trellis2-server-linux
 /server/vendor/
 
-# python bytecode
-__pycache__/
-*.pyc
-
 # model / reference artifacts
 /models/
 /ggufs/
@@ -63,3 +59,31 @@ data_toolkit/
 *.log
 
 server/trellis2-server.exe
+
+# --- rob-project-template ---
+# Rust
+target/
+Cargo.lock
+
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.venv/
+uv.lock
+
+# Misc
+.yek/
+/assets
+/logs
+/temp
+docs/ideas/*
+!docs/ideas/.gitkeep
+docs/bugs/*
+!docs/bugs/.gitkeep
+docs/screenshots/*
+!docs/screenshots/.gitkeep
+profile.json*
