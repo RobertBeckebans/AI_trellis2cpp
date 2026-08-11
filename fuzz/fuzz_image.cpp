@@ -29,6 +29,6 @@ extern "C" int LLVMFuzzerTestOneInput( const uint8_t* data, size_t size )
 	static thread_local std::vector<unsigned char> out( 64 * 64 * 3 );
 	char										   err[256] = { 0 };
 
-	( void ) t2_preprocess_image_bytes( data, ( int )size, 64, out.data(), err, sizeof( err ) );
+	( void )t2_preprocess_image_bytes( data, ( int )size, 64, out.data(), err, sizeof( err ) );
 	return 0;
 }

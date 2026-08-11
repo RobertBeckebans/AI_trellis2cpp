@@ -21,6 +21,7 @@ cmake -B build ^
   -DCMAKE_C_COMPILER="%ROCM_BIN%\clang.exe" ^
   -DCMAKE_CXX_COMPILER="%ROCM_BIN%\clang++.exe" ^
   -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake ^
+  -DVCPKG_MANIFEST_FEATURES=cgal ^
   -DGGML_VULKAN=OFF ^
   -DGGML_HIP=ON ^
   -DAMDGPU_TARGETS=gfx1201 ^

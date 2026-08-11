@@ -442,43 +442,50 @@ would be hygiene, not a fix.)
 
 ### Phase 1 — Vendor and build in isolation
 
-- [ ] Import `src/AutoRemesher/` + `include/AutoRemesher/` +
+Results: `docs/progress/autoremesher-quad-remesh_phase1-vendor-core.md`.
+
+- [x] Import `src/AutoRemesher/` + `include/AutoRemesher/` +
       `thirdparty/isotropicremesher/` into
-      `third_party/autoremesher/`, with `LICENSE`, `VERSION`,
-      `PATCHES.md`.
-- [ ] Add `t2_tbb_shim.h` (D3) and redirect the four TBB includes.
-- [ ] Drop the Apple `AccelerateSupport` include and the `NL_USE_BLAS`
-      assumption.
-- [ ] Route `std::cerr` through a single `AR_LOG(...)` macro that is
-      silent unless `TRELLIS2_AUTOREMESHER_VERBOSE` is set (D-limitation
-      "std::cerr logging"). Document each touched line in `PATCHES.md`.
-- [ ] Add `vcpkg.json` (D2) and extend
-      `cmake-ninja-win64-rocm-cgal.bat` with
-      `-DVCPKG_MANIFEST_FEATURES=cgal` **in the same commit**, so the
-      switch to manifest mode does not silently drop CGAL from that
-      build.
-- [ ] `find_package(Eigen3 5.0...<6 CONFIG QUIET)` → link
-      `Eigen3::Eigen` `PRIVATE` (D2). No Eigen file is copied into the
-      repository.
+      `third_party/autoremesher/`, with `LICENSE`, `VERSION.md`,
+      `PATCHES.md`. (`VERSION` without a suffix collides with the
+      standard `<version>` header on a case-insensitive filesystem.)
+- [x] `t2_tbb_shim.h` (D3) — reached through `compat/tbb/*.h`, so the
+      upstream sources are **not** patched for TBB at all.
+- [x] Apple `AccelerateSupport`: no patch needed, it is already behind
+      `#if AUTO_REMESHER_USE_ACCELERATE`, which we never define.
+- [x] Route `std::cerr` through `T2_AR_LOG`, silent unless
+      `TRELLIS2_AUTOREMESHER_VERBOSE` is set. Applied as a replayable
+      `sed`, documented in `PATCHES.md`.
+- [x] `vcpkg.json` (D2) plus `-DVCPKG_MANIFEST_FEATURES=cgal` in
+      `cmake-ninja-win64-rocm-cgal.bat`, in the same change.
+- [x] Eigen through `find_package(Eigen3 CONFIG QUIET)` + an explicit
+      5.x version check, linked `PRIVATE`. No Eigen file in the tree.
+      (A version *range* would need CMake 3.19; this project targets
+      3.14. Requesting `Eigen3 5.0` would fail against 5.0.1 because
+      Eigen's config treats a single version as an exact match.)
+- [x] `TRELLIS2_AUTOREMESHER` option with the `TRELLIS2_CGAL`-style
+      probe; vendored sources built with `-w` / `/w /bigobj` and with
+      `_USE_MATH_DEFINES;NOMINMAX`, which upstream sets globally in
+      `autoremesher.pro` and without which `M_PI` is undefined on MSVC.
+- [x] Standalone smoke tool `examples/quad_remesh_cli.cpp`. It compiles
+      the vendored sources into its own target rather than linking
+      `trellis2`, because the core has no `TRELLIS2_API` decoration and
+      the project's default build here is `BUILD_SHARED_LIBS=ON`.
+- [x] **Measured** on cube, sphere, and dense spheres up to 262 k
+      triangles, plus an isolated non-manifold defect matrix. Numbers in
+      the progress doc; the headline is that runtime is affordable
+      (262 k tris → 8.9 s, 281 MiB) and that a single non-manifold
+      vertex silently costs half the model while `remesh()` still
+      returns success.
 - [ ] Verify the CGAL build still configures and links after the
-      manifest switch — this is the one existing path the change can
-      break.
-- [ ] `TRELLIS2_AUTOREMESHER` CMake option (default `ON`, but
-      auto-disabled with a `message(STATUS ...)` when Eigen is missing,
-      mirroring the existing `TRELLIS2_CGAL` probe), sources added to
-      the `trellis2` target, `/bigobj` on MSVC (upstream needs it),
-      warnings suppressed for the vendored tree only.
+      manifest switch — the one existing path this change can break.
+- [ ] Re-measure on a **real 512³ pipeline mesh**. Not possible here:
+      `generations/` and `assets/` hold no mesh, so the dense spheres
+      are a synthetic proxy that exercises triangle count but not the
+      dual grid's non-manifold pathology.
 - [ ] Add `eigen3` to the documented vcpkg install line, extend the
-      Windows batch scripts that should build the feature with the
-      vcpkg toolchain file, and give `docker/Dockerfile.demo` whichever
-      Eigen the compile matrix above proves usable.
-- [ ] Standalone smoke tool `examples/quad_remesh_cli.cpp`: OBJ in,
-      OBJ out — proves the core builds and runs before any wiring.
-- [ ] **Measure** on a cube, a sphere, and a real 512³ pipeline mesh:
-      wall time, peak RSS, quad/non-quad ratio, boundary-edge count,
-      dropped islands. These numbers, not guesses, decide the default
-      `target_quads` and whether a meshoptimizer pre-decimation is
-      mandatory.
+      other Windows batch scripts with the vcpkg toolchain file, and
+      decide what `docker/Dockerfile.demo` does about Eigen 5.x.
 
 ### Phase 2 — tinybvh, so the texture path stops needing CGAL
 
@@ -520,10 +527,24 @@ reduction of the GPL surface in this plan.
 - [ ] `quad_remesh.{h,cpp}` per D6, with input validation matching
       `print_remesh.cpp`'s style (finite coordinates, index range,
       degenerate triangle skip, non-empty bbox).
-- [ ] Input preparation for the non-manifold dual-grid mesh: vertex
-      weld by position key, degenerate-triangle removal, duplicate-face
-      removal, and — behind an option — a meshoptimizer decimation to a
-      configurable input triangle budget.
+- [ ] Input preparation for the non-manifold dual-grid mesh. Phase 1
+      measured which defect actually matters, and it is **not** the one
+      assumed when this plan was written:
+
+      | Input defect | Area retained |
+      |---|---|
+      | disjoint components | 101.7 % — fine |
+      | duplicated face | 99.3 % — fine |
+      | dangling triangle fin | 99.5 % — fine |
+      | **one shared (non-manifold) vertex** | **49.9 %** — half the model silently gone |
+
+      The cleanup must therefore **split non-manifold vertices and
+      edges** (vertex fanning). A position-key weld may only be applied
+      where it does not create such a junction — a naive weld would
+      manufacture exactly the defect that destroys the output.
+      Degenerate triangles and duplicate faces are cheap to drop but are
+      not the problem. Optional meshoptimizer decimation to an input
+      triangle budget stays as planned.
 - [ ] Progress: bridge `AutoRemesherProgressHandler` to the existing
       stage-progress callback style.
 - [ ] Failure policy: report *how many* islands were dropped in `err`

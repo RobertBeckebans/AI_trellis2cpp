@@ -88,10 +88,10 @@ bool alpha_wrap( const std::vector<float>& source_verts,
 	out_normals.clear();
 	out_tris.clear();
 #ifndef TRELLIS2_USE_CGAL
-	( void ) source_verts;
-	( void ) source_tris;
-	( void ) alpha_ratio;
-	( void ) offset_ratio;
+	( void )source_verts;
+	( void )source_tris;
+	( void )alpha_ratio;
+	( void )offset_ratio;
 	err = "print remeshing is unavailable (rebuild with CGAL >= 5.5)";
 	return false;
 #else
@@ -209,10 +209,10 @@ bool project_pbr( const std::vector<float>& source_verts,
 {
 	out_pbr.clear();
 #ifndef TRELLIS2_USE_CGAL
-	( void ) source_verts;
-	( void ) source_tris;
-	( void ) source_pbr;
-	( void ) query_points;
+	( void )source_verts;
+	( void )source_tris;
+	( void )source_pbr;
+	( void )query_points;
 	err = "PBR projection is unavailable (rebuild with CGAL >= 5.5)";
 	return false;
 #else

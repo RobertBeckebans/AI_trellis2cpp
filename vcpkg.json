@@ -1,0 +1,20 @@
+{
+  "$comment": "CGAL is a feature, not a plain dependency: a default configure must not resolve a GPL-3.0-or-later package. Enable it with -DVCPKG_MANIFEST_FEATURES=cgal (see cmake-ninja-win64-rocm-cgal.bat). Licenses are documented in THIRD_PARTY.md.",
+  "name": "trellis2-cpp",
+  "version-string": "0.1.0",
+  "builtin-baseline": "2f1d605400c8727cc00c15797aba796c88ccd523",
+  "dependencies": [
+    {
+      "name": "eigen3",
+      "version>=": "5.0.1"
+    }
+  ],
+  "features": {
+    "cgal": {
+      "description": "CGAL Alpha Wrap print remeshing (GPL-3.0-or-later, pulls in Boost/GMP/MPFR)",
+      "dependencies": [
+        "cgal"
+      ]
+    }
+  }
+}

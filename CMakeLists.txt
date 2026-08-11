@@ -88,6 +88,73 @@ if(TRELLIS2_CGAL)
     endif()
 endif()
 
+# AutoRemesher turns the dense dual-grid soup into quad-dominant mid-poly
+# topology. The core is vendored under third_party/autoremesher (MIT), but it
+# needs Eigen, which is MPL-2.0 and therefore consumed externally rather than
+# vendored — `vcpkg install eigen3`, or let the vcpkg.json manifest resolve it.
+# See THIRD_PARTY.md and docs/plan/autoremesher-quad-remesh.md.
+#
+# No version is passed to find_package on purpose: Eigen's own
+# Eigen3ConfigVersion.cmake treats a single requested version as an *exact*
+# component match (so `Eigen3 5.0` would reject 5.0.1), and a version range
+# would require CMake 3.19 while this project targets 3.14. Check afterwards.
+option(TRELLIS2_AUTOREMESHER "Enable AutoRemesher quad remeshing when Eigen 5.x is available" ON)
+if(TRELLIS2_AUTOREMESHER)
+    find_package(Eigen3 CONFIG QUIET)
+    if(Eigen3_FOUND AND Eigen3_VERSION VERSION_GREATER_EQUAL 5.0
+                    AND Eigen3_VERSION VERSION_LESS 6.0)
+        set(TRELLIS2_AUTOREMESHER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/autoremesher)
+        set(TRELLIS2_AUTOREMESHER_SOURCES
+            ${TRELLIS2_AUTOREMESHER_DIR}/t2_ar_log.cpp
+            ${TRELLIS2_AUTOREMESHER_DIR}/src/AutoRemesher/autoremesher.cpp
+            ${TRELLIS2_AUTOREMESHER_DIR}/src/AutoRemesher/constrainedleastsquares.cpp
+            ${TRELLIS2_AUTOREMESHER_DIR}/src/AutoRemesher/framefield.cpp
+            ${TRELLIS2_AUTOREMESHER_DIR}/src/AutoRemesher/isotropicremesher.cpp
+            ${TRELLIS2_AUTOREMESHER_DIR}/src/AutoRemesher/meshseparator.cpp
+            ${TRELLIS2_AUTOREMESHER_DIR}/src/AutoRemesher/mixedintegerleastsquares.cpp
+            ${TRELLIS2_AUTOREMESHER_DIR}/src/AutoRemesher/parameterizer.cpp
+            ${TRELLIS2_AUTOREMESHER_DIR}/src/AutoRemesher/positionkey.cpp
+            ${TRELLIS2_AUTOREMESHER_DIR}/src/AutoRemesher/quadextractor.cpp
+            ${TRELLIS2_AUTOREMESHER_DIR}/src/AutoRemesher/quadparameterizer.cpp
+            ${TRELLIS2_AUTOREMESHER_DIR}/src/AutoRemesher/singularitysimplifier.cpp
+            ${TRELLIS2_AUTOREMESHER_DIR}/src/AutoRemesher/surfacemesh.cpp
+            ${TRELLIS2_AUTOREMESHER_DIR}/isotropicremesher/axisalignedboundingboxtree.cpp
+            ${TRELLIS2_AUTOREMESHER_DIR}/isotropicremesher/isotropichalfedgemesh.cpp
+            ${TRELLIS2_AUTOREMESHER_DIR}/isotropicremesher/isotropicremesher.cpp)
+        target_sources(trellis2 PRIVATE ${TRELLIS2_AUTOREMESHER_SOURCES})
+        # compat/ resolves the upstream <tbb/...> includes onto our std::thread
+        # shim, so no real TBB is required. See third_party/autoremesher/PATCHES.md.
+        # Deliberately NOT the vendor root: on a case-insensitive filesystem it
+        # would shadow the standard <version> header with the VERSION file.
+        # t2_ar_log.h and t2_tbb_shim.h are reached by relative include anyway.
+        target_include_directories(trellis2 PRIVATE
+            ${TRELLIS2_AUTOREMESHER_DIR}/include
+            ${TRELLIS2_AUTOREMESHER_DIR}/isotropicremesher
+            ${TRELLIS2_AUTOREMESHER_DIR}/compat)
+        target_link_libraries(trellis2 PRIVATE Eigen3::Eigen)
+        target_compile_definitions(trellis2 PRIVATE TRELLIS2_USE_AUTOREMESHER=1)
+        # Vendored code is not held to our warning level, and upstream's
+        # autoremesher.pro sets these globally: _USE_MATH_DEFINES for M_PI on
+        # the Windows CRT, NOMINMAX so <windows.h> does not break std::min/max.
+        # /bigobj is an upstream requirement for the parameterizer objects.
+        if(MSVC)
+            set_source_files_properties(${TRELLIS2_AUTOREMESHER_SOURCES}
+                PROPERTIES COMPILE_DEFINITIONS "_USE_MATH_DEFINES;NOMINMAX"
+                           COMPILE_OPTIONS "/w;/bigobj")
+        else()
+            set_source_files_properties(${TRELLIS2_AUTOREMESHER_SOURCES}
+                PROPERTIES COMPILE_DEFINITIONS "_USE_MATH_DEFINES;NOMINMAX"
+                           COMPILE_OPTIONS "-w")
+        endif()
+        set(TRELLIS2_HAVE_AUTOREMESHER ON)
+        message(STATUS "AutoRemesher quad remeshing: enabled (Eigen ${Eigen3_VERSION})")
+    elseif(Eigen3_FOUND)
+        message(STATUS "AutoRemesher quad remeshing: unavailable (Eigen ${Eigen3_VERSION} found, 5.x required)")
+    else()
+        message(STATUS "AutoRemesher quad remeshing: unavailable (Eigen 5.x not found; `vcpkg install eigen3`)")
+    endif()
+endif()
+
 set_property(TARGET trellis2 PROPERTY POSITION_INDEPENDENT_CODE ON)
 
 if(BUILD_SHARED_LIBS)

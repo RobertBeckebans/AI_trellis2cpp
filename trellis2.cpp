@@ -1499,7 +1499,7 @@ bool trellis2_dino_encode( trellis2_dino_model* m, const float* pixel_values, in
 		const std::string blk	 = "layer." + std::to_string( i );
 		const bool		  detail = taps && detail_first_last && ( i == 0 || i == hp.n_layers - 1 );
 		auto			  tn	 = [&]( const char* s ) { return "l" + std::to_string( i ) + "." + s; };
-		( void ) tn;
+		( void )tn;
 
 		ggml_tensor* hn = lnorm( h, blk + ".norm1" );
 		if( detail )

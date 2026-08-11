@@ -32,3 +32,22 @@ target_compile_features(dino_encode PRIVATE cxx_std_14)
 add_executable(mesh2glb mesh2glb.cpp)
 target_link_libraries(mesh2glb PRIVATE trellis2)
 target_compile_features(mesh2glb PRIVATE cxx_std_14)
+
+# Phase 1 smoke tool for the vendored AutoRemesher core: OBJ in, quad OBJ out.
+# Genuinely standalone: it compiles the vendored sources into its own target
+# rather than linking trellis2, because the core carries no TRELLIS2_API
+# decoration and would therefore not be reachable from a shared build. No
+# trellis2 API exists for this yet - that is Phase 3's quad_remesh.{h,cpp}.
+if(TRELLIS2_HAVE_AUTOREMESHER)
+    add_executable(quad_remesh_cli quad_remesh_cli.cpp ${TRELLIS2_AUTOREMESHER_SOURCES})
+    target_include_directories(quad_remesh_cli PRIVATE
+        ${TRELLIS2_AUTOREMESHER_DIR}/include
+        ${TRELLIS2_AUTOREMESHER_DIR}/isotropicremesher
+        ${TRELLIS2_AUTOREMESHER_DIR}/compat)
+    target_link_libraries(quad_remesh_cli PRIVATE Eigen3::Eigen Threads::Threads)
+    target_compile_definitions(quad_remesh_cli PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_features(quad_remesh_cli PRIVATE cxx_std_14)
+    if(WIN32)
+        target_link_libraries(quad_remesh_cli PRIVATE psapi)
+    endif()
+endif()
