@@ -19,6 +19,12 @@ The most important rules in brief:
   `plan_texture-stage.md`.
 - Documentation in English; code comments, identifiers, Git logs, and
   proposed commit messages in English.
+- The primary build is `cmake-ninja-win64-rocm.bat` (Windows, HIP/ROCm,
+  Radeon AI PRO R9700 / `gfx1201`) — assume that backend unless the task
+  says otherwise. It wipes `build/` first, so only run it on request.
+- This is a downstream fork: the pipeline is upstream work by rms80 and
+  Richard Palethorpe; this fork adds the Windows/HIP, Vulkan and DLL
+  paths. Check `git log` before attributing a design decision.
 - Formatting exclusively via `./format_code.sh` or `format_code.bat`
   with clang-format **18.1.8** — `ggml/` and `third_party/` are never
   reformatted.

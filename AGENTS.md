@@ -6,9 +6,19 @@ per-vertex PBR out, the entire inference in C++/ggml (no PyTorch at
 runtime). A Go demo server with a browser viewer drives the pipeline
 through a flat C-ABI.
 
-- **Author:** Robert Beckebans — structurally modeled after
-  [sam3.cpp](https://github.com/rms80/sam3.cpp), validation process
-  after depth-anything.cpp, fuzzing process after privacy-filter.cpp.
+- **Origin:** this is a downstream fork, not an original work. The
+  initial stage-1 geometry port is by rms80 (author of
+  [sam3.cpp](https://github.com/rms80/sam3.cpp), on which this project is
+  structurally modeled); the bulk of the pipeline — DINOv3 encoder,
+  shape-SLAT stage, 1024 cascade, PBR texturing, GLB export, print
+  remeshing, and the Go demo server — is by Richard Palethorpe
+  (`richiejp` remote, upstream). Validation process after
+  depth-anything.cpp, fuzzing process after privacy-filter.cpp.
+- **This fork:** Robert Beckebans — Windows/HIP/ROCm and Vulkan support,
+  the DLL build for the Go server, block-split decoding of the finest
+  decoder level, and the ggml 0.19 upgrade. Do not attribute upstream
+  work to this fork; check `git log`/`git blame` before claiming who
+  designed a given path.
 - **Language:** C++14 (C++17 only in the optional CGAL path), Go (demo
   server), Python (converter + PyTorch reference) — **code comments in
   English**
@@ -307,6 +317,46 @@ Not versioned (gitignored, large, regenerable, or private):
 
 ## Build & Run
 
+### Primary path: Windows + HIP/ROCm
+
+Development happens on Windows against a **Radeon AI PRO R9700**
+(RDNA4, `gfx1201`) via HIP/ROCm — that is the fastest backend available
+here and the configuration everything is expected to work in. Assume this
+path when reasoning about performance, VRAM, or backend behavior, unless
+the task explicitly concerns another backend.
+
+```bat
+cmake-ninja-win64-rocm.bat        :: THE build: HIP/ROCm, Ninja Multi-Config,
+                                  ::   shared lib -> build\bin\Release\libtrellis2.dll
+                                  ::   (+ ggml.dll, ggml-base.dll, ggml-cpu.dll, ggml-hip.dll)
+cmake-ninja-win64-rocm-cgal.bat   :: same, plus the CGAL alpha-wrap backend
+start_server.bat                  :: run the Go demo server against that DLL
+```
+
+What `cmake-ninja-win64-rocm.bat` pins, so it does not have to be
+rediscovered: ROCm at `C:\Program Files\AMD\ROCm\6.4`, its `clang`/
+`clang++` as the compilers, `GGML_HIP=ON` with `GGML_VULKAN=OFF`,
+`AMDGPU_TARGETS=gfx1201`, `hipblas_DIR` from the ROCm tree,
+`BUILD_SHARED_LIBS=ON`, `TRELLIS2_BUILD_TESTS=ON`,
+`TRELLIS2_BUILD_EXAMPLES=OFF`, and an **absolute**
+`CMAKE_RUNTIME_OUTPUT_DIRECTORY` (relative paths get reinterpreted
+per-subdirectory by ggml's nested CMakeLists).
+
+Caveat: the script starts with `rmdir /s /q build` and therefore throws
+away the existing build tree. Only run it on explicit request; for
+experiments configure a separate `build-*` directory by hand with the
+same flags.
+
+### Secondary Windows paths
+
+```bat
+cmake-ninja-win64-vulkan.bat      :: Vulkan backend
+cmake-ninja-win64-cpu.bat         :: pure CPU build
+cmake-vs2022-win64.bat            :: generate a Visual Studio project
+```
+
+### Portable / CI paths
+
 ```sh
 git submodule update --init --depth 1     # ggml
 
@@ -319,24 +369,12 @@ cmake -B build -DTRELLIS2_BUILD_TESTS=ON && cmake --build build -j
 ctest --test-dir build -LE model          # fast, without assets
 ctest --test-dir build                    # full parity (needs ggufs/ + dumps/)
 
-# shared library for the Go server
+# shared library for the Go server (Linux/CUDA, e.g. inside docker/Dockerfile.demo)
 cmake -B build-shared -DBUILD_SHARED_LIBS=ON -DGGML_CUDA=ON && cmake --build build-shared -j
 cd server && go build -o trellis2-server .
 
 # fuzzing (clang)
 cmake -B build-fuzz -DTRELLIS2_FUZZ=ON -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
-```
-
-Windows reference paths of the author (each with a preceding
-`rmdir /s /q build` — only start on explicit request):
-
-```bat
-cmake-ninja-win64-rocm.bat        :: HIP/ROCm, shared lib into build\bin
-cmake-ninja-win64-rocm-cgal.bat   :: same with CGAL alpha wrap
-cmake-ninja-win64-vulkan.bat      :: Vulkan backend
-cmake-ninja-win64-cpu.bat          :: pure CPU build
-cmake-vs2022-win64.bat            :: generate Visual Studio project
-start_server.bat                  :: start demo server locally
 ```
 
 Important CMake options:
