@@ -39,9 +39,24 @@ int main() {
                      out.verts.size()/3, out.tris.size()/3, out.normals.size()/3);
         return 1;
     }
-    if (!out.pbr.empty()) {
-        std::fprintf(stderr, "new Alpha Wrap vertices incorrectly retained source PBR\n");
+    // Alpha Wrap builds entirely new vertices, so source per-vertex material
+    // cannot be carried over directly; prepare_print_mesh samples it onto them
+    // by closest-surface projection for the preview. Every wrap vertex must get
+    // a value, and the source's constant metal/rough/alpha must survive the
+    // transfer unchanged.
+    if (out.pbr.size() != out.verts.size() / 3 * 6) {
+        std::fprintf(stderr, "preview PBR not projected onto every wrap vertex: %zu vs %zu\n",
+                     out.pbr.size()/6, out.verts.size()/3);
         return 1;
+    }
+    for (size_t v = 0; v < out.pbr.size(); v += 6) {
+        if (std::fabs(out.pbr[v+3] - 0.0f)  > 1e-5f ||
+            std::fabs(out.pbr[v+4] - 0.5f)  > 1e-5f ||
+            std::fabs(out.pbr[v+5] - 1.0f)  > 1e-5f) {
+            std::fprintf(stderr, "projected preview material at vertex %zu: %g %g %g\n",
+                         v/6, out.pbr[v+3], out.pbr[v+4], out.pbr[v+5]);
+            return 1;
+        }
     }
 
     // Closest-surface transfer must use barycentric interpolation on the source
