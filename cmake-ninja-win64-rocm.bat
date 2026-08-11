@@ -2,7 +2,6 @@
 setlocal
 
 rem --- Shared-library build for the Go demo server (libtrellis2.dll) ---
-rem   Static build for the CLI examples (trellis2.lib) is the regular
 rem   cmake-ninja-win64-rocm.bat. This one builds the DLL into build/
 rem   so the Go server can LoadLibrary it.
 

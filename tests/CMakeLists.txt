@@ -17,7 +17,7 @@ target_compile_features(test_ss_dec PRIVATE cxx_std_14)
 # PIL-compatible preprocessing byte-exactness vs the Python reference.
 add_executable(test_preprocess test_preprocess.cpp)
 target_link_libraries(test_preprocess PRIVATE trellis2)
-target_include_directories(test_preprocess PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../stb)
+target_include_directories(test_preprocess PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/stb)
 target_compile_features(test_preprocess PRIVATE cxx_std_14)
 
 # Deterministic border-connected black/white background removal (no models).

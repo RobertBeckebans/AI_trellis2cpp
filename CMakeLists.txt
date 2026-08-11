@@ -54,7 +54,7 @@ add_library(trellis2
     third_party/xatlas/xatlas.cpp)
 target_include_directories(trellis2 PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/stb
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb
 )
 # trellis2_capi.cpp reuses the example isosurface extractor for the demo path;
 # mesh_export.cpp vendors xatlas for the optional chart-based UV unwrap.

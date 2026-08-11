@@ -332,16 +332,15 @@ reduction.
 | `print_remesh.{h,cpp}` | optional CGAL Alpha Wrap reconstruction and closest-surface PBR transfer |
 | `examples/`    | CLI tools (`dino_info`, `ss_flow_info`, `ss_sample`, `ss_decode`, `ss_mesh`, `mesh2glb`) |
 | `examples/marching_cubes.h` | single-file isosurface → OBJ extractor      |
-| `third_party/` | vendored `xatlas` (print-wrap and opt-in ordinary UV unwrap) |
-| `ggml/`        | submodule, pinned to the same commit as sam3.cpp       |
-| `stb/`         | `stb_image.h` / `stb_image_write.h` for image I/O      |
+| `third_party/` | vendored `xatlas` (print-wrap and opt-in ordinary UV unwrap), `meshoptimizer`, and `stb` for image I/O |
+| `ggml/`        | submodule, tracking upstream ggml                      |
 
 ## License
 
-MIT. See [LICENSE](LICENSE). Vendored third-party code is also MIT:
-[meshoptimizer](https://github.com/zeux/meshoptimizer) (Arseny Kapoulkine) and
-[xatlas](https://github.com/jpcy/xatlas) (Jonathan Young) under `third_party/`,
-and `stb` (public domain / MIT).
+MIT. See [LICENSE](LICENSE). Vendored third-party code under `third_party/` is
+also MIT: [meshoptimizer](https://github.com/zeux/meshoptimizer) (Arseny
+Kapoulkine) and [xatlas](https://github.com/jpcy/xatlas) (Jonathan Young), plus
+[stb](https://github.com/nothings/stb) (public domain / MIT).
 
 The optional Alpha Wrap backend links against
 [CGAL](https://www.cgal.org/) 5.5 or newer. CGAL's 3D Alpha Wrapping package is
