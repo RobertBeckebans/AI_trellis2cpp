@@ -36,6 +36,17 @@ struct MeshExportOptions {
 	ComponentFilter components	 = ComponentFilter::RemoveTiny;
 };
 
+// Quality of a quad remesh, so callers can report it instead of guessing.
+// boundary_edges > 0 means the result is an open surface and must not be
+// advertised as printable.
+struct QuadMeshStats {
+	int	  quads			 = 0;
+	int	  triangles		 = 0;
+	int	  ngons			 = 0;
+	int	  boundary_edges = 0;
+	float area_retained	 = 0.0f;
+};
+
 // Geometry/material streams after the same component filtering used by
 // mesh_to_glb. Valid source triangles retain their original polygon density.
 struct PreparedMesh {
@@ -46,6 +57,25 @@ struct PreparedMesh {
 };
 
 TRELLIS2_API bool prepare_mesh( const float* verts, int nv, const int32_t* tris, int nt, const float* pbr, const MeshExportOptions& opt, PreparedMesh& out, std::string& err );
+
+// Quad remeshing sibling of prepare_print_mesh: component filter -> quad
+// remesh -> triangulation, with the source PBR sampled onto the new vertices
+// for a preview. Unlike the Alpha Wrap path this needs no CGAL, but it is also
+// NOT guaranteed to be watertight - AutoRemesher can drop islands and leave
+// boundaries. `stats` is optional and reports the quality numbers the caller
+// should surface (quad ratio, boundary edges, retained area).
+TRELLIS2_API bool quad_remesh_available();
+TRELLIS2_API bool prepare_quad_mesh( const float* verts,
+	int											  nv,
+	const int32_t*								  tris,
+	int											  nt,
+	const float*								  pbr,
+	const MeshExportOptions&					  opt,
+	int											  target_quads,
+	float										  adaptivity,
+	PreparedMesh&								  out,
+	QuadMeshStats*								  stats,
+	std::string&								  err );
 
 // Optional CPU print-remesh path backed by CGAL Alpha Wrap 3. The ratios are
 // fractions of the component-filtered mesh's bounding-box diagonal. The result

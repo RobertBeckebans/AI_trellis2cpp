@@ -2,7 +2,7 @@
 // portable vertex-coloured GLB. Exercises the CUDA-free component cleanup and
 // glTF path offline, with no models or GPU. T2GLB_XATLAS opts into image baking.
 //
-//   mesh2glb in.bin out.glb [texture_size] [--print [alpha_pct offset_pct]]
+//   mesh2glb in.bin out.glb [texture_size] [--print [alpha_pct offset_pct]] [--quad [target_quads]]
 //
 // The wire format is what the demo server emits at /api/mesh/{id}:
 //   magic[8]  u32 nv  u32 nt  f32[3nv] verts  f32[3nv] normals
@@ -31,8 +31,10 @@ int main( int argc, char** argv )
 		return 2;
 	}
 	t2glb::MeshExportOptions opt;
-	opt.components	  = t2glb::ComponentFilter::KeepAll;
-	bool  print_wrap  = false;
+	opt.components	   = t2glb::ComponentFilter::KeepAll;
+	bool  print_wrap   = false;
+	bool  quad_remesh  = false;
+	int	  target_quads = 20000;
 	float alpha_ratio = 0.01f, offset_ratio = 0.01f / 30.0f;
 	for( int i = 3; i < argc; ++i ) {
 		if( std::strcmp( argv[i], "--print" ) == 0 ) {
@@ -41,9 +43,17 @@ int main( int argc, char** argv )
 				alpha_ratio = std::atof( argv[++i] ) / 100.0f;
 			if( i + 1 < argc && argv[i + 1][0] != '-' )
 				offset_ratio = std::atof( argv[++i] ) / 100.0f;
+		} else if( std::strcmp( argv[i], "--quad" ) == 0 ) {
+			quad_remesh = true;
+			if( i + 1 < argc && argv[i + 1][0] != '-' )
+				target_quads = std::atoi( argv[++i] );
 		} else {
 			opt.texture_size = std::atoi( argv[i] );
 		}
+	}
+	if( quad_remesh && !t2glb::quad_remesh_available() ) {
+		std::fprintf( stderr, "quad remeshing unavailable: rebuild with Eigen 5.x (vcpkg install eigen3)\n" );
+		return 1;
 	}
 	if( print_wrap && !t2glb::print_remesh_available() ) {
 		std::fprintf( stderr, "print remeshing unavailable: rebuild with CGAL 5.5 or newer\n" );
@@ -115,7 +125,36 @@ int main( int argc, char** argv )
 		opt.components = t2glb::ComponentFilter::KeepAll;
 		std::fprintf( stderr, "wrap: %d verts  %d tris  %s\n", export_nv, export_nt, textured ? "rebaking source PBR atlas" : "geometry-only" );
 	}
-	const bool projected = print_wrap && textured;
+	// Quad remeshing runs after the optional wrap: when both are on, Alpha Wrap
+	// hands the remesher a clean 2-manifold, which is the input it wants. The
+	// result is still NOT guaranteed watertight - the quad stage can reintroduce
+	// boundaries - so this combination must not be advertised as printable.
+	t2glb::PreparedMesh quadded;
+	if( quad_remesh ) {
+		t2glb::QuadMeshStats qstats;
+		if( !t2glb::prepare_quad_mesh( export_verts, export_nv, export_tris, export_nt, export_pbr, opt, target_quads, 1.0f, quadded, &qstats, err ) ) {
+			std::fprintf( stderr, "prepare_quad_mesh: %s\n", err.c_str() );
+			return 1;
+		}
+		export_verts   = quadded.verts.data();
+		export_nv	   = ( int )quadded.verts.size() / 3;
+		export_tris	   = quadded.tris.data();
+		export_nt	   = ( int )quadded.tris.size() / 3;
+		export_pbr	   = quadded.pbr.empty() ? nullptr : quadded.pbr.data();
+		opt.components = t2glb::ComponentFilter::KeepAll;
+		std::fprintf( stderr,
+			"quad: %d verts  %d tris  %d quads / %d tris / %d ngons  %.1f%% area  %d boundary edges%s\n",
+			export_nv,
+			export_nt,
+			qstats.quads,
+			qstats.triangles,
+			qstats.ngons,
+			100.0 * qstats.area_retained,
+			qstats.boundary_edges,
+			qstats.boundary_edges ? "  (open surface - not printable as is)" : "  (closed)" );
+	}
+
+	const bool projected = ( print_wrap || quad_remesh ) && textured;
 	const bool baked	 = projected ? t2glb::mesh_to_projected_glb( export_verts, export_nv, export_tris, export_nt, verts.data(), ( int )nv, tris.data(), ( int )nt, pbr.data(), opt, glb, err ) :
 									   t2glb::mesh_to_glb( export_verts, export_nv, export_tris, export_nt, export_pbr, opt, glb, err );
 	if( !baked ) {

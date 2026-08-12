@@ -41,8 +41,10 @@ inside the vendored file itself; the files are never reformatted
 - **Vendored:** a **subset**, not the whole library —
   `meshoptimizer.h`, `allocator.cpp`, `indexgenerator.cpp`,
   `simplifier.cpp`, `vfetchoptimizer.cpp`.
-- **Used by:** `mesh_export.cpp` — index generation, vertex-fetch
-  optimisation, and decimation on the export path.
+- **Used by:** `quad_remesh.cpp` — `meshopt_simplify` bounds the input size
+  handed to the quad remesher. Note that these files sat in the tree unused and
+  uncompiled until then; they were added to a build target for the first time
+  with the quad stage.
 - **Notice:** MIT text at the end of `meshoptimizer.h`.
 
 ### tinybvh

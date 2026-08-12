@@ -1,6 +1,7 @@
 #include "mesh_export.h"
 
 #include "print_remesh.h"
+#include "quad_remesh.h"
 
 #include "xatlas.h"
 
@@ -908,6 +909,80 @@ bool prepare_print_mesh(
 		wrapped.pbr.clear();
 	}
 	out = std::move( wrapped );
+	return true;
+}
+
+bool quad_remesh_available()
+{
+	return t2quad::available();
+}
+
+bool prepare_quad_mesh( const float* verts,
+	int								 nv,
+	const int32_t*					 tris,
+	int								 nt,
+	const float*					 pbr,
+	const MeshExportOptions&		 opt,
+	int								 target_quads,
+	float							 adaptivity,
+	PreparedMesh&					 out,
+	QuadMeshStats*					 stats,
+	std::string&					 err )
+{
+	if( !t2quad::available() ) {
+		err = "quad remeshing is unavailable (this build has no AutoRemesher backend)";
+		return false;
+	}
+
+	// Same shape as prepare_print_mesh: filter first, so the remesher never sees
+	// the tiny stray islands the component filter exists to remove.
+	PreparedMesh source;
+	if( !prepare_mesh( verts, nv, tris, nt, pbr, opt, source, err ) )
+		return false;
+
+	t2quad::QuadRemeshOptions qopt;
+	if( target_quads > 0 )
+		qopt.target_quads = target_quads;
+	if( adaptivity >= 0.0f && adaptivity <= 1.0f )
+		qopt.adaptivity = adaptivity;
+
+	std::vector<float>		quad_verts;
+	std::vector<int32_t>	quad_faces, quad_face_sizes;
+	t2quad::QuadRemeshStats qstats;
+	if( !t2quad::remesh( source.verts, source.tris, qopt, quad_verts, quad_faces, quad_face_sizes, qstats, err ) )
+		return false;
+
+	PreparedMesh remeshed;
+	remeshed.verts = std::move( quad_verts );
+	// Everything downstream (GLB, .t2mesh, the C API) takes triangles, so the
+	// quad stream is split here. The quads themselves stay reachable through
+	// t2quad::remesh for a future quad-preserving export.
+	t2quad::triangulate( remeshed.verts, quad_faces, quad_face_sizes, remeshed.tris );
+	if( remeshed.tris.empty() ) {
+		err = "quad remeshing produced no triangles";
+		return false;
+	}
+	vertex_normals( remeshed.verts, remeshed.tris, remeshed.normals );
+
+	// Quad remeshing builds new vertices, so the source material is sampled onto
+	// them by closest-surface projection - the same cheap per-vertex preview the
+	// Alpha Wrap path uses, with the sharper per-texel rebake left to the GLB
+	// download. Best-effort: a failed projection previews untextured rather than
+	// failing the whole remesh.
+	if( !source.pbr.empty() && source.pbr.size() == source.verts.size() / 3 * 6 ) {
+		std::string perr;
+		if( !t2print::project_pbr( source.verts, source.tris, source.pbr, remeshed.verts, remeshed.pbr, perr ) )
+			remeshed.pbr.clear();
+	}
+
+	if( stats ) {
+		stats->quads		  = qstats.quads;
+		stats->triangles	  = qstats.triangles;
+		stats->ngons		  = qstats.ngons;
+		stats->boundary_edges = qstats.boundary_edges;
+		stats->area_retained  = qstats.area_retained;
+	}
+	out = std::move( remeshed );
 	return true;
 }
 

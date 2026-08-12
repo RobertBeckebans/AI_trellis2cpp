@@ -530,39 +530,33 @@ reduction of the GPL surface in this plan.
 
 ### Phase 3 — The `quad_remesh` module
 
-- [ ] `quad_remesh.{h,cpp}` per D6, with input validation matching
-      `print_remesh.cpp`'s style (finite coordinates, index range,
-      degenerate triangle skip, non-empty bbox).
-- [ ] Input preparation for the non-manifold dual-grid mesh. Phase 1
-      measured which defect actually matters, and it is **not** the one
-      assumed when this plan was written:
+Results: `docs/progress/autoremesher-quad-remesh_phase3-quad-module.md`.
 
-      | Input defect | Area retained |
-      |---|---|
-      | disjoint components | 101.7 % — fine |
-      | duplicated face | 99.3 % — fine |
-      | dangling triangle fin | 99.5 % — fine |
-      | **one shared (non-manifold) vertex** | **49.9 %** — half the model silently gone |
-
-      The cleanup must therefore **split non-manifold vertices and
-      edges** (vertex fanning). A position-key weld may only be applied
-      where it does not create such a junction — a naive weld would
-      manufacture exactly the defect that destroys the output.
-      Degenerate triangles and duplicate faces are cheap to drop but are
-      not the problem. Optional meshoptimizer decimation to an input
-      triangle budget stays as planned.
-- [ ] Progress: bridge `AutoRemesherProgressHandler` to the existing
-      stage-progress callback style.
-- [ ] Failure policy: report *how many* islands were dropped in `err`
-      instead of letting them vanish into stderr; a run that loses more
-      than a configurable fraction of the input area is an error, not a
-      success.
-- [ ] `t2glb::prepare_quad_mesh(...)` in `mesh_export.{h,cpp}`:
-      component filter → quad remesh → triangulation → the existing
-      projected bake.
-- [ ] `mesh2glb --quad [target_quads]`, combinable with `--print`
-      (D4 matrix), including the honest "not guaranteed watertight"
-      message.
+- [x] `quad_remesh.{h,cpp}` per D6, with input validation in
+      `print_remesh.cpp`'s style.
+- [x] Input preparation: drop zero-area and duplicate faces, optional
+      `meshopt_simplify` to an input triangle budget, split non-manifold
+      vertices. **Correction to the finding this phase was rewritten for:**
+      with degenerate removal in place the splitter changes nothing on the
+      synthetic fixtures — the zero-area pole triangles were the actual
+      trigger, and it was their *combination* with a non-manifold vertex
+      that destroyed the result. The pathological case went from 9.1 % to
+      96.7 % retained area either way. The splitter is kept as cheap
+      insurance, not as a measured necessity.
+- [x] Failure policy: `min_area_retained` refuses a half-remeshed model
+      instead of returning one, since AutoRemesher reports success anyway.
+      `QuadRemeshStats` surfaces quad ratio, boundary edges, retained area,
+      split vertices and dropped faces.
+- [x] `t2glb::prepare_quad_mesh(...)` — component filter → quad remesh →
+      triangulation → per-vertex PBR projection.
+- [x] `mesh2glb --quad [target_quads]`, combinable with `--print`. The
+      projected bake now runs for either, which is what first makes Phase
+      2's tinybvh path reachable from a CLI.
+- [ ] Progress bridge: `remesh()` accepts a `ProgressFn` but nothing calls
+      it yet — there is no long-running caller until the server lands.
+- [ ] Re-measure on a real 512³ mesh. Every number so far is synthetic, so
+      the default `target_quads`, `min_area_retained` and whether
+      `input_triangle_budget` should default on all remain unsettled.
 
 ### Phase 4 — C-API, server, viewer
 

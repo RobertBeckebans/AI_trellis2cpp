@@ -51,7 +51,15 @@ add_library(trellis2
     trellis2_capi.cpp trellis2_capi.h
     mesh_export.cpp mesh_export.h
     print_remesh.cpp print_remesh.h
-    third_party/xatlas/xatlas.cpp)
+    quad_remesh.cpp quad_remesh.h
+    third_party/xatlas/xatlas.cpp
+    # First actually-compiled use of the vendored meshoptimizer: quad_remesh.cpp
+    # uses meshopt_simplify to bound the remesher's input size. The files were in
+    # the tree before but were never added to a target.
+    third_party/meshoptimizer/allocator.cpp
+    third_party/meshoptimizer/indexgenerator.cpp
+    third_party/meshoptimizer/simplifier.cpp
+    third_party/meshoptimizer/vfetchoptimizer.cpp)
 target_include_directories(trellis2 PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb
@@ -61,6 +69,7 @@ target_include_directories(trellis2 PUBLIC
 target_include_directories(trellis2 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/examples
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/xatlas
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/meshoptimizer
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinybvh)
 
 # print_remesh.cpp traverses tinybvh's nodes for the closest-surface PBR
@@ -168,19 +177,21 @@ if(TRELLIS2_AUTOREMESHER)
             ${TRELLIS2_AUTOREMESHER_DIR}/isotropicremesher
             ${TRELLIS2_AUTOREMESHER_DIR}/compat)
         target_link_libraries(trellis2 PRIVATE Eigen3::Eigen)
-        target_compile_definitions(trellis2 PRIVATE TRELLIS2_USE_AUTOREMESHER=1)
+        # _USE_MATH_DEFINES / NOMINMAX are what upstream's autoremesher.pro sets
+        # globally; without the former M_PI is undefined on the Windows CRT. They
+        # are needed by the vendored sources *and* by quad_remesh.cpp, which
+        # includes the AutoRemesher headers, so they live on the target.
+        target_compile_definitions(trellis2 PRIVATE TRELLIS2_USE_AUTOREMESHER=1 _USE_MATH_DEFINES NOMINMAX)
         # Vendored code is not held to our warning level, and upstream's
         # autoremesher.pro sets these globally: _USE_MATH_DEFINES for M_PI on
         # the Windows CRT, NOMINMAX so <windows.h> does not break std::min/max.
         # /bigobj is an upstream requirement for the parameterizer objects.
         if(MSVC)
             set_source_files_properties(${TRELLIS2_AUTOREMESHER_SOURCES}
-                PROPERTIES COMPILE_DEFINITIONS "_USE_MATH_DEFINES;NOMINMAX"
-                           COMPILE_OPTIONS "/w;/bigobj")
+                PROPERTIES COMPILE_OPTIONS "/w;/bigobj")
         else()
             set_source_files_properties(${TRELLIS2_AUTOREMESHER_SOURCES}
-                PROPERTIES COMPILE_DEFINITIONS "_USE_MATH_DEFINES;NOMINMAX"
-                           COMPILE_OPTIONS "-w")
+                PROPERTIES COMPILE_OPTIONS "-w")
         endif()
         set(TRELLIS2_HAVE_AUTOREMESHER ON)
         message(STATUS "AutoRemesher quad remeshing: enabled (Eigen ${Eigen3_VERSION})")
