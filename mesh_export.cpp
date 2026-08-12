@@ -959,8 +959,8 @@ bool mesh_to_projected_glb( const float* target_verts,
 	std::vector<uint8_t>&				 out,
 	std::string&						 err )
 {
-	if( !t2print::available() ) {
-		err = "PBR projection is unavailable (rebuild with CGAL >= 5.5)";
+	if( !t2print::projection_available() ) {
+		err = "PBR projection is unavailable";
 		return false;
 	}
 	if( !target_verts || !target_tris || target_nv <= 0 || target_nt <= 0 || !source_verts || !source_tris || !source_pbr || source_nv <= 0 || source_nt <= 0 ) {

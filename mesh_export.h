@@ -71,8 +71,9 @@ TRELLIS2_API bool mesh_to_glb( const float* verts, int nv, const int32_t* tris, 
 
 // UV-unwrap `target` and bake its atlas by projecting each covered texel onto
 // the closest triangle of the dense PBR `source`.  Intended for assigning the
-// generated material to Alpha Wrap geometry; always uses xatlas and the CGAL
-// CPU closest-surface backend regardless of T2GLB_XATLAS.
+// generated material to replacement geometry; always uses xatlas regardless of
+// T2GLB_XATLAS.  The closest-surface search is backed by tinybvh, so this works
+// in every build — only alpha_wrap still requires CGAL.
 TRELLIS2_API bool mesh_to_projected_glb( const float* target_verts,
 	int												  target_nv,
 	const int32_t*									  target_tris,

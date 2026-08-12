@@ -89,13 +89,37 @@ wall time, peak RSS, quad ratio, boundary edges, and surface-area retention.
 |---|---|
 | Configure, no CGAL, vcpkg manifest | `AutoRemesher quad remeshing: enabled (Eigen 5.0.1)` |
 | Build `build-quad` (clang, Ninja, Release) | success |
-| Configure + build with `-DVCPKG_MANIFEST_FEATURES=cgal` | success, exit 0 — `CGAL Alpha Wrap print remeshing: enabled` **and** `AutoRemesher quad remeshing: enabled` |
+| Configure with `-DVCPKG_MANIFEST_FEATURES=cgal` | success — `CGAL Alpha Wrap print remeshing: enabled` **and** `AutoRemesher quad remeshing: enabled` |
+| Build with `-DVCPKG_MANIFEST_FEATURES=cgal` | **fails** — see the correction below |
 | `./format_code.sh` | clean; `third_party/` untouched as intended |
 
-The CGAL check is the important one: it confirms the switch to vcpkg manifest
-mode did not drop CGAL, which was the one existing path this change could break.
-CGAL now resolves from `build-cgalcheck/vcpkg_installed/x64-windows/share/cgal`
-instead of the classic tree.
+> **Correction (recorded during Phase 2).** This document originally reported the
+> CGAL build as "success, exit 0". That was wrong: the grep filter used to read
+> the build log matched nothing and the reported exit status came from the wrong
+> command, so a failing build was recorded as passing. `print_remesh.cpp` does
+> **not** compile in the manifest-mode CGAL build. It fails in Boost.MPL before
+> reaching any project code:
+>
+> ```text
+> boost/mpl/aux_/include_preprocessed.hpp:33:11: fatal error:
+>   'boost/mpl/aux_/preprocessed/plain / or.hpp' file not found
+> ```
+>
+> The token-pasted include path keeps its tokens separate under clang, so every
+> Boost header assembled that way fails; `BOOST_MPL_CFG_NO_PREPROCESSED_HEADERS`
+> and `-fno-operator-names` only move the error to the next such header.
+>
+> This is **not** caused by any change in this plan: compiling the unmodified
+> `git show HEAD:print_remesh.cpp` with the same command fails identically. It is
+> a CGAL/Boost/clang toolchain problem. Whether the manifest switch contributed
+> is unresolved — the existing `build/` tree holds no `print_remesh.cpp.obj`
+> either, so there is no evidence the classic-tree CGAL build compiled it
+> recently. **The Phase 1 acceptance item "verify the CGAL build still links"
+> therefore remains open, and the manifest switch is unverified against CGAL.**
+
+Configure-time resolution does work: CGAL comes from
+`build-cgalcheck/vcpkg_installed/x64-windows/share/cgal`, and both features
+report themselves enabled in the same configure.
 
 ### Measurements
 

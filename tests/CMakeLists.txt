@@ -76,11 +76,13 @@ add_executable(test_chunked_decode test_chunked_decode.cpp)
 target_link_libraries(test_chunked_decode PRIVATE trellis2)
 target_compile_features(test_chunked_decode PRIVATE cxx_std_14)
 
-if(TRELLIS2_HAVE_CGAL)
-    add_executable(test_print_remesh test_print_remesh.cpp)
-    target_link_libraries(test_print_remesh PRIVATE trellis2)
-    target_compile_features(test_print_remesh PRIVATE cxx_std_14)
-endif()
+# Builds unconditionally since the tinybvh projection backend landed: the
+# closest-surface half of print_remesh no longer needs CGAL, and the test now
+# covers it in every build. The Alpha Wrap half reports itself as skipped from
+# inside the test when CGAL is absent.
+add_executable(test_print_remesh test_print_remesh.cpp)
+target_link_libraries(test_print_remesh PRIVATE trellis2)
+target_compile_features(test_print_remesh PRIVATE cxx_std_14)
 
 # ── ctest registration ────────────────────────────────────────────────────────
 # Asset paths default to the in-repo locations produced by
@@ -100,9 +102,7 @@ set(T2_TESTS "${CMAKE_CURRENT_SOURCE_DIR}")
 add_test(NAME marching_cubes COMMAND test_marching_cubes)
 add_test(NAME pbr_sampling COMMAND test_pbr_sampling)
 add_test(NAME mesh_export COMMAND test_mesh_export)
-if(TRELLIS2_HAVE_CGAL)
-    add_test(NAME print_remesh COMMAND test_print_remesh)
-endif()
+add_test(NAME print_remesh COMMAND test_print_remesh)
 add_test(NAME background_removal COMMAND test_background_removal)
 
 # Skips (77) when no GPU backend is compiled in; slow because it moves ~1 GB.

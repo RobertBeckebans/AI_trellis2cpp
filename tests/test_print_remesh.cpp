@@ -6,24 +6,96 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 struct EdgeUse {
 	int count	  = 0;
 	int direction = 0;
 };
 
+namespace
+{
+
+// Deterministic bit-mixer, so the query set is identical on every platform and
+// run. Nothing here may depend on std::rand.
+uint32_t mix( uint32_t x )
+{
+	x ^= x >> 16;
+	x *= 0x7feb352du;
+	x ^= x >> 15;
+	x *= 0x846ca68bu;
+	x ^= x >> 16;
+	return x;
+}
+
+float unit( uint32_t x )
+{
+	return ( float )( mix( x ) >> 8 ) / ( float )( 1u << 24 );
+}
+
+// A displaced grid: enough triangles for the BVH to actually branch, and a
+// continuous per-vertex PBR field. Continuity matters for the backend
+// comparison — where two triangles share an edge, either may legitimately win
+// the nearest-point tie, and only a continuous field makes the two answers
+// comparable instead of arbitrarily different.
+void make_grid( int n, std::vector<float>& verts, std::vector<int32_t>& tris, std::vector<float>& pbr )
+{
+	verts.clear();
+	tris.clear();
+	pbr.clear();
+	for( int j = 0; j <= n; ++j ) {
+		for( int i = 0; i <= n; ++i ) {
+			const float x = ( float )i / ( float )n * 2.0f - 1.0f;
+			const float z = ( float )j / ( float )n * 2.0f - 1.0f;
+			const float y = 0.35f * std::sin( 3.0f * x ) * std::cos( 2.5f * z );
+			verts.push_back( x );
+			verts.push_back( y );
+			verts.push_back( z );
+			// Six channels straight from position: continuous by construction.
+			pbr.push_back( 0.5f * x + 0.5f );
+			pbr.push_back( 0.5f * y + 0.5f );
+			pbr.push_back( 0.5f * z + 0.5f );
+			pbr.push_back( 0.25f * x + 0.5f );
+			pbr.push_back( 0.25f * z + 0.5f );
+			pbr.push_back( 1.0f );
+		}
+	}
+	for( int j = 0; j < n; ++j ) {
+		for( int i = 0; i < n; ++i ) {
+			const int32_t a = j * ( n + 1 ) + i;
+			const int32_t b = a + 1;
+			const int32_t c = a + ( n + 1 );
+			const int32_t d = c + 1;
+			tris.push_back( a );
+			tris.push_back( c );
+			tris.push_back( d );
+			tris.push_back( a );
+			tris.push_back( d );
+			tris.push_back( b );
+		}
+	}
+}
+
+} // namespace
+
 int main()
 {
-	if( !t2glb::print_remesh_available() ) {
-		std::fprintf( stderr, "CGAL print-remesh test was built without its backend\n" );
-		return 77;
+	std::string err;
+
+	std::printf( "projection backend: %s\n", t2print::projection_backend() );
+	if( !t2print::projection_available() ) {
+		std::fprintf( stderr, "project_pbr reports itself unavailable, which should be impossible\n" );
+		return 1;
 	}
 
-	// A single open, zero-thickness triangle is deliberately not printable.
-	// Alpha Wrap must enclose it in a closed volume despite having no usable
-	// source connectivity or inside/outside orientation.
+	// ---------------------------------------------------------------------
+	// Closest-surface transfer must use barycentric interpolation on the source
+	// triangle, not nearest-vertex colors. The query is above (0.25,0.25,0),
+	// whose expected RGB weights are (0.5,0.25,0.25).
+	// ---------------------------------------------------------------------
 	const float	  verts[] = { 0, 0, 0, 1, 0, 0, 0, 1, 0 };
 	const int32_t tris[]  = { 0, 1, 2 };
 	const float	  pbr[]	  = {
@@ -46,10 +118,158 @@ int main()
 		0.5f,
 		1,
 	};
+	const std::vector<float>   source_verts( verts, verts + 9 );
+	const std::vector<int32_t> source_tris( tris, tris + 3 );
+	const std::vector<float>   source_pbr( pbr, pbr + 18 );
+	const std::vector<float>   queries = { 0.25f, 0.25f, 0.5f };
+	std::vector<float>		   projected;
+	if( !t2print::project_pbr( source_verts, source_tris, source_pbr, queries, projected, err ) || projected.size() != 6 ) {
+		std::fprintf( stderr, "project_pbr failed: %s\n", err.c_str() );
+		return 1;
+	}
+	const float expected[] = { 0.5f, 0.25f, 0.25f, 0.0f, 0.5f, 1.0f };
+	for( int i = 0; i < 6; ++i ) {
+		if( std::fabs( projected[i] - expected[i] ) > 1e-5f ) {
+			std::fprintf( stderr, "project_pbr channel %d: got %.7g expected %.7g\n", i, projected[i], expected[i] );
+			return 1;
+		}
+	}
+
+	// ---------------------------------------------------------------------
+	// Degenerate and duplicated triangles. CGAL refuses degenerate primitives in
+	// an AABB tree while tinybvh would happily index them, so both backends must
+	// be fed the same filtered set — otherwise a backend comparison compares two
+	// different inputs. A source that is *only* degenerate must fail cleanly
+	// rather than return garbage.
+	// ---------------------------------------------------------------------
+	{
+		std::vector<float>	 dv( source_verts );
+		std::vector<int32_t> dt( source_tris );
+		std::vector<float>	 dp( source_pbr );
+		dv.insert( dv.end(), { 2, 0, 0, 3, 0, 0, 4, 0, 0 } ); // collinear
+		dp.insert( dp.end(), 18, 0.0f );
+		dt.insert( dt.end(), { 3, 4, 5 } ); // zero-area triangle
+		dt.insert( dt.end(), { 0, 1, 2 } ); // exact duplicate of the first
+		dt.insert( dt.end(), { 0, 0, 1 } ); // repeated index
+		std::vector<float> got;
+		if( !t2print::project_pbr( dv, dt, dp, queries, got, err ) || got.size() != 6 ) {
+			std::fprintf( stderr, "project_pbr rejected a mesh with degenerate triangles: %s\n", err.c_str() );
+			return 1;
+		}
+		for( int i = 0; i < 6; ++i ) {
+			if( std::fabs( got[i] - expected[i] ) > 1e-5f ) {
+				std::fprintf( stderr, "degenerate triangles perturbed the result: channel %d got %.7g expected %.7g\n", i, got[i], expected[i] );
+				return 1;
+			}
+		}
+
+		const std::vector<float>   only_verts = { 0, 0, 0, 1, 0, 0, 2, 0, 0 };
+		const std::vector<int32_t> only_tris  = { 0, 1, 2 };
+		const std::vector<float>   only_pbr( 18, 0.5f );
+		std::vector<float>		   unused;
+		if( t2print::project_pbr( only_verts, only_tris, only_pbr, queries, unused, err ) ) {
+			std::fprintf( stderr, "an entirely degenerate source was accepted\n" );
+			return 1;
+		}
+	}
+
+	// ---------------------------------------------------------------------
+	// Backend comparison. Both are compiled whenever CGAL is present, so this
+	// runs them against each other on the same input in one binary.
+	// ---------------------------------------------------------------------
+	{
+		std::vector<float>	 gv, gp;
+		std::vector<int32_t> gt;
+		make_grid( 32, gv, gt, gp );
+
+		std::vector<float> q;
+		for( uint32_t i = 0; i < 4096; ++i ) {
+			q.push_back( unit( i * 3 + 0 ) * 2.4f - 1.2f );
+			q.push_back( unit( i * 3 + 1 ) * 1.6f - 0.8f );
+			q.push_back( unit( i * 3 + 2 ) * 2.4f - 1.2f );
+		}
+
+		std::vector<float> tiny;
+		if( !t2print::project_pbr_backend( "tinybvh", gv, gt, gp, q, tiny, err ) ) {
+			std::fprintf( stderr, "tinybvh projection failed: %s\n", err.c_str() );
+			return 1;
+		}
+		if( tiny.size() != ( q.size() / 3 ) * 6 ) {
+			std::fprintf( stderr, "tinybvh projection returned %zu values for %zu queries\n", tiny.size(), q.size() / 3 );
+			return 1;
+		}
+
+		std::vector<float> cgal;
+		if( t2print::project_pbr_backend( "cgal", gv, gt, gp, q, cgal, err ) ) {
+			double worst	= 0.0;
+			int	   worst_at = -1;
+			for( size_t i = 0; i < tiny.size(); ++i ) {
+				const double d = std::fabs( ( double )tiny[i] - cgal[i] );
+				if( d > worst ) {
+					worst	 = d;
+					worst_at = ( int )i;
+				}
+			}
+			// Both search the same filtered triangle set and interpolate with the
+			// same code, so the only legitimate difference is which triangle wins
+			// a near-tie at a shared edge. With a continuous source field that
+			// costs far less than this bound; a larger deviation means the two
+			// searches disagree about the nearest surface, which is a bug and not
+			// a tolerance to widen.
+			const double tolerance = 1e-4;
+			std::printf( "backend agreement: max |tinybvh - cgal| = %.3g over %zu samples\n", worst, tiny.size() );
+			if( worst > tolerance ) {
+				std::fprintf( stderr, "backends disagree at value %d: tinybvh %.7g vs cgal %.7g (tolerance %.3g)\n", worst_at, tiny[worst_at], cgal[worst_at], tolerance );
+				return 1;
+			}
+		} else {
+			std::printf( "backend comparison skipped: %s\n", err.c_str() );
+		}
+	}
+
+	// ---------------------------------------------------------------------
+	// The unwrap -> per-texel source projection -> PBR PNG GLB path. No longer
+	// CGAL-bound, so it runs in every build.
+	// ---------------------------------------------------------------------
 	t2glb::MeshExportOptions opt;
-	opt.components = t2glb::ComponentFilter::KeepAll;
+	opt.components	 = t2glb::ComponentFilter::KeepAll;
+	opt.texture_size = 64;
+	opt.dilate		 = 2;
+	{
+		// A two-triangle quad slightly above the source triangle: enough area to
+		// unwrap, and every texel projects onto the source.
+		const float			 target_verts[] = { -0.1f, -0.1f, 0.05f, 1.1f, -0.1f, 0.05f, 1.1f, 1.1f, 0.05f, -0.1f, 1.1f, 0.05f };
+		const int32_t		 target_tris[]	= { 0, 1, 2, 0, 2, 3 };
+		std::vector<uint8_t> glb;
+		if( !t2glb::mesh_to_projected_glb( target_verts, 4, target_tris, 2, verts, 3, tris, 1, pbr, opt, glb, err ) ) {
+			std::fprintf( stderr, "mesh_to_projected_glb failed: %s\n", err.c_str() );
+			return 1;
+		}
+		if( glb.size() < 20 || std::memcmp( glb.data(), "glTF", 4 ) != 0 ) {
+			std::fprintf( stderr, "projected bake returned an invalid GLB\n" );
+			return 1;
+		}
+		const std::string glb_bytes( ( const char* )glb.data(), glb.size() );
+		if( glb_bytes.find( "\"baseColorTexture\"" ) == std::string::npos || glb_bytes.find( "\"metallicRoughnessTexture\"" ) == std::string::npos ||
+			glb_bytes.find( "\"TEXCOORD_0\"" ) == std::string::npos || glb_bytes.find( "\"COLOR_0\"" ) != std::string::npos ) {
+			std::fprintf( stderr, "projected GLB is missing its UV PBR textures\n" );
+			return 1;
+		}
+	}
+
+	// ---------------------------------------------------------------------
+	// Alpha Wrap is still CGAL-only. Everything above already ran, so a build
+	// without CGAL reports the gap rather than masking it as a pass.
+	// ---------------------------------------------------------------------
+	if( !t2glb::print_remesh_available() ) {
+		std::printf( "RESULT: PASS (projection only; Alpha Wrap section skipped, built without CGAL)\n" );
+		return 0;
+	}
+
+	// A single open, zero-thickness triangle is deliberately not printable.
+	// Alpha Wrap must enclose it in a closed volume despite having no usable
+	// source connectivity or inside/outside orientation.
 	t2glb::PreparedMesh out;
-	std::string			err;
 	if( !t2glb::prepare_print_mesh( verts, 3, tris, 1, pbr, opt, 0.20f, 0.03f, out, err ) ) {
 		std::fprintf( stderr, "prepare_print_mesh failed: %s\n", err.c_str() );
 		return 1;
@@ -72,46 +292,6 @@ int main()
 			std::fprintf( stderr, "projected preview material at vertex %zu: %g %g %g\n", v / 6, out.pbr[v + 3], out.pbr[v + 4], out.pbr[v + 5] );
 			return 1;
 		}
-	}
-
-	// Closest-surface transfer must use barycentric interpolation on the source
-	// triangle, not nearest-vertex colors. The query is above (0.25,0.25,0),
-	// whose expected RGB weights are (0.5,0.25,0.25).
-	const std::vector<float>   source_verts( verts, verts + 9 );
-	const std::vector<int32_t> source_tris( tris, tris + 3 );
-	const std::vector<float>   source_pbr( pbr, pbr + 18 );
-	const std::vector<float>   queries = { 0.25f, 0.25f, 0.5f };
-	std::vector<float>		   projected;
-	if( !t2print::project_pbr( source_verts, source_tris, source_pbr, queries, projected, err ) || projected.size() != 6 ) {
-		std::fprintf( stderr, "project_pbr failed: %s\n", err.c_str() );
-		return 1;
-	}
-	const float expected[] = { 0.5f, 0.25f, 0.25f, 0.0f, 0.5f, 1.0f };
-	for( int i = 0; i < 6; ++i ) {
-		if( std::fabs( projected[i] - expected[i] ) > 1e-5f ) {
-			std::fprintf( stderr, "project_pbr channel %d: got %.7g expected %.7g\n", i, projected[i], expected[i] );
-			return 1;
-		}
-	}
-
-	// Exercise the complete target unwrap -> per-texel source projection ->
-	// PBR PNG GLB path independently of the legacy T2GLB_XATLAS switch.
-	opt.texture_size = 64;
-	opt.dilate		 = 2;
-	std::vector<uint8_t> glb;
-	if( !t2glb::mesh_to_projected_glb( out.verts.data(), ( int )out.verts.size() / 3, out.tris.data(), ( int )out.tris.size() / 3, verts, 3, tris, 1, pbr, opt, glb, err ) ) {
-		std::fprintf( stderr, "mesh_to_projected_glb failed: %s\n", err.c_str() );
-		return 1;
-	}
-	if( glb.size() < 20 || std::memcmp( glb.data(), "glTF", 4 ) != 0 ) {
-		std::fprintf( stderr, "projected bake returned an invalid GLB\n" );
-		return 1;
-	}
-	const std::string glb_bytes( ( const char* )glb.data(), glb.size() );
-	if( glb_bytes.find( "\"baseColorTexture\"" ) == std::string::npos || glb_bytes.find( "\"metallicRoughnessTexture\"" ) == std::string::npos ||
-		glb_bytes.find( "\"TEXCOORD_0\"" ) == std::string::npos || glb_bytes.find( "\"COLOR_0\"" ) != std::string::npos ) {
-		std::fprintf( stderr, "projected GLB is missing its UV PBR textures\n" );
-		return 1;
 	}
 
 	std::unordered_map<uint64_t, EdgeUse> edges;

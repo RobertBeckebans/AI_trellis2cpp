@@ -187,9 +187,10 @@ TRELLIS2_CAPI uint8_t* t2_bake_glb( const float* verts, int n_verts, const int* 
 /* Bake a UV-atlas PBR GLB for replacement geometry by closest-surface
 ** projection from a dense source mesh. Every covered target atlas texel is
 ** projected to a source triangle and receives barycentrically interpolated
-** source PBR. This is the CPU/CGAL counterpart of upstream's cuBVH rebake.
-** source_component_filter has the same 0/1/2 values as component_filter above.
-** Returns NULL when CGAL support is unavailable. */
+** source PBR. This is the CPU counterpart of upstream's cuBVH rebake, backed by
+** tinybvh, so it is available in every build — unlike t2_prepare_print_mesh,
+** which still needs CGAL.
+** source_component_filter has the same 0/1/2 values as component_filter above. */
 TRELLIS2_CAPI uint8_t* t2_bake_projected_glb( const float* target_verts,
 	int													   target_n_verts,
 	const int*											   target_tris,

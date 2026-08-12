@@ -1,4 +1,5 @@
 #include "mesh_export.h"
+#include "print_remesh.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -173,13 +174,18 @@ int main()
 		return 1;
 	}
 
-	// The API remains present in portable builds without CGAL and must fail
-	// explicitly instead of creating an untextured or incorrectly mapped GLB.
-	if( !t2glb::print_remesh_available() ) {
-		if( t2glb::mesh_to_projected_glb( verts, 4, tris, 4, verts, 4, tris, 4, pbr, opt, glb, err ) || err.find( "unavailable" ) == std::string::npos ) {
-			std::fprintf( stderr, "CGAL-free projected bake did not report unavailable\n" );
-			return 1;
-		}
+	// The projected bake used to require CGAL and was asserted here to fail
+	// without it. Since the tinybvh closest-surface backend landed it works in
+	// every build, so the inverse is now the regression to guard: a CGAL-free
+	// build must produce a real textured GLB, not an "unavailable" error.
+	// Only alpha_wrap still depends on CGAL.
+	if( !t2glb::mesh_to_projected_glb( verts, 4, tris, 4, verts, 4, tris, 4, pbr, opt, glb, err ) ) {
+		std::fprintf( stderr, "projected bake failed (backend %s): %s\n", t2print::projection_backend(), err.c_str() );
+		return 1;
+	}
+	if( glb.size() < 20 || std::memcmp( glb.data(), "glTF", 4 ) != 0 ) {
+		std::fprintf( stderr, "projected bake returned an invalid GLB\n" );
+		return 1;
 	}
 	std::puts( "RESULT: PASS" );
 	return 0;

@@ -60,7 +60,43 @@ target_include_directories(trellis2 PUBLIC
 # mesh_export.cpp vendors xatlas for the optional chart-based UV unwrap.
 target_include_directories(trellis2 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/examples
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/xatlas)
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/xatlas
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinybvh)
+
+# print_remesh.cpp traverses tinybvh's nodes for the closest-surface PBR
+# projection, which is why the texture path no longer needs CGAL.
+#
+# tiny_bvh.h's implementation half uses std::scoped_lock in its build job
+# system, so it needs C++17 — but the library itself stays C++14 (AGENTS.md
+# reserves C++17 for the optional CGAL path). Isolating the one implementation
+# TU in its own target keeps that promise: only this object is C++17, while
+# print_remesh.cpp includes the declaration half as plain C++14.
+#
+# TINYBVH_NO_SIMD is deliberate, not a workaround. tiny_bvh.h assumes that a
+# compiler defining _MSC_VER accepts SSE4.2/AVX intrinsics without target flags,
+# which is true for MSVC but not for clang targeting the MSVC ABI — that
+# combination fails to compile the wide-BVH ray traversal. The alternative,
+# adding -mavx2 here, would raise libtrellis2's CPU baseline to Haswell for the
+# whole library. We only use the scalar binned-SAH builder and our own scalar
+# nearest-point traversal, so none of the SIMD ray paths are called anyway.
+add_library(trellis2_tinybvh STATIC third_party/tinybvh/tiny_bvh_impl.cpp)
+target_include_directories(trellis2_tinybvh PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinybvh)
+target_compile_definitions(trellis2_tinybvh PUBLIC TINYBVH_NO_SIMD)
+target_compile_features(trellis2_tinybvh PRIVATE cxx_std_17)
+set_property(TARGET trellis2_tinybvh PROPERTY POSITION_INDEPENDENT_CODE ON)
+target_link_libraries(trellis2_tinybvh PRIVATE Threads::Threads)
+if(MSVC)
+    target_compile_options(trellis2_tinybvh PRIVATE /w /bigobj)
+else()
+    target_compile_options(trellis2_tinybvh PRIVATE -w)
+endif()
+target_link_libraries(trellis2 PRIVATE trellis2_tinybvh)
+
+# Select the tinybvh backend inside a CGAL build to compare the two in one binary.
+option(TRELLIS2_FORCE_TINYBVH "Use the tinybvh projection backend even when CGAL is available" OFF)
+if(TRELLIS2_FORCE_TINYBVH)
+    target_compile_definitions(trellis2 PRIVATE TRELLIS2_FORCE_TINYBVH=1)
+endif()
 
 find_package(Threads REQUIRED)  # xatlas uses std::thread
 

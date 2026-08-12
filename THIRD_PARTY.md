@@ -45,6 +45,23 @@ inside the vendored file itself; the files are never reformatted
   optimisation, and decimation on the export path.
 - **Notice:** MIT text at the end of `meshoptimizer.h`.
 
+### tinybvh
+
+- **Project:** <https://github.com/jbikker/tinybvh>
+- **License:** MIT License, Copyright (c) 2024 Jacco Bikker
+- **Version:** 1.7.1
+- **Vendored:** `third_party/tinybvh/tiny_bvh.h` — unmodified. None of the
+  demos, `tiny_ocl.h`, `testdata/`, or the OpenCL kernels were imported.
+  `tiny_bvh_impl.cpp` is ours: it defines `TINYBVH_IMPLEMENTATION` in exactly
+  one translation unit.
+- **Used by:** `print_remesh.cpp` — the BVH behind the closest-surface PBR
+  projection, which is why that path no longer needs CGAL.
+- **Note:** tinybvh has no nearest-primitive query, only ray traversal, so we
+  use it as the *builder* and traverse its nodes ourselves. That couples us to
+  its public `bvhNode`/`primIdx` layout — see `third_party/tinybvh/VERSION.md`
+  before bumping the version.
+- **Notice:** `third_party/tinybvh/LICENSE`.
+
 ### stb
 
 - **Project:** <https://github.com/nothings/stb> — Sean Barrett
@@ -90,8 +107,9 @@ cannot be resolved by accident.
 - **License:** CGAL is split-licensed. The **3D Alpha Wrapping**
   package used here is **GPL-3.0-or-later**, or available under a
   commercial CGAL license.
-- **Used by:** `print_remesh.cpp` — `alpha_wrap()` and, currently, the
-  closest-surface `project_pbr()` AABB tree.
+- **Used by:** `print_remesh.cpp` — `alpha_wrap()` only. The closest-surface
+  `project_pbr()` moved to tinybvh; CGAL remains available there as the
+  reference backend both are compared against.
 - **Encapsulation:** strictly behind `TRELLIS2_CGAL` /
   `TRELLIS2_USE_CGAL=1`. No CGAL header or type appears in
   `trellis2.h`, `trellis2_capi.h`, `mesh_export.h`, or in
@@ -174,7 +192,6 @@ reviewed — see
 
 | Component | License | Route | Purpose |
 |---|---|---|---|
-| [tinybvh](https://github.com/jbikker/tinybvh) — Jacco Bikker | MIT | vendored, `third_party/tinybvh/` | BVH builder for the CGAL-free closest-surface PBR transfer |
 | [AutoRemesher](https://github.com/huxingyi/autoremesher) core — Dust3D Project / Jeremy HU | MIT (since 1.0.0) | vendored, `third_party/autoremesher/` | quad remeshing for the mid-poly export path |
 | isotropicremesher — Jeremy HU | MIT | vendored with the above | required by the AutoRemesher core |
 | [Eigen](https://eigen.tuxfamily.org/) | MPL-2.0 | external, vcpkg / distro | sparse solvers inside AutoRemesher — see §3 |

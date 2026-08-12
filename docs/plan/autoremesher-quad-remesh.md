@@ -489,34 +489,40 @@ Results: `docs/progress/autoremesher-quad-remesh_phase1-vendor-core.md`.
 
 ### Phase 2 — tinybvh, so the texture path stops needing CGAL
 
-- [ ] Vendor `third_party/tinybvh/tiny_bvh.h` + `LICENSE` + `VERSION`
-      (v1.7.1 plus import commit). Header only — none of the demos,
-      `tiny_ocl.h`, `testdata/`, or the OpenCL kernels are imported.
-- [ ] `TINYBVH_IMPLEMENTATION` in exactly one TU. Candidate: a small
-      `third_party/tinybvh/tiny_bvh_impl.cpp` added to the `trellis2`
-      target, so `print_remesh.cpp` stays a plain consumer and a second
-      user (raycast bake, AO) does not cause duplicate symbols.
-- [ ] Nearest-point traversal over `BVH::bvhNode` / `primIdx` (D5) as
-      an own helper in `print_remesh.cpp` — vendored header unpatched.
-- [ ] `t2print::project_pbr` gets the tinybvh backend, selected by
-      `#ifdef`; `TRELLIS2_FORCE_TINYBVH` for A/B testing in a CGAL
-      build.
-- [ ] Check tinybvh's build threading against the query threading
-      already in `project_pbr` so the two do not oversubscribe; disable
-      `threadedBuild` if it does.
-- [ ] `tests/test_print_remesh.cpp`: extend so the tinybvh backend runs
-      unconditionally (no more 77-skip for the projection half) and,
-      when CGAL is present, both backends are compared against each
-      other with an explicit tolerance. Include a degenerate/duplicate
-      triangle fixture — CGAL rejects degenerate primitives outright
-      (`tri.is_degenerate()` skip), tinybvh does not, so the two must
-      be shown to agree on the same filtered input.
-- [ ] Benchmark both backends: build time and queries/s on a real
-      pipeline mesh.
-- [ ] `mesh_to_projected_glb` loses its "always CGAL" restriction; its
-      header comment in `mesh_export.h` and the `t2_bake_projected_glb`
-      doc block in `trellis2_capi.h` ("Returns NULL when CGAL support is
-      unavailable") are corrected.
+Results: `docs/progress/autoremesher-quad-remesh_phase2-tinybvh-projection.md`.
+
+- [x] Vendor `third_party/tinybvh/tiny_bvh.h` + `LICENSE` + `VERSION.md`
+      (v1.7.1). Header only — no demos, no `tiny_ocl.h`, no `testdata/`,
+      no OpenCL kernels. The header itself is unmodified.
+- [x] `TINYBVH_IMPLEMENTATION` in exactly one TU
+      (`third_party/tinybvh/tiny_bvh_impl.cpp`), in its own
+      `trellis2_tinybvh` target: tiny_bvh.h's implementation half needs
+      C++17 (`std::scoped_lock`) while the library stays C++14, which
+      `AGENTS.md` reserves C++17 for the CGAL path.
+- [x] Nearest-point traversal over `BVH::bvhNode` / `primIdx`, vendored
+      header unpatched. A stack-depth guard reports failure rather than
+      dropping a subtree and returning a plausible wrong answer.
+- [x] `t2print::project_pbr` gets the tinybvh backend;
+      `TRELLIS2_FORCE_TINYBVH` selects it inside a CGAL build. Both
+      backends are compiled whenever CGAL is present and reachable via
+      `project_pbr_backend()`, so the comparison needs one binary, not two.
+- [x] Build threading checked: the surface is fully built before any query
+      worker starts, so tinybvh's build pool never overlaps the query pool.
+- [x] `tests/test_print_remesh.cpp` builds and runs unconditionally now,
+      covering barycentric correctness, a degenerate/duplicate fixture, and
+      the cross-backend comparison. `tests/test_mesh_export.cpp` asserted
+      that a CGAL-free projected bake must *fail* — inverted, since that is
+      exactly what this phase fixes.
+- [x] `mesh_to_projected_glb` no longer gates on CGAL; the stale claims in
+      `mesh_export.h` and the `t2_bake_projected_glb` doc block in
+      `trellis2_capi.h` are corrected. Comment-only C-API change, so no
+      `T2_CAPI_ABI_VERSION` bump.
+- [ ] **Run the cross-backend comparison.** Blocked, not skipped: the CGAL
+      build does not compile on this toolchain (Boost.MPL vs clang,
+      reproducible with unmodified HEAD sources — see the Phase 1
+      correction). The test runs the comparison automatically as soon as a
+      CGAL build exists.
+- [ ] Benchmark both backends: build time and queries/s. Same blocker.
 
 This phase is independently valuable and does not depend on Phase 1 —
 it can be reviewed and merged on its own, and it is the cheapest real
