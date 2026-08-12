@@ -11,6 +11,8 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
+#include <utility>
 
 // Closest-surface PBR projection has two interchangeable backends. tinybvh is
 // MIT and always available, so the texture path no longer depends on CGAL; the
@@ -135,11 +137,14 @@ bool alpha_wrap( const std::vector<float>& source_verts,
 	std::vector<float>&					   out_verts,
 	std::vector<float>&					   out_normals,
 	std::vector<int32_t>&				   out_tris,
-	std::string&						   err )
+	std::string&						   err,
+	int*								   out_capped )
 {
 	out_verts.clear();
 	out_normals.clear();
 	out_tris.clear();
+	if( out_capped )
+		*out_capped = 0;
 #ifndef TRELLIS2_USE_CGAL
 	( void )source_verts;
 	( void )source_tris;
@@ -194,6 +199,75 @@ bool alpha_wrap( const std::vector<float>& source_verts,
 		if( faces.empty() ) {
 			err = "mesh has no valid triangles";
 			return false;
+		}
+
+		// Cap the source's openings before wrapping.
+		//
+		// alpha_wrap_3 carves inward from outside with a ball of radius alpha, so
+		// any opening wider than that ball lets it into the interior, where it
+		// hugs the surface from the inside as well. What comes back is then a
+		// closed *membrane* — two walls a hair apart — rather than a solid: twice
+		// the surface area, an enclosed volume near zero, and a second set of
+		// faces on the inside that the quad stage afterwards faithfully remeshes.
+		// A 1024 cascade figure leaves 4392 boundary loops, 51 of them wider than
+		// the ball, and one is enough to turn the whole wrap inside-out this way.
+		//
+		// The caps only have to *block* the ball; they are never part of the
+		// result, since the wrap resamples everything. So rather than tracing
+		// boundary loops in order — which the dual grid's non-manifold junctions
+		// defeat, and which is why the mesher's own fill_holes leaves these
+		// behind — take each connected group of boundary edges and fan it to that
+		// group's centroid. That needs no ordering and closes a group whatever
+		// shape it has.
+		{
+			auto edge_key = []( size_t a, size_t b ) {
+				const uint64_t x = ( uint64_t )a, y = ( uint64_t )b;
+				return a < b ? ( x << 32 ) | y : ( y << 32 ) | x;
+			};
+			std::unordered_map<uint64_t, int> edge_use;
+			edge_use.reserve( faces.size() * 2 );
+			for( const auto& f : faces )
+				for( int k = 0; k < 3; ++k )
+					edge_use[edge_key( f[k], f[( k + 1 ) % 3] )]++;
+
+			std::vector<size_t> parent( points.size() );
+			for( size_t i = 0; i < parent.size(); ++i )
+				parent[i] = i;
+			auto find = [&]( size_t x ) {
+				while( parent[x] != x ) {
+					parent[x] = parent[parent[x]];
+					x		  = parent[x];
+				}
+				return x;
+			};
+			std::vector<std::pair<size_t, size_t>> boundary;
+			for( const auto& e : edge_use ) {
+				if( e.second != 1 )
+					continue; // used by one triangle only: an open edge
+				const size_t a = ( size_t )( e.first >> 32 ), b = ( size_t )( e.first & 0xffffffffull );
+				boundary.emplace_back( a, b );
+				const size_t ra = find( a ), rb = find( b );
+				if( ra != rb )
+					parent[ra] = rb;
+			}
+			std::unordered_map<size_t, std::array<double, 4>> centre; // x, y, z, count
+			for( const auto& e : boundary )
+				for( const size_t v : { e.first, e.second } ) {
+					auto& c = centre[find( v )];
+					c[0] += CGAL::to_double( points[v].x() );
+					c[1] += CGAL::to_double( points[v].y() );
+					c[2] += CGAL::to_double( points[v].z() );
+					c[3] += 1.0;
+				}
+			std::unordered_map<size_t, size_t> apex;
+			for( const auto& c : centre ) {
+				apex[c.first] = points.size();
+				points.emplace_back( c.second[0] / c.second[3], c.second[1] / c.second[3], c.second[2] / c.second[3] );
+			}
+			for( const auto& e : boundary )
+				faces.push_back( { { e.first, e.second, apex[find( e.first )] } } );
+			if( out_capped )
+				*out_capped = ( int )centre.size();
 		}
 
 		const double dx = hi[0] - lo[0], dy = hi[1] - lo[1], dz = hi[2] - lo[2];

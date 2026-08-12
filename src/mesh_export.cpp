@@ -934,8 +934,10 @@ bool prepare_print_mesh(
 		return false;
 
 	PreparedMesh wrapped;
-	if( !t2print::alpha_wrap( source.verts, source.tris, alpha_ratio, offset_ratio, wrapped.verts, wrapped.normals, wrapped.tris, err ) )
+	int			 capped = 0;
+	if( !t2print::alpha_wrap( source.verts, source.tris, alpha_ratio, offset_ratio, wrapped.verts, wrapped.normals, wrapped.tris, err, &capped ) )
 		return false;
+	GLBLOG( "alpha wrap -> %zu verts %zu tris (%d source opening(s) capped first)", wrapped.verts.size() / 3, wrapped.tris.size() / 3, capped );
 	// Alpha Wrap constructs entirely new offset vertices, so source per-vertex
 	// attributes cannot be carried directly. When the source is textured, sample
 	// its material at each wrap vertex by closest-surface projection — the same

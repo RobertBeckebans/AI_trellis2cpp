@@ -29,6 +29,11 @@ TRELLIS2_API const char* projection_backend();
 // and cavities the wrap can enter; offset controls how tightly it encloses the
 // source.  Alpha Wrap creates an entirely new surface, so material transfer is
 // a separate closest-surface projection step (project_pbr below).
+//
+// The source is capped before wrapping (see the note in alpha_wrap): an opening
+// wider than alpha would let the carving ball inside and return a two-walled
+// membrane instead of a solid.  out_capped, when given, receives the number of
+// openings that were closed, so a caller can report how open its input was.
 TRELLIS2_API bool		 alpha_wrap( const std::vector<float>& source_verts,
 		   const std::vector<int32_t>&						   source_tris,
 		   float											   alpha_ratio,
@@ -36,7 +41,8 @@ TRELLIS2_API bool		 alpha_wrap( const std::vector<float>& source_verts,
 		   std::vector<float>&								   out_verts,
 		   std::vector<float>&								   out_normals,
 		   std::vector<int32_t>&							   out_tris,
-		   std::string&										   err );
+		   std::string&										   err,
+		   int*												   out_capped = nullptr );
 
 // Project query points onto the closest source triangles and barycentrically
 // interpolate their six-channel per-vertex PBR values.  This is the portable
