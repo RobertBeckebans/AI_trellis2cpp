@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace fdg
@@ -157,10 +158,13 @@ inline Mesh extract( const float* feats, const int32_t* coords, int n, int grid_
 //      union-find over mesh edges, so edge-adjacent vertices share a hemisphere
 //      and the interpolated normal stays clear of zero. Only genuinely frustrated
 //      (odd-cycle / non-manifold) edges are left flipped.
-// Final shading is orientation-independent (viewer uses abs(dot)), so only local
-// smoothness matters, not a globally correct outward sign. (Winding unification
-// and sign diffusion were both tried and are worse on this mesh: 2-colouring the
-// >2-face non-manifold edges frustrates more, and Jacobi diffusion checkerboards.)
+// Shading here is orientation-independent (our viewer uses abs(dot)), so only
+// local smoothness matters to it, not a globally correct outward sign. (Winding
+// unification and sign diffusion were both tried as a way to *derive* these
+// normals and are worse on this mesh: 2-colouring the >2-face non-manifold edges
+// frustrates more, and Jacobi diffusion checkerboards.) The winding itself is
+// repaired afterwards by orient_faces, which uses these normals as its reference
+// and so needs no propagation at all — external consumers do read the winding.
 inline std::vector<float> vertex_normals( const Mesh& m )
 {
 	const size_t		nv = m.n_verts();
@@ -415,6 +419,119 @@ inline void fill_holes( Mesh& m, int max_loop = 64, int max_passes = 4 )
 		}
 		if( m.tris.size() == before ) break; // converged
 	}
+}
+
+// Make the triangle winding agree with the shading normals, then turn whole
+// components right side out.
+//
+// extract() emits every quad in a fixed vertex order regardless of which way the
+// surface crosses the edge, so the raw dual grid is *unoriented*: roughly one
+// triangle in seven is wound against its neighbours. Our own viewer hides that
+// (it shades with abs(dot) and turns the normal toward the camera), but every
+// external consumer reads the winding instead: glTF front/back classification,
+// Blender's face-orientation overlay, CGAL's alpha wrap and xatlas' chart
+// packing. A glTF viewer flips the shading normal on a back-wound face, which
+// speckles the surface with inverted lighting.
+//
+// Unifying the winding *by propagation* is what fails on this mesh: edges shared
+// by more than two faces frustrate the 2-colouring (see vertex_normals). So we
+// orient against the smooth normals instead, which vertex_normals has already
+// made locally sign-consistent without needing manifoldness:
+//   1. per triangle, flip when the geometric normal opposes the interpolated
+//      shading normal — purely local, so nothing is left to frustrate;
+//   2. per vertex-connected component, flip winding *and* normals when the signed
+//      volume about the component's centroid is negative, so the mesh ends up
+//      facing outward rather than merely being self-consistent.
+// Step 2 negates normals only in whole components, which preserves the local sign
+// consistency step 1 relies on, and shading through abs(dot) is unchanged either
+// way. Returns the number of triangles re-wound in step 1.
+inline size_t orient_faces( Mesh& m, std::vector<float>& nrm )
+{
+	const size_t nv = m.n_verts();
+	if( m.n_tris() == 0 || nrm.size() != nv * 3 ) return 0;
+
+	// (1) local re-wind against the smooth normal
+	size_t flipped = 0;
+	for( size_t t = 0; t < m.tris.size(); t += 3 ) {
+		const int	 i0 = m.tris[t], i1 = m.tris[t + 1], i2 = m.tris[t + 2];
+		const float* a = &m.verts[( size_t )i0 * 3];
+		const float* b = &m.verts[( size_t )i1 * 3];
+		const float* c = &m.verts[( size_t )i2 * 3];
+		float		 e1[3], e2[3], fn[3];
+		for( int k = 0; k < 3; ++k ) {
+			e1[k] = b[k] - a[k];
+			e2[k] = c[k] - a[k];
+		}
+		detail::cross( e1, e2, fn );
+		double d = 0.0;
+		for( int k = 0; k < 3; ++k )
+			d += ( double )fn[k] * ( nrm[( size_t )i0 * 3 + k] + nrm[( size_t )i1 * 3 + k] + nrm[( size_t )i2 * 3 + k] );
+		if( d < 0.0 ) {
+			std::swap( m.tris[t + 1], m.tris[t + 2] );
+			++flipped;
+		}
+	}
+
+	// (2) vertex-connected components, as in drop_small_components
+	std::vector<int> p( nv );
+	for( size_t i = 0; i < nv; ++i )
+		p[i] = ( int )i;
+	auto find = [&]( int x ) {
+		while( p[x] != x ) {
+			p[x] = p[p[x]];
+			x	 = p[x];
+		}
+		return x;
+	};
+	auto uni = [&]( int a, int b ) {
+		a = find( a );
+		b = find( b );
+		if( a != b ) p[a] = b;
+	};
+	for( size_t t = 0; t < m.tris.size(); t += 3 ) {
+		uni( m.tris[t], m.tris[t + 1] );
+		uni( m.tris[t + 1], m.tris[t + 2] );
+	}
+
+	// centroid per component, over the vertices that actually carry faces
+	std::unordered_map<int, double> cx, cy, cz, cn;
+	for( size_t t = 0; t < m.tris.size(); t += 3 )
+		for( int k = 0; k < 3; ++k ) {
+			const int v = m.tris[t + k], r = find( v );
+			cx[r] += m.verts[( size_t )v * 3];
+			cy[r] += m.verts[( size_t )v * 3 + 1];
+			cz[r] += m.verts[( size_t )v * 3 + 2];
+			cn[r] += 1.0;
+		}
+	for( const auto& kv : cn ) {
+		const double inv = kv.second > 0.0 ? 1.0 / kv.second : 0.0;
+		cx[kv.first] *= inv;
+		cy[kv.first] *= inv;
+		cz[kv.first] *= inv;
+	}
+
+	// Signed volume about that centroid (divergence theorem). The few small holes
+	// fill_holes leaves open perturb the sum far less than they could its sign.
+	std::unordered_map<int, double> vol;
+	for( size_t t = 0; t < m.tris.size(); t += 3 ) {
+		const int	 i0 = m.tris[t], i1 = m.tris[t + 1], i2 = m.tris[t + 2];
+		const int	 r	= find( i0 );
+		const double ox = cx[r], oy = cy[r], oz = cz[r];
+		const double ax = m.verts[( size_t )i0 * 3] - ox, ay = m.verts[( size_t )i0 * 3 + 1] - oy, az = m.verts[( size_t )i0 * 3 + 2] - oz;
+		const double bx = m.verts[( size_t )i1 * 3] - ox, by = m.verts[( size_t )i1 * 3 + 1] - oy, bz = m.verts[( size_t )i1 * 3 + 2] - oz;
+		const double dx = m.verts[( size_t )i2 * 3] - ox, dy = m.verts[( size_t )i2 * 3 + 1] - oy, dz = m.verts[( size_t )i2 * 3 + 2] - oz;
+		vol[r] += ax * ( by * dz - bz * dy ) + ay * ( bz * dx - bx * dz ) + az * ( bx * dy - by * dx );
+	}
+
+	for( size_t t = 0; t < m.tris.size(); t += 3 )
+		if( vol[find( m.tris[t] )] < 0.0 ) std::swap( m.tris[t + 1], m.tris[t + 2] );
+	for( size_t v = 0; v < nv; ++v ) {
+		const auto it = vol.find( find( ( int )v ) );
+		if( it != vol.end() && it->second < 0.0 )
+			for( int k = 0; k < 3; ++k )
+				nrm[v * 3 + k] = -nrm[v * 3 + k];
+	}
+	return flipped;
 }
 
 } // namespace fdg

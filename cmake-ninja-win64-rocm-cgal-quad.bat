@@ -29,7 +29,7 @@ set DLL_OUT=%CD%\build\bin
 rem Which library does the closest-surface search for the texture rebake.
 rem OFF = CGAL (the reference), ON = tinybvh. Flip it to compare the two
 rem projection backends; the configure output prints which one is active.
-set FORCE_TINYBVH=OFF
+set FORCE_TINYBVH=ON
 
 rmdir /s /q build 2>nul
 

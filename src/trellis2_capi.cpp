@@ -1084,9 +1084,13 @@ t2_mesh_result* t2_generate( t2_pipeline* p,
 	// so the generated material volume can still be sampled at every vertex.
 	fdg::drop_small_components( mesh );
 	fdg::fill_holes( mesh );
-	r->verts   = std::move( mesh.verts );
-	r->tris	   = std::move( mesh.tris );
-	r->normals = fdg::vertex_normals( fdg::Mesh { r->verts, r->tris } );
+	r->normals = fdg::vertex_normals( mesh );
+	// The dual grid is unoriented. Our viewer shades around that, but glTF
+	// consumers and the wrap/remesh stages read the winding, so settle it here —
+	// last, once the triangle set is final and the normals exist to orient against.
+	fdg::orient_faces( mesh, r->normals );
+	r->verts = std::move( mesh.verts );
+	r->tris	 = std::move( mesh.tris );
 
 	// ── shape-flow keyframe replay ───────────────────────────────────────────
 	// Now is the safe window: the flow DiTs are freed (ensure_decode_vram) and

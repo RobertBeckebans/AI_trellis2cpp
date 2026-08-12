@@ -3,6 +3,7 @@
 #include "print_remesh.h"
 #include "quad_remesh.h"
 
+#include "flexible_dual_grid.h"
 #include "xatlas.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -890,6 +891,19 @@ namespace
 		// the geometry that will actually be written to the GLB.
 		if( allow_atlas_smoothing && std::getenv( "T2GLB_XATLAS" ) && !std::getenv( "T2GLB_NOSMOOTH" ) )
 			taubin_smooth( out.verts, out.tris, 3 );
+		// The area-weighted normals below cancel wherever neighbouring triangles
+		// disagree on their winding, and glTF consumers read the winding directly.
+		// Generation settles the orientation now (fdg::orient_faces), but meshes
+		// persisted before that still arrive here back-wound, so repair again —
+		// it is a no-op on a mesh that is already consistently oriented.
+		{
+			fdg::Mesh		   m { out.verts, std::vector<int>( out.tris.begin(), out.tris.end() ) };
+			std::vector<float> n	   = fdg::vertex_normals( m );
+			const size_t	   rewound = fdg::orient_faces( m, n );
+			out.tris.assign( m.tris.begin(), m.tris.end() );
+			if( rewound )
+				GLBLOG( "re-wound %zu of %d back-wound triangles to a consistent orientation", rewound, dnt );
+		}
 		vertex_normals( out.verts, out.tris, out.normals );
 		return true;
 	}
