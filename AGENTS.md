@@ -164,8 +164,20 @@ Example: `docs/PLAN.md`, phase "texture stage" →
   present/imperative mood, no Conventional-Commits prefix).
 - License: MIT — see [`LICENSE`](LICENSE).
 - Vendored third-party code under `third_party/` is also MIT or
-  Public Domain: `meshoptimizer`, `xatlas`, `stb`. New vendor
-  dependencies only with MIT/BSD/Azure/PD-compatible license.
+  Public Domain: `meshoptimizer`, `xatlas`, `tinybvh`, `stb`, and the
+  `autoremesher` core with its bundled `isotropicremesher`. New vendor
+  dependencies only with MIT/BSD/Azure/PD-compatible license. Every
+  component is itemised in [`THIRD_PARTY.md`](THIRD_PARTY.md), which is
+  updated in the same change that adds or removes one.
+- **Eigen / MPL-2.0 exception:** the optional quad remesh backend
+  (`src/quad_remesh.cpp`, `third_party/autoremesher/`) needs Eigen 5.x,
+  which is MPL-2.0 and therefore **not** vendored. It is declared in
+  `vcpkg.json` and consumed through `find_package(Eigen3 CONFIG)` →
+  `Eigen3::Eigen`, so no MPL2 file enters this MIT repository. MPL-2.0
+  is file-level copyleft and explicitly permits combination with a
+  differently licensed Larger Work (§3.3); using it unmodified through
+  a package manager discharges the remaining duty. A build without
+  Eigen 5.x self-disables the option at configure time.
 - **CGAL exception:** the optional alpha-wrap backend
   (`src/print_remesh.cpp`) links against CGAL ≥ 5.5. CGAL's 3D alpha
   wrapping is GPL-3.0-or-later. Therefore this path stays strictly
@@ -300,7 +312,7 @@ trellis2.cpp/
 │   └── web/                         # self-contained WebGL viewer (no CDN/build)
 ├── scripts/                         # converters, reference dumps, downloads, demo
 ├── docker/                          # Dockerfile.demo (CUDA+Go), Dockerfile.ref (PyTorch)
-├── third_party/                     # vendored: xatlas, meshoptimizer, stb
+├── third_party/                     # vendored: xatlas, meshoptimizer, tinybvh, autoremesher, stb
 ├── ggml/                            # submodule (RobertBeckebans/ggml)
 ├── tools/                           # small helper tools (cloc, yek)
 └── docs/
@@ -383,9 +395,11 @@ Important CMake options:
 
 | Option | Default | Effect |
 |---|---|---|
+| `TRELLIS2_AUTOREMESHER` | `ON` | quad-remesh probe; without Eigen 5.x simply inactive |
 | `TRELLIS2_BUILD_EXAMPLES` | `ON` | CLI examples in `examples/` |
 | `TRELLIS2_BUILD_TESTS` | `OFF` | ctest targets in `tests/` |
 | `TRELLIS2_CGAL` | `ON` | alpha-wrap probe; without CGAL ≥ 5.5 simply inactive |
+| `TRELLIS2_FORCE_TINYBVH` | `OFF` | PBR projection via tinybvh even when CGAL is present |
 | `TRELLIS2_FUZZ` | `OFF` | libFuzzer + ASan/UBSan, globally instrumented |
 | `TRELLIS2_METAL` | `ON` | Metal backend on Apple |
 | `TRELLIS2_USE_EXTERNAL_GGML` | `OFF` | ggml via `find_package` instead of submodule |
@@ -425,13 +439,21 @@ the stage enums for the progress callback, and the pipeline types.
 forgotten bump manifests as a silent memory error at runtime, not as
 a compile error.
 
-## `src/mesh_export.{h,cpp}` / `src/print_remesh.{h,cpp}` — export
+## `src/mesh_export.{h,cpp}` / `src/print_remesh.{h,cpp}` / `src/quad_remesh.{h,cpp}` — export
 
 - GLB export without GPU: dense materials as interpolated vertex
   colors, metallic/roughness additionally in the custom attribute
   `_METALLIC_ROUGHNESS`; optional xatlas UV atlas.
 - `print_remesh` is the optional CGAL path (watertight alpha wrap +
-  closest-surface PBR rebake). Fully behind `TRELLIS2_USE_CGAL`.
+  closest-surface PBR rebake). The alpha wrap is fully behind
+  `TRELLIS2_USE_CGAL`; the closest-surface projection is not, since it
+  also has a tinybvh backend and is compiled unconditionally.
+- `quad_remesh` is the optional AutoRemesher path (quad-dominant
+  mid-poly retopology), behind `TRELLIS2_AUTOREMESHER` and MIT
+  throughout. It is **not** a replacement for the wrap: it guarantees
+  nothing about closedness and reports `boundary_edges` so callers can
+  say so. The two compose — see
+  [`docs/architecture/quad-remesh.md`](docs/architecture/quad-remesh.md).
 
 ## `server/` — Go demo server
 

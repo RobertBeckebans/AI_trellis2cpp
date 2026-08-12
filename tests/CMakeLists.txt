@@ -84,6 +84,13 @@ add_executable(test_print_remesh test_print_remesh.cpp)
 target_link_libraries(test_print_remesh PRIVATE trellis2)
 target_compile_features(test_print_remesh PRIVATE cxx_std_14)
 
+# Structural invariants of the AutoRemesher quad stage on synthetic fixtures.
+# Builds unconditionally — t2quad::available() is compiled either way — and the
+# test skips itself (77) when the backend or Eigen 5.x was absent at configure.
+add_executable(test_quad_remesh test_quad_remesh.cpp)
+target_link_libraries(test_quad_remesh PRIVATE trellis2)
+target_compile_features(test_quad_remesh PRIVATE cxx_std_14)
+
 # ── ctest registration ────────────────────────────────────────────────────────
 # Asset paths default to the in-repo locations produced by
 # scripts/download_models.sh + converters + scripts/refgen.sh, overridable via
@@ -104,6 +111,10 @@ add_test(NAME pbr_sampling COMMAND test_pbr_sampling)
 add_test(NAME mesh_export COMMAND test_mesh_export)
 add_test(NAME print_remesh COMMAND test_print_remesh)
 add_test(NAME background_removal COMMAND test_background_removal)
+
+# Skips (77) in a build without the AutoRemesher backend. No model assets.
+add_test(NAME quad_remesh COMMAND test_quad_remesh)
+set_tests_properties(quad_remesh PROPERTIES SKIP_RETURN_CODE 77)
 
 # Skips (77) when no GPU backend is compiled in; slow because it moves ~1 GB.
 add_test(NAME large_rows COMMAND test_large_rows)

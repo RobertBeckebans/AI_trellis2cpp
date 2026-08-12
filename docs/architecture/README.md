@@ -16,9 +16,9 @@ index links them by topic.
 
 ## Overview
 
-- [`<MODULE>.md`](<MODULE>.md) — <topic 1: e.g. data flow, pipelines,
-  data formats>.
-- [`<MODULE2>.md`](<MODULE2>.md) — <topic 2>.
+- [`quad-remesh.md`](quad-remesh.md) — the mid-poly quad topology stage:
+  how it relates to the Alpha Wrap print path, benchmarks on synthetic
+  and real pipeline geometry, and the input defects that break it.
 - [`../plan/ROADMAP.md`](../plan/ROADMAP.md) — vision, roadmap, and
   overall architecture.
 

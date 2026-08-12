@@ -592,22 +592,30 @@ showing these numbers instead of implying a clean retopology.
 
 ### Phase 5 — Validation and documentation
 
-- [ ] `tests/test_quad_remesh.cpp` (label: no model assets required):
-      cube/sphere fixtures, deterministic-output check (two runs on the
-      same input must be byte-identical — the merge is island-ordered,
-      so this should hold and is worth asserting), quad-ratio floor,
-      index-range and finiteness invariants, and an explicit test that
-      documents that boundary edges *may* exist.
-- [ ] Benchmark table in `docs/architecture/` with the Phase 1
-      numbers: mode × input size × time × triangle/quad count.
-- [ ] `AGENTS.md`: third-party list, MPL2 decision, and the new CMake
-      options.
-- [ ] Move AutoRemesher, isotropicremesher, tinybvh, and Eigen from
-      the *Planned additions* table of `THIRD_PARTY.md` into the real
-      sections, and link `THIRD_PARTY.md` from the `## License` section
-      of `README.md`.
-- [ ] `docs/progress/<key>_<phase>-autoremesher-quad-remesh.md` per
-      completed phase, `Commits: <to be added after review>`.
+Results: `docs/progress/autoremesher-quad-remesh_phase5-validation-docs.md`.
+
+- [x] `tests/test_quad_remesh.cpp` (ctest `quad_remesh`, no model assets,
+      skips with 77 without the backend): cube/sphere fixtures,
+      deterministic-output check (two runs byte-identical, statistics
+      included — it holds), quad-ratio floor, index-range and finiteness
+      invariants, and an explicit test that documents that boundary edges
+      *may* exist. Two additions beyond the plan: the reported statistics
+      are recounted from the face stream and compared, since the server
+      and viewer act on them, and `triangulate()` is checked for covering
+      every face exactly once.
+- [x] Benchmark table in `docs/architecture/quad-remesh.md`: the Phase 1
+      synthetic numbers, the Phase 4 coarse measurement, and this
+      branch's 1024³ runs, plus the Phase 1 input-defect table.
+- [x] `AGENTS.md`: third-party list, a new Eigen/MPL-2.0 exception bullet
+      beside the CGAL one, `TRELLIS2_AUTOREMESHER` and
+      `TRELLIS2_FORCE_TINYBVH` in the options table, repository tree, and
+      the export section extended to `quad_remesh`.
+- [x] AutoRemesher, isotropicremesher and Eigen moved out of the *Planned
+      additions* table of `THIRD_PARTY.md` into the real sections;
+      `THIRD_PARTY.md` linked from the `## License` section of
+      `README.md`. (tinybvh was already promoted in Phase 2.)
+- [x] `docs/progress/autoremesher-quad-remesh_phase5-validation-docs.md`,
+      `Commits: <to be added after review>`.
 
 ## Tests / verification
 

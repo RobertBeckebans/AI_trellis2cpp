@@ -64,6 +64,40 @@ inside the vendored file itself; the files are never reformatted
   before bumping the version.
 - **Notice:** `third_party/tinybvh/LICENSE`.
 
+### AutoRemesher
+
+- **Project:** <https://github.com/huxingyi/autoremesher> — Dust3D Project /
+  Jeremy HU
+- **License:** MIT License — the 1.0.0 release relicensed from GPLv3.
+- **Version:** 1.0.0 (`autoremesher.pro` VERSION 1.0.0.9), imported 2026-08-11.
+  The upstream commit is **not yet pinned**: it came from a local source drop
+  rather than a clone. See `third_party/autoremesher/VERSION.md`.
+- **Vendored:** a **subset** — upstream `src/AutoRemesher/`,
+  `include/AutoRemesher/`, and `thirdparty/isotropicremesher/`, 528 KB. The Qt
+  application, shaders, resources, and the bundled Eigen/TBB/QtAwesome copies
+  were **not** imported. The upstream directory layout is preserved because the
+  umbrella headers reach the implementation through relative paths.
+- **Ours, not upstream:** `t2_tbb_shim.h` (TBB's four used entry points over
+  `std::thread`), `compat/tbb/*.h` (the header names the sources include), and
+  `t2_ar_log.{h,cpp}`.
+- **Used by:** `quad_remesh.cpp` — the quad-dominant mid-poly export path.
+- **Modifications:** only the mechanical redirect of 35 unconditional
+  `std::cerr` writes to `T2_AR_LOG`, recorded as a replayable `sed` in
+  `third_party/autoremesher/PATCHES.md`. **The sources carry no TBB patch** —
+  removing TBB is done entirely by the shim and the compat headers.
+- **Notice:** `third_party/autoremesher/LICENSE`.
+
+### isotropicremesher
+
+- **Project:** bundled in AutoRemesher as `thirdparty/isotropicremesher` —
+  Jeremy HU
+- **License:** MIT License
+- **Vendored:** `third_party/autoremesher/isotropicremesher/`, 11 files,
+  imported unmodified with the core above.
+- **Used by:** the AutoRemesher core, which requires it; nothing in this
+  project calls it directly.
+- **Notice:** covered by `third_party/autoremesher/LICENSE`.
+
 ### stb
 
 - **Project:** <https://github.com/nothings/stb> — Sean Barrett
@@ -131,7 +165,7 @@ build:
 
 The LGPL components are consumed as unmodified shared libraries.
 
-### Eigen — planned, optional
+### Eigen — optional
 
 - **Project:** <https://gitlab.com/libeigen/eigen>
 - **License:** **MPL-2.0** (some bundled files under BSD or other
@@ -140,8 +174,10 @@ The LGPL components are consumed as unmodified shared libraries.
 - **Version:** 5.0.1 — the version upstream AutoRemesher bundles and
   what `vcpkg install eigen3` resolves to. The CMake floor is the whole
   5.x line, which excludes the 3.4.0 shipped by Debian/Ubuntu.
-- **Planned use:** required by the AutoRemesher quad stage
-  (see [`docs/plan/autoremesher-quad-remesh.md`](docs/plan/autoremesher-quad-remesh.md)).
+- **Used by:** the vendored AutoRemesher core's sparse solvers, and therefore
+  required by `TRELLIS2_AUTOREMESHER`. Absent Eigen 5.x the option
+  self-disables at configure time and the quad stage reports itself
+  unavailable at runtime.
 - **Deliberately not vendored.** Declared in the project's `vcpkg.json`
   manifest and consumed through
   `find_package(Eigen3 5.0...<6 CONFIG)` → `Eigen3::Eigen`, so no MPL2
@@ -187,13 +223,11 @@ not.
 
 ## Planned additions
 
-The following are proposed but **not yet imported**. They become real
-entries above only once the corresponding phase is implemented and
-reviewed — see
-[`docs/plan/autoremesher-quad-remesh.md`](docs/plan/autoremesher-quad-remesh.md).
+Proposed components are listed here and **not yet imported**. They become
+real entries above only once the corresponding phase is implemented and
+reviewed.
 
-| Component | License | Route | Purpose |
-|---|---|---|---|
-| [AutoRemesher](https://github.com/huxingyi/autoremesher) core — Dust3D Project / Jeremy HU | MIT (since 1.0.0) | vendored, `third_party/autoremesher/` | quad remeshing for the mid-poly export path |
-| isotropicremesher — Jeremy HU | MIT | vendored with the above | required by the AutoRemesher core |
-| [Eigen](https://eigen.tuxfamily.org/) | MPL-2.0 | external, vcpkg / distro | sparse solvers inside AutoRemesher — see §3 |
+**None at present.** AutoRemesher, isotropicremesher and Eigen were the last
+entries here and moved into §1 and §3 with
+[`docs/plan/autoremesher-quad-remesh.md`](docs/plan/autoremesher-quad-remesh.md)
+Phase 5.

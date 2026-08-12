@@ -332,17 +332,32 @@ reduction.
 | `src/print_remesh.{h,cpp}` | optional CGAL Alpha Wrap reconstruction and closest-surface PBR transfer |
 | `examples/`    | CLI tools (`dino_info`, `ss_flow_info`, `ss_sample`, `ss_decode`, `ss_mesh`, `mesh2glb`) |
 | `examples/marching_cubes.h` | single-file isosurface → OBJ extractor      |
-| `third_party/` | vendored `xatlas` (print-wrap and opt-in ordinary UV unwrap), `meshoptimizer`, and `stb` for image I/O |
+| `src/quad_remesh.{h,cpp}` | optional AutoRemesher quad-dominant mid-poly retopology |
+| `third_party/` | vendored `xatlas` (print-wrap and opt-in ordinary UV unwrap), `meshoptimizer`, `tinybvh`, the `autoremesher` core, and `stb` for image I/O |
 | `ggml/`        | submodule, tracking upstream ggml                      |
 
 ## License
 
-MIT. See [LICENSE](LICENSE). Vendored third-party code under `third_party/` is
-also MIT: [meshoptimizer](https://github.com/zeux/meshoptimizer) (Arseny
-Kapoulkine) and [xatlas](https://github.com/jpcy/xatlas) (Jonathan Young), plus
+MIT. See [LICENSE](LICENSE). Every third-party component, its license, what it
+is used for and how it is obtained is listed in
+[THIRD_PARTY.md](THIRD_PARTY.md) — read that before adding a dependency.
+
+Vendored code under `third_party/` is also MIT:
+[meshoptimizer](https://github.com/zeux/meshoptimizer) (Arseny Kapoulkine),
+[xatlas](https://github.com/jpcy/xatlas) (Jonathan Young),
+[tinybvh](https://github.com/jbikker/tinybvh) (Jacco Bikker) and the
+[AutoRemesher](https://github.com/huxingyi/autoremesher) core with
+isotropicremesher (Dust3D Project / Jeremy HU), plus
 [stb](https://github.com/nothings/stb) (public domain / MIT).
 
-The optional Alpha Wrap backend links against
-[CGAL](https://www.cgal.org/) 5.5 or newer. CGAL's 3D Alpha Wrapping package is
-GPL-3.0-or-later (or available under a commercial CGAL license), so binaries
-built with `TRELLIS2_CGAL=ON` and CGAL detected are subject to those terms.
+Two optional dependencies are resolved at configure time rather than vendored:
+
+- The Alpha Wrap backend links against [CGAL](https://www.cgal.org/) 5.5 or
+  newer. CGAL's 3D Alpha Wrapping package is GPL-3.0-or-later (or available
+  under a commercial CGAL license), so binaries built with `TRELLIS2_CGAL=ON`
+  **and** CGAL detected are subject to those terms. It is a vcpkg manifest
+  *feature*, so a default configure cannot pull it in by accident.
+- The quad remesh stage needs [Eigen](https://eigen.tuxfamily.org/) 5.x, which
+  is MPL-2.0. It is used unmodified and never vendored, so no MPL2 file enters
+  this repository; MPL-2.0 is file-level copyleft and explicitly permits
+  combination with a differently licensed Larger Work.
