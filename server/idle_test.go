@@ -124,7 +124,7 @@ func TestKeepAllExportPreviewUsesOriginalMesh(t *testing.T) {
 	original := &meshData{NVerts: 3, NTris: 1}
 	j := &job{mesh: original}
 	s := &server{}
-	got, err := s.preparedExportMesh(j, exportOptions{textureSize: 2048, componentFilter: 2})
+	got, err := s.preparedExportMesh(j, exportOptions{textureSize: 2048, componentFilter: 2}, newStageLog())
 	if err != nil {
 		t.Fatal(err)
 	}

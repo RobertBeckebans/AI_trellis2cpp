@@ -62,6 +62,58 @@ type frameMeta struct {
 // stageTiming records aggregate wall time spent in a reported pipeline stage.
 // It includes CPU work and host/device handoff time, which a GPU-utilisation
 // graph alone cannot explain.
+// stageLog accumulates named phase durations and prints them as one block at
+// the end, so a slow run can be attributed to a phase instead of guessed at.
+// Repeated names accumulate, which keeps a per-step stage on one line.
+type stageLog struct {
+	mu      sync.Mutex
+	order   []string
+	ms      map[string]int64
+	started time.Time
+}
+
+func newStageLog() *stageLog {
+	return &stageLog{ms: map[string]int64{}, started: time.Now()}
+}
+
+func (sl *stageLog) add(name string, d time.Duration) {
+	if sl == nil {
+		return
+	}
+	sl.mu.Lock()
+	defer sl.mu.Unlock()
+	if _, seen := sl.ms[name]; !seen {
+		sl.order = append(sl.order, name)
+	}
+	sl.ms[name] += d.Milliseconds()
+}
+
+// track runs fn and books its duration under name.
+func (sl *stageLog) track(name string, fn func() error) error {
+	started := time.Now()
+	err := fn()
+	sl.add(name, time.Since(started))
+	return err
+}
+
+// dump prints the block. Nothing is printed when no phase was recorded, so a
+// cache hit stays quiet instead of logging an empty table.
+func (sl *stageLog) dump(title string) {
+	if sl == nil {
+		return
+	}
+	sl.mu.Lock()
+	defer sl.mu.Unlock()
+	if len(sl.order) == 0 {
+		return
+	}
+	log.Printf("─── %s ───", title)
+	for _, name := range sl.order {
+		log.Printf("  %-32s %6.2f s", name, float64(sl.ms[name])/1000)
+	}
+	log.Printf("  %-32s %6.2f s", "total", time.Since(sl.started).Seconds())
+}
+
 type stageTiming struct {
 	Stage        string `json:"stage"`
 	Milliseconds int64  `json:"milliseconds"`
@@ -150,6 +202,7 @@ func (s *server) worker() {
 			}
 			j.StageTimings = append(j.StageTimings, stageTiming{Stage: stage, Milliseconds: ms})
 		}
+		lastProgressLog := time.Time{}
 		setStage := func(stage string, step, total int) {
 			now := time.Now()
 			j.mu.Lock()
@@ -158,9 +211,18 @@ func (s *server) worker() {
 					addStageTime(currentStage, now.Sub(stageStarted))
 				}
 				currentStage, stageStarted = stage, now
+				lastProgressLog = time.Time{}
+				log.Printf("  %s ...", stage)
 			}
 			j.Stage, j.Step, j.Total = stage, step, total
 			j.mu.Unlock()
+			// Minimal progress trace, throttled: a multi-minute stage should look
+			// alive in the console rather than hung. Only stages reporting a step
+			// count produce these.
+			if total > 0 && (now.Sub(lastProgressLog) >= 2*time.Second || step >= total) {
+				lastProgressLog = now
+				log.Printf("    ... %d / %d (%.1f s)", step, total, now.Sub(stageStarted).Seconds())
+			}
 		}
 		finishTiming := func() {
 			finished := time.Now()
@@ -277,12 +339,12 @@ func (s *server) worker() {
 		timings := append([]stageTiming(nil), j.StageTimings...)
 		preview := j.LivePreview
 		j.mu.Unlock()
-		parts := make([]string, 0, len(timings))
+		log.Printf("─── Generation timings (job %s) ───", j.ID)
 		for _, timing := range timings {
-			parts = append(parts, fmt.Sprintf("%s=%.1fs", timing.Stage, float64(timing.Milliseconds)/1000))
+			log.Printf("  %-32s %6.2f s", timing.Stage, float64(timing.Milliseconds)/1000)
 		}
-		log.Printf("job %s finished in %.1fs (live preview: %t): %s",
-			j.ID, float64(duration)/1000, preview, strings.Join(parts, ", "))
+		log.Printf("  %-32s %6.2f s", "total", float64(duration)/1000)
+		log.Printf("job %s finished in %.1fs (live preview: %t)", j.ID, float64(duration)/1000, preview)
 	}
 }
 
@@ -779,7 +841,7 @@ func (o exportOptions) glbKey() string {
 	return fmt.Sprintf("%d-%s", o.textureSize, o.prepareKey())
 }
 
-func (s *server) preparedExportMesh(j *job, o exportOptions) (*meshData, error) {
+func (s *server) preparedExportMesh(j *job, o exportOptions, sl *stageLog) (*meshData, error) {
 	// Keep-all preview is the saved source object itself: no copying, normal
 	// recomputation, topology cleanup, or other opportunity to alter it.
 	if o.componentFilter == 2 && !o.printWrap && !o.quadRemesh {
@@ -793,15 +855,25 @@ func (s *server) preparedExportMesh(j *job, o exportOptions) (*meshData, error) 
 		return mesh, nil
 	}
 	j.mu.Unlock()
-	source, err := s.loadJobMesh(j)
+	var source *meshData
+	err := sl.track("load source mesh", func() (e error) {
+		source, e = s.loadJobMesh(j)
+		return
+	})
 	if err != nil {
 		return nil, err
 	}
 	var mesh *meshData
 	if o.printWrap {
-		mesh, err = s.eng.PreparePrintMesh(source, o.componentFilter, o.alphaRatio, o.offsetRatio)
+		err = sl.track("alpha wrap (CGAL)", func() (e error) {
+			mesh, e = s.eng.PreparePrintMesh(source, o.componentFilter, o.alphaRatio, o.offsetRatio)
+			return
+		})
 	} else {
-		mesh, err = s.eng.PrepareMesh(source, o.componentFilter)
+		err = sl.track("component filter", func() (e error) {
+			mesh, e = s.eng.PrepareMesh(source, o.componentFilter)
+			return
+		})
 	}
 	if err != nil {
 		return nil, err
@@ -811,14 +883,23 @@ func (s *server) preparedExportMesh(j *job, o exportOptions) (*meshData, error) 
 	// guaranteed watertight - the quad stage can reintroduce boundaries - so the
 	// stats below are what the UI must show, not a printable claim.
 	if o.quadRemesh {
-		quadded, stats, qerr := s.eng.PrepareQuadMesh(mesh, 2, o.targetQuads, o.quadAdaptivity)
-		if qerr != nil {
+		var quadded *meshData
+		var stats *QuadStats
+		log.Printf("  quad remesh (target %d quads, adaptivity %.2f) ...", o.targetQuads, o.quadAdaptivity)
+		if qerr := sl.track("quad remesh (AutoRemesher)", func() (e error) {
+			quadded, stats, e = s.eng.PrepareQuadMesh(mesh, 2, o.targetQuads, o.quadAdaptivity)
+			return
+		}); qerr != nil {
 			return nil, qerr
 		}
 		mesh = quadded
 		j.mu.Lock()
 		j.quadStats = stats
 		j.mu.Unlock()
+		if stats != nil {
+			log.Printf("    %d quads / %d tris / %d n-gons, %d boundary edges, %.1f%% area kept",
+				stats.Quads, stats.Triangles, stats.NGons, stats.BoundaryEdges, 100*stats.AreaRetained)
+		}
 	}
 	j.mu.Lock()
 	j.exportMesh, j.exportKey = mesh, key
@@ -838,11 +919,13 @@ func (s *server) handleExportPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	o := parseExportOptions(r)
-	mesh, err := s.preparedExportMesh(j, o)
+	sl := newStageLog()
+	mesh, err := s.preparedExportMesh(j, o, sl)
 	if err != nil {
 		http.Error(w, "prepare export: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	sl.dump("Export preview timings (job " + j.ID + ")")
 	// Quad quality travels as headers because the body is the binary mesh. The
 	// viewer shows these rather than implying a guarantee the stage cannot give:
 	// boundary edges > 0 means the surface is open.
@@ -908,8 +991,10 @@ func (s *server) handleGLB(w http.ResponseWriter, r *http.Request) {
 	key := o.glbKey()
 
 	j.exportMu.Lock()
+	sl := newStageLog()
+	defer sl.dump("Export timings (job " + j.ID + ")")
 	glb, err := func() ([]byte, error) {
-		mesh, err := s.preparedExportMesh(j, o)
+		mesh, err := s.preparedExportMesh(j, o, sl)
 		if err != nil {
 			return nil, fmt.Errorf("prepare export: %w", err)
 		}
@@ -920,18 +1005,33 @@ func (s *server) handleGLB(w http.ResponseWriter, r *http.Request) {
 			return glb, nil
 		}
 		started := time.Now()
-		if o.printWrap {
-			source, sourceErr := s.loadJobMesh(j)
-			if sourceErr != nil {
+		// Either replacement path produces new vertices, so the source material
+		// has to be reprojected onto them. This used to check printWrap only,
+		// which silently gave a quad export vertex colours instead of the atlas.
+		if o.printWrap || o.quadRemesh {
+			var source *meshData
+			if sourceErr := sl.track("load projection source", func() (e error) {
+				source, e = s.loadJobMesh(j)
+				return
+			}); sourceErr != nil {
 				return nil, fmt.Errorf("load projection source: %w", sourceErr)
 			}
 			if len(source.PBR) == 6*source.NVerts {
-				glb, err = s.eng.BakeProjectedGLB(mesh, source, o.textureSize, o.componentFilter)
+				err = sl.track("projected GLB bake (unwrap + per-texel PBR)", func() (e error) {
+					glb, e = s.eng.BakeProjectedGLB(mesh, source, o.textureSize, o.componentFilter)
+					return
+				})
 			} else {
-				glb, err = s.eng.BakeGLB(mesh, o.textureSize, 2 /*already prepared*/)
+				err = sl.track("GLB bake (vertex colours)", func() (e error) {
+					glb, e = s.eng.BakeGLB(mesh, o.textureSize, 2 /*already prepared*/)
+					return
+				})
 			}
 		} else {
-			glb, err = s.eng.BakeGLB(mesh, o.textureSize, 2 /*already prepared*/)
+			err = sl.track("GLB bake (vertex colours)", func() (e error) {
+				glb, e = s.eng.BakeGLB(mesh, o.textureSize, 2 /*already prepared*/)
+				return
+			})
 		}
 		if err != nil {
 			return nil, fmt.Errorf("bake glb: %w", err)
