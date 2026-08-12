@@ -47,11 +47,12 @@ else()
 endif()
 
 add_library(trellis2
-    trellis2.cpp trellis2.h
-    trellis2_capi.cpp trellis2_capi.h
-    mesh_export.cpp mesh_export.h
-    print_remesh.cpp print_remesh.h
-    quad_remesh.cpp quad_remesh.h
+    src/trellis2.cpp src/trellis2.h
+    src/trellis2_capi.cpp src/trellis2_capi.h
+    src/mesh_export.cpp src/mesh_export.h
+    src/print_remesh.cpp src/print_remesh.h
+    src/quad_remesh.cpp src/quad_remesh.h
+    src/pbr_utils.h
     third_party/xatlas/xatlas.cpp
     # First actually-compiled use of the vendored meshoptimizer: quad_remesh.cpp
     # uses meshopt_simplify to bound the remesher's input size. The files were in
@@ -60,8 +61,10 @@ add_library(trellis2
     third_party/meshoptimizer/indexgenerator.cpp
     third_party/meshoptimizer/simplifier.cpp
     third_party/meshoptimizer/vfetchoptimizer.cpp)
+# The library headers live in src/; consumers include them unqualified
+# ("trellis2.h"), so the directory itself is what is published, not the repo root.
 target_include_directories(trellis2 PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb
 )
 # trellis2_capi.cpp reuses the example isosurface extractor for the demo path;

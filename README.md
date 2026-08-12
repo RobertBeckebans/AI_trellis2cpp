@@ -8,9 +8,9 @@ standard interpolated vertex colour and retained PBR attributes—no reference
 container required.
 
 Modeled structurally after [sam3.cpp](https://github.com/rms80/sam3.cpp):
-single-file library (`trellis2.h` / `trellis2.cpp`), bundled ggml as a
+single-file library (`src/trellis2.h` / `src/trellis2.cpp`), bundled ggml as a
 submodule (Metal on by default on Apple), DLL-export decoration, and a
-CMake build with example executables. A flat C ABI (`trellis2_capi.h`) drives
+CMake build with example executables. A flat C ABI (`src/trellis2_capi.h`) drives
 a Go demo server with a browser mesh viewer.
 
 ## Quick start (demo)
@@ -324,12 +324,12 @@ reduction.
 
 | path           | what                                                   |
 |----------------|--------------------------------------------------------|
-| `trellis2.h`   | public API (DLL-decorated, versioned)                  |
+| `src/trellis2.h` | public API (DLL-decorated, versioned)                  |
 | `trellis2.cpp` | implementation                                         |
 | `convert_ss_flow_to_gguf.py` | stage-1 DiT checkpoint → GGUF converter  |
 | `convert_ss_dec_to_gguf.py`  | stage-1 decoder checkpoint → GGUF converter |
-| `mesh_export.{h,cpp}` | CUDA-free GLB export with direct vertex PBR or projected UV-atlas textures |
-| `print_remesh.{h,cpp}` | optional CGAL Alpha Wrap reconstruction and closest-surface PBR transfer |
+| `src/mesh_export.{h,cpp}` | CUDA-free GLB export with direct vertex PBR or projected UV-atlas textures |
+| `src/print_remesh.{h,cpp}` | optional CGAL Alpha Wrap reconstruction and closest-surface PBR transfer |
 | `examples/`    | CLI tools (`dino_info`, `ss_flow_info`, `ss_sample`, `ss_decode`, `ss_mesh`, `mesh2glb`) |
 | `examples/marching_cubes.h` | single-file isosurface → OBJ extractor      |
 | `third_party/` | vendored `xatlas` (print-wrap and opt-in ordinary UV unwrap), `meshoptimizer`, and `stb` for image I/O |

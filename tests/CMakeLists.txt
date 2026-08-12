@@ -57,7 +57,7 @@ target_compile_features(test_marching_cubes PRIVATE cxx_std_14)
 
 # Sparse PBR-volume trilinear sampling used by the integrated texture path.
 add_executable(test_pbr_sampling test_pbr_sampling.cpp)
-target_include_directories(test_pbr_sampling PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+target_include_directories(test_pbr_sampling PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_features(test_pbr_sampling PRIVATE cxx_std_14)
 
 # CPU GLB bake smoke/regression test, including six-channel alpha preservation.

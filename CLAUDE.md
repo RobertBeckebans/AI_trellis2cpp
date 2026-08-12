@@ -31,7 +31,7 @@ The most important rules in brief:
 - Numerical parity is binding: a stage change that worsens a tap in
   [`docs/VERIFICATION.md`](docs/VERIFICATION.md) is a bug. A `SKIP`
   (return code 77, missing fixtures) is not a passing test.
-- Every change to `trellis2_capi.h` bumps `T2_CAPI_ABI_VERSION` and must
+- Every change to `src/trellis2_capi.h` bumps `T2_CAPI_ABI_VERSION` and must
   be propagated in `server/engine.go`.
 - License MIT. No code adoption from license-incompatible third-party
   projects (including the TRELLIS reference itself); behavior and

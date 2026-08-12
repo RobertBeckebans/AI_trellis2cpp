@@ -22,7 +22,7 @@ through a flat C-ABI.
 - **Language:** C++14 (C++17 only in the optional CGAL path), Go (demo
   server), Python (converter + PyTorch reference) — **code comments in
   English**
-- **Architecture:** single-file library (`trellis2.h` / `trellis2.cpp`)
+- **Architecture:** single-file library (`src/trellis2.h` / `src/trellis2.cpp`)
   with bundled ggml submodule, DLL export decoration and flat C-ABI
   (`trellis2_capi.h`); examples, tests, and the Go server are pure
   consumers of this library.
@@ -47,7 +47,7 @@ rules below.
 5. Relevant affected files in the current working tree
 
 Do not work from chat memory — read the real files first.
-`trellis2.cpp` is large (>170 kB); read the affected stage function
+`src/trellis2.cpp` is large (>170 kB); read the affected stage function
 specifically instead of skimming the whole file.
 
 ### Plans and phases
@@ -167,11 +167,11 @@ Example: `docs/PLAN.md`, phase "texture stage" →
   Public Domain: `meshoptimizer`, `xatlas`, `stb`. New vendor
   dependencies only with MIT/BSD/Azure/PD-compatible license.
 - **CGAL exception:** the optional alpha-wrap backend
-  (`print_remesh.cpp`) links against CGAL ≥ 5.5. CGAL's 3D alpha
+  (`src/print_remesh.cpp`) links against CGAL ≥ 5.5. CGAL's 3D alpha
   wrapping is GPL-3.0-or-later. Therefore this path stays strictly
   encapsulated behind `TRELLIS2_CGAL` / `TRELLIS2_USE_CGAL=1` and must
   not leak into the standard build: no CGAL headers or types in
-  `trellis2.h`, `trellis2_capi.h`, `mesh_export.h`, or in
+  `src/trellis2.h`, `src/trellis2_capi.h`, `src/mesh_export.h`, or in
   unconditionally compiled code paths.
 - No adoption of code from third-party projects whose license is
   incompatible with the project (in particular no GPL/AGPL/LGPL code
@@ -276,11 +276,13 @@ tolerance problem.
 
 ```
 trellis2.cpp/
-├── trellis2.h / trellis2.cpp        # library: all stages, loaders, samplers
-├── trellis2_capi.h / .cpp           # flat C-ABI for the Go server (ABI version!)
-├── mesh_export.h / .cpp            # GLB export: vertex PBR or UV atlas (xatlas)
-├── print_remesh.h / .cpp            # optional: CGAL alpha wrap + PBR transfer
-├── pbr_utils.h                      # shared PBR helpers
+├── src/                             # the library itself
+│   ├── trellis2.h / trellis2.cpp    # all stages, loaders, samplers
+│   ├── trellis2_capi.h / .cpp       # flat C-ABI for the Go server (ABI version!)
+│   ├── mesh_export.h / .cpp         # GLB export: vertex PBR or UV atlas (xatlas)
+│   ├── print_remesh.h / .cpp        # optional: CGAL alpha wrap + PBR transfer
+│   ├── quad_remesh.h / .cpp         # optional: AutoRemesher quad retopology
+│   └── pbr_utils.h                  # shared PBR helpers
 ├── CMakeLists.txt                   # library, options, CGAL probe
 ├── examples/                        # CLI tools, consumers of the library
 │   ├── dino_info, dino_encode       # inspect / produce conditioning
@@ -389,7 +391,7 @@ Important CMake options:
 | `TRELLIS2_USE_EXTERNAL_GGML` | `OFF` | ggml via `find_package` instead of submodule |
 | `BUILD_SHARED_LIBS` | `OFF` | sets `TRELLIS2_SHARED`/`TRELLIS2_BUILD` |
 
-## `trellis2.h` / `trellis2.cpp` — the library
+## `src/trellis2.h` / `src/trellis2.cpp` — the library
 
 The entire inference path. Entry points per stage:
 
@@ -413,7 +415,7 @@ The entire inference path. Entry points per stage:
 - Texture path: shape encoder → texture SLAT flow → guided decoder →
   trilinear PBR sampling at the dual-grid surface points.
 
-## `trellis2_capi.h` / `.cpp` — the C-ABI
+## `src/trellis2_capi.h` / `.cpp` — the C-ABI
 
 The only interface of the Go server. Contains `T2_CAPI_ABI_VERSION`,
 the stage enums for the progress callback, and the pipeline types.
@@ -423,7 +425,7 @@ the stage enums for the progress callback, and the pipeline types.
 forgotten bump manifests as a silent memory error at runtime, not as
 a compile error.
 
-## `mesh_export.{h,cpp}` / `print_remesh.{h,cpp}` — export
+## `src/mesh_export.{h,cpp}` / `src/print_remesh.{h,cpp}` — export
 
 - GLB export without GPU: dense materials as interpolated vertex
   colors, metallic/roughness additionally in the custom attribute
