@@ -902,7 +902,7 @@ namespace
 			const size_t	   rewound = fdg::orient_faces( m, n );
 			out.tris.assign( m.tris.begin(), m.tris.end() );
 			if( rewound )
-				GLBLOG( "re-wound %zu of %d back-wound triangles to a consistent orientation", rewound, dnt );
+				GLBLOG( "settled the winding: %zu of %d triangles re-wound", rewound, dnt );
 		}
 		vertex_normals( out.verts, out.tris, out.normals );
 		return true;
