@@ -1223,6 +1223,21 @@ const char* t2_projection_backend()
 	return t2print::projection_backend();
 }
 
+void t2_last_bake_timings( float* out_unwrap, float* out_rasterize, float* out_projection, float* out_texel_fill, float* out_encode )
+{
+	const t2glb::BakeTimings t = t2glb::last_bake_timings();
+	if( out_unwrap )
+		*out_unwrap = ( float )t.unwrap;
+	if( out_rasterize )
+		*out_rasterize = ( float )t.rasterize;
+	if( out_projection )
+		*out_projection = ( float )t.projection;
+	if( out_texel_fill )
+		*out_texel_fill = ( float )t.texel_fill;
+	if( out_encode )
+		*out_encode = ( float )t.encode;
+}
+
 int t2_quad_remesh_available()
 {
 	return t2glb::quad_remesh_available() ? 1 : 0;

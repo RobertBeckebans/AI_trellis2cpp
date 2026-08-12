@@ -517,12 +517,13 @@ Results: `docs/progress/autoremesher-quad-remesh_phase2-tinybvh-projection.md`.
       `mesh_export.h` and the `t2_bake_projected_glb` doc block in
       `trellis2_capi.h` are corrected. Comment-only C-API change, so no
       `T2_CAPI_ABI_VERSION` bump.
-- [ ] **Run the cross-backend comparison.** Blocked, not skipped: the CGAL
-      build does not compile on this toolchain (Boost.MPL vs clang,
-      reproducible with unmodified HEAD sources — see the Phase 1
-      correction). The test runs the comparison automatically as soon as a
-      CGAL build exists.
-- [ ] Benchmark both backends: build time and queries/s. Same blocker.
+- [x] **Cross-backend comparison run** (2026-08-12, ROCm/HIP build):
+      `max |tinybvh - cgal| = 9.77e-05` over 24576 samples, inside the
+      proposed 1e-4 tolerance. The earlier "does not compile" blocker was
+      specific to the system LLVM clang; ROCm's clang builds the CGAL path
+      without complaint, which also corrects the Phase 1 note.
+- [ ] Benchmark both backends against each other: build time and queries/s.
+      Only their agreement is measured, not their relative cost.
 
 This phase is independently valuable and does not depend on Phase 1 —
 it can be reviewed and merged on its own, and it is the cheapest real

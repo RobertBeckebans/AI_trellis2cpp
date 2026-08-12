@@ -88,7 +88,29 @@ were fixed.
 | Entirely degenerate source | correctly rejected |
 | `./format_code.sh` | clean; `third_party/` untouched |
 
-### Not verified: the cross-backend comparison
+### Cross-backend comparison: RESOLVED (2026-08-12)
+
+Ran in the ROCm/HIP build produced by `cmake-ninja-win64-rocm-cgal-quad.bat`:
+
+```
+projection backend: cgal
+backend agreement: max |tinybvh - cgal| = 9.77e-05 over 24576 samples
+RESULT: PASS
+```
+
+4096 query points x 6 channels against a displaced grid. The two backends
+agree, and the 1e-4 tolerance proposed below holds - though only just, which is
+what the comment in the test predicts: the residual is which triangle wins a
+near-tie at a shared edge.
+
+**This also corrects the blocker recorded below.** The Boost.MPL failure is
+**toolchain-specific, not universal**: it reproduces with the system LLVM clang
+used for the local `build-quad` tree, but ROCm's clang compiles the same sources
+without complaint. The CGAL path builds and runs fine on the project's reference
+toolchain, so the "unbuildable here" note applies to one compiler, not to the
+feature.
+
+### Original note: comparison blocked (system LLVM clang)
 
 The comparison the plan asks for is implemented and runs automatically, but it
 **could not be executed**, because the CGAL build does not compile on this
@@ -117,12 +139,11 @@ bound.
 
 ## Open points
 
-- **Fix or diagnose the CGAL/Boost/clang build.** Until then the CGAL Alpha Wrap
-  path is unbuildable here, which affects the existing feature, not just this
-  plan. Worth checking whether an MSVC build compiles it, and whether the
-  classic vcpkg tree behaves differently from the manifest tree.
-- Backend agreement is unmeasured; so is the relative performance of the two
-  (build time, queries/s).
+- The system-LLVM-clang Boost.MPL failure is understood but not fixed. It does
+  not block anything (ROCm's clang builds CGAL fine) but it does mean a CGAL
+  build cannot be produced from that compiler.
+- Relative performance of the two backends is still unmeasured (build time,
+  queries/s); only their agreement is.
 - The traversal has not been profiled. `BuildHQ`/`BuildAVX` are unused, and
   `TINYBVH_NO_SIMD` costs some build speed — both are open optimisations, not
   known problems.

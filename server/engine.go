@@ -17,7 +17,7 @@ import (
 	"github.com/ebitengine/purego"
 )
 
-const abiVersion = 13
+const abiVersion = 14
 
 // Progress stages (enum t2_stage).
 const (
@@ -97,6 +97,7 @@ type engine struct {
 	prepareMeshC func(verts unsafe.Pointer, nv int32, tris unsafe.Pointer, nt int32, pbr unsafe.Pointer,
 		componentFilter int32, err unsafe.Pointer, errLen int32) uintptr
 	projectionBackendC  func() uintptr
+	lastBakeTimings     func(unwrap, rasterize, projection, texelFill, encode unsafe.Pointer)
 	quadRemeshAvailable func() int32
 	prepareQuadMeshC    func(verts unsafe.Pointer, nv int32, tris unsafe.Pointer, nt int32, pbr unsafe.Pointer,
 		componentFilter, targetQuads int32, adaptivity float32,
@@ -172,6 +173,7 @@ func newEngine(libPath, dinoGGUF, flowGGUF, decGGUF, slatGGUF, slatHRGGUF, shape
 	purego.RegisterLibFunc(&e.meshFree, lib, "t2_mesh_free")
 	purego.RegisterLibFunc(&e.prepareMeshC, lib, "t2_prepare_mesh")
 	purego.RegisterLibFunc(&e.projectionBackendC, lib, "t2_projection_backend")
+	purego.RegisterLibFunc(&e.lastBakeTimings, lib, "t2_last_bake_timings")
 	purego.RegisterLibFunc(&e.quadRemeshAvailable, lib, "t2_quad_remesh_available")
 	purego.RegisterLibFunc(&e.prepareQuadMeshC, lib, "t2_prepare_quad_mesh")
 	purego.RegisterLibFunc(&e.quadMeshStats, lib, "t2_quad_mesh_stats")
@@ -456,6 +458,27 @@ func (e *engine) ProjectionBackend() string {
 		buf = append(buf, c)
 	}
 	return string(buf)
+}
+
+// BakeStageTimes is the sub-stage split of the last bake, in seconds. The UV
+// unwrap normally dominates; the projection is the part that differs between
+// the tinybvh and CGAL backends.
+type BakeStageTimes struct {
+	Unwrap     float32
+	Rasterize  float32
+	Projection float32
+	TexelFill  float32
+	Encode     float32
+}
+
+func (e *engine) LastBakeTimings() BakeStageTimes {
+	var t BakeStageTimes
+	if e == nil || e.lastBakeTimings == nil {
+		return t
+	}
+	e.lastBakeTimings(unsafe.Pointer(&t.Unwrap), unsafe.Pointer(&t.Rasterize),
+		unsafe.Pointer(&t.Projection), unsafe.Pointer(&t.TexelFill), unsafe.Pointer(&t.Encode))
+	return t
 }
 
 // HasQuadRemesh reports whether this library was built with the AutoRemesher

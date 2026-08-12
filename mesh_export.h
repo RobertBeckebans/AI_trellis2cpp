@@ -36,6 +36,22 @@ struct MeshExportOptions {
 	ComponentFilter components	 = ComponentFilter::RemoveTiny;
 };
 
+// Sub-stage durations of the last bake, in seconds. The bake is the single
+// largest export cost on dense meshes and used to be one opaque number; this
+// splits it so a slow bake can be attributed. `projection_backend` names which
+// closest-surface backend ran ("cgal" or "tinybvh"). Filled by mesh_to_glb and
+// mesh_to_projected_glb; read with last_bake_timings().
+struct BakeTimings {
+	double		unwrap			   = 0.0; // xatlas chart computation + packing
+	double		rasterize		   = 0.0; // triangle -> texel coverage
+	double		projection		   = 0.0; // closest-surface PBR lookup (projected bake only)
+	double		texel_fill		   = 0.0; // writing samples into the atlas
+	double		encode			   = 0.0; // gutter inpaint + PNG + glTF assembly
+	const char* projection_backend = "";
+};
+
+TRELLIS2_API BakeTimings last_bake_timings();
+
 // Quality of a quad remesh, so callers can report it instead of guessing.
 // boundary_edges > 0 means the result is an open surface and must not be
 // advertised as printable.

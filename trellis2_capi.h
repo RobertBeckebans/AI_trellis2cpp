@@ -26,7 +26,7 @@
 extern "C" {
 #endif
 
-#define T2_CAPI_ABI_VERSION 13
+#define T2_CAPI_ABI_VERSION 14
 
 TRELLIS2_CAPI int t2_abi_version();
 
@@ -188,6 +188,13 @@ TRELLIS2_CAPI t2_mesh_result* t2_prepare_print_mesh(
 ** result, they differ in which library does the nearest-surface search. The
 ** returned pointer is a static string and is never freed. */
 TRELLIS2_CAPI const char*	  t2_projection_backend( void );
+
+/* Sub-stage durations of the most recent t2_bake_glb / t2_bake_projected_glb
+** call, in seconds. On dense meshes the bake is the largest single export cost
+** and the UV unwrap usually dominates it, so hosts should report the split
+** rather than one opaque number. Any pointer may be NULL. Values are from the
+** last bake in this process; the bake is internally serialized. */
+TRELLIS2_CAPI void			  t2_last_bake_timings( float* out_unwrap, float* out_rasterize, float* out_projection, float* out_texel_fill, float* out_encode );
 
 TRELLIS2_CAPI int			  t2_quad_remesh_available( void );
 TRELLIS2_CAPI t2_mesh_result* t2_prepare_quad_mesh(

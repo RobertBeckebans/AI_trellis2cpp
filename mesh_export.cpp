@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -29,6 +30,22 @@ namespace
 		static bool v = std::getenv( "T2GLB_VERBOSE" ) != nullptr;
 		return v;
 	}
+	// Sub-stage durations of the bake in progress. The bake is serialized by
+	// g_bake_mu, so one shared record is enough and needs no locking of its own.
+	BakeTimings g_bake_timings;
+
+	// Elapsed seconds since the previous call, so the verbose trace says how
+	// long each bake stage took instead of only that it happened. The bake is
+	// serialized by g_bake_mu, so one shared clock is enough.
+	double		stage_elapsed()
+	{
+		static std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+		const auto									 now  = std::chrono::steady_clock::now();
+		const double								 dt	  = std::chrono::duration<double>( now - last ).count();
+		last											  = now;
+		return dt;
+	}
+
 #define GLBLOG( ... )                                     \
 	do {                                                  \
 		if( verbose() ) {                                 \
@@ -563,6 +580,8 @@ namespace
 			err = "xatlas AddMesh failed";
 			return false;
 		}
+		g_bake_timings = BakeTimings();
+		( void )stage_elapsed(); // start the clock for the unwrap
 		GLBLOG( "xatlas computing charts ..." );
 		xatlas::ChartOptions co {};
 		co.normalDeviationWeight = 0.5f;
@@ -586,7 +605,8 @@ namespace
 				break;
 			res = ( uint32_t )( res * 1.5f );
 		}
-		GLBLOG( "atlas %ux%u, %u pages, %u charts", atlas->width, atlas->height, atlas->atlasCount, atlas->chartCount );
+		g_bake_timings.unwrap = stage_elapsed();
+		GLBLOG( "xatlas unwrap done in %.2f s -> atlas %ux%u, %u pages, %u charts", g_bake_timings.unwrap, atlas->width, atlas->height, atlas->atlasCount, atlas->chartCount );
 		if( atlas->meshCount != 1 || atlas->atlasCount != 1 || atlas->width == 0 || atlas->height == 0 ) {
 			xatlas::Destroy( atlas );
 			err = "xatlas packing failed (charts did not fit one atlas)";
@@ -723,10 +743,16 @@ namespace
 		}
 
 		if( projected_pbr ) {
-			GLBLOG( "projecting %zu covered texels to %zu source tris ...", query_pixels.size(), projection_source->tris.size() / 3 );
+			GLBLOG( "rasterize done in %.2f s; projecting %zu covered texels to %zu source tris via %s ...",
+				stage_elapsed(),
+				query_pixels.size(),
+				projection_source->tris.size() / 3,
+				t2print::projection_backend() );
 			std::vector<float> query_pbr;
 			if( !t2print::project_pbr( projection_source->verts, projection_source->tris, projection_source->pbr, query_points, query_pbr, err ) )
 				return false;
+			g_bake_timings.projection = stage_elapsed();
+			GLBLOG( "projection done in %.2f s", g_bake_timings.projection );
 			if( query_pbr.size() != query_pixels.size() * 6 ) {
 				err = "PBR projection returned an invalid sample count";
 				return false;
@@ -813,8 +839,9 @@ namespace
 				if( alp[i] < 0.95f )
 					++translucent;
 			}
-		const bool transparent = translucent > 0 && ( int64_t )translucent * 1000 >= ( int64_t )covered;
-		GLBLOG( "inpaint + PNG encode ..." );
+		const bool transparent	  = translucent > 0 && ( int64_t )translucent * 1000 >= ( int64_t )covered;
+		g_bake_timings.texel_fill = stage_elapsed();
+		GLBLOG( "texel fill done in %.2f s; inpaint + PNG encode ...", g_bake_timings.texel_fill );
 		std::vector<uint8_t> bc_png, mr_png;
 		if( !encode_png( AW, AH, 4, bc8.data(), bc_png ) || !encode_png( AW, AH, 3, mr8.data(), mr_png ) ) {
 			err = "PNG encode failed";
@@ -833,7 +860,8 @@ namespace
 			guv[2 * i + 1]	= ouv[2 * i + 1] / ( float )AH;
 		}
 		write_glb( gpos, gnrm, guv, oidx, bc_png, mr_png, transparent, out );
-		GLBLOG( "GLB %zu bytes (%u verts, %u tris; %s PBR atlas)", out.size(), onv, ntri, projected_pbr ? "projected" : "vertex" );
+		g_bake_timings.encode = stage_elapsed();
+		GLBLOG( "inpaint + encode done in %.2f s; GLB %zu bytes (%u verts, %u tris; %s PBR atlas)", g_bake_timings.encode, out.size(), onv, ntri, projected_pbr ? "projected" : "vertex" );
 		return true;
 	}
 
@@ -910,6 +938,11 @@ bool prepare_print_mesh(
 	}
 	out = std::move( wrapped );
 	return true;
+}
+
+BakeTimings last_bake_timings()
+{
+	return g_bake_timings;
 }
 
 bool quad_remesh_available()

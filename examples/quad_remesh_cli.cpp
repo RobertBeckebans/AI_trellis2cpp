@@ -16,8 +16,7 @@
 // throws, and the API does not report that, so a large area loss is the only
 // signal the caller gets.
 
-#include <AutoRemesher/AutoRemesher>
-#include <AutoRemesher/Vector3>
+#include "quad_remesh.h"
 
 #include <chrono>
 #include <cmath>
@@ -64,7 +63,7 @@ double peak_rss_mib()
 #endif
 }
 
-bool read_obj( const char* path, std::vector<AutoRemesher::Vector3>& verts, std::vector<std::vector<size_t>>& tris, std::string& err )
+bool read_obj( const char* path, std::vector<float>& verts, std::vector<int32_t>& tris, std::string& err )
 {
 	std::FILE* file = std::fopen( path, "rb" );
 	if( !file ) {
@@ -77,7 +76,9 @@ bool read_obj( const char* path, std::vector<AutoRemesher::Vector3>& verts, std:
 		if( line[0] == 'v' && ( line[1] == ' ' || line[1] == '\t' ) ) {
 			double x = 0.0, y = 0.0, z = 0.0;
 			if( std::sscanf( line + 1, "%lf %lf %lf", &x, &y, &z ) == 3 )
-				verts.push_back( AutoRemesher::Vector3( x, y, z ) );
+				verts.push_back( ( float )x );
+			verts.push_back( ( float )y );
+			verts.push_back( ( float )z );
 		} else if( line[0] == 'f' && ( line[1] == ' ' || line[1] == '\t' ) ) {
 			// Collect the polygon's vertex indices, ignoring the /vt/vn parts.
 			std::vector<size_t> face;
@@ -103,18 +104,19 @@ bool read_obj( const char* path, std::vector<AutoRemesher::Vector3>& verts, std:
 					++cursor;
 			}
 			// Fan-triangulate; the remesher takes triangles only.
-			for( size_t i = 2; i < face.size(); ++i )
-				tris.push_back( { face[0], face[i - 1], face[i] } );
+			for( size_t i = 2; i < face.size(); ++i ) {
+				tris.push_back( ( int32_t )face[0] );
+				tris.push_back( ( int32_t )face[i - 1] );
+				tris.push_back( ( int32_t )face[i] );
+			}
 		}
 	}
 	std::fclose( file );
 
-	for( const auto& tri : tris ) {
-		for( const size_t index : tri ) {
-			if( index >= verts.size() ) {
-				err = "OBJ face index out of range";
-				return false;
-			}
+	for( const int32_t index : tris ) {
+		if( index < 0 || ( size_t )index * 3 + 2 >= verts.size() ) {
+			err = "OBJ face index out of range";
+			return false;
 		}
 	}
 	if( verts.empty() || tris.empty() ) {
@@ -124,7 +126,64 @@ bool read_obj( const char* path, std::vector<AutoRemesher::Vector3>& verts, std:
 	return true;
 }
 
-bool write_obj( const char* path, const std::vector<AutoRemesher::Vector3>& verts, const std::vector<std::vector<size_t>>& faces, std::string& err )
+// The pipeline's own wire format, so a real generation can be fed in directly
+// instead of being routed through OBJ:
+//   magic[8] u32 nv u32 nt f32[3nv] verts f32[3nv] normals
+//   [T2MESH02: f32[5nv]] [T2MESH03: f32[6nv]] i32[3nt] tris
+bool read_t2mesh( const char* path, std::vector<float>& verts, std::vector<int32_t>& tris, std::string& err )
+{
+	std::FILE* file = std::fopen( path, "rb" );
+	if( !file ) {
+		err = std::string( "cannot open " ) + path;
+		return false;
+	}
+	char	 magic[9] = { 0 };
+	uint32_t nv = 0, nt = 0;
+	if( std::fread( magic, 1, 8, file ) != 8 || std::fread( &nv, 4, 1, file ) != 1 || std::fread( &nt, 4, 1, file ) != 1 ) {
+		err = "bad T2MESH header";
+		std::fclose( file );
+		return false;
+	}
+	const bool legacy	= 0 == std::memcmp( magic, "T2MESH02", 8 );
+	const bool textured = legacy || 0 == std::memcmp( magic, "T2MESH03", 8 );
+	if( !textured && 0 != std::memcmp( magic, "T2MESH01", 8 ) ) {
+		err = "unknown T2MESH magic";
+		std::fclose( file );
+		return false;
+	}
+	std::vector<float> raw( ( size_t )nv * 3 );
+	bool			   ok = std::fread( raw.data(), sizeof( float ), raw.size(), file ) == raw.size();
+	std::vector<float> skip( ( size_t )nv * 3 );
+	ok = ok && std::fread( skip.data(), sizeof( float ), skip.size(), file ) == skip.size(); // normals
+	if( ok && textured ) {
+		std::vector<float> pbr( ( size_t )nv * ( legacy ? 5 : 6 ) );
+		ok = std::fread( pbr.data(), sizeof( float ), pbr.size(), file ) == pbr.size();
+	}
+	std::vector<int32_t> idx( ( size_t )nt * 3 );
+	ok = ok && std::fread( idx.data(), sizeof( int32_t ), idx.size(), file ) == idx.size();
+	std::fclose( file );
+	if( !ok ) {
+		err = "truncated T2MESH";
+		return false;
+	}
+	verts.reserve( ( size_t )nv * 3 );
+	for( uint32_t i = 0; i < nv; ++i )
+		verts.insert( verts.end(), raw.begin() + ( size_t )i * 3, raw.begin() + ( size_t )i * 3 + 3 );
+	tris.reserve( ( size_t )nt * 3 );
+	for( uint32_t t = 0; t < nt; ++t ) {
+		const int32_t a = idx[3 * t], b = idx[3 * t + 1], c = idx[3 * t + 2];
+		if( a < 0 || b < 0 || c < 0 || ( uint32_t )a >= nv || ( uint32_t )b >= nv || ( uint32_t )c >= nv ) {
+			err = "T2MESH index out of range";
+			return false;
+		}
+		tris.push_back( a );
+		tris.push_back( b );
+		tris.push_back( c );
+	}
+	return true;
+}
+
+bool write_obj( const char* path, const std::vector<float>& verts, const std::vector<int32_t>& faces, const std::vector<int32_t>& face_sizes, std::string& err )
 {
 	std::FILE* file = std::fopen( path, "wb" );
 	if( !file ) {
@@ -132,38 +191,31 @@ bool write_obj( const char* path, const std::vector<AutoRemesher::Vector3>& vert
 		return false;
 	}
 	std::fprintf( file, "# generated by trellis2.cpp quad_remesh_cli\n" );
-	for( const auto& v : verts )
-		std::fprintf( file, "v %.8f %.8f %.8f\n", v.x(), v.y(), v.z() );
-	for( const auto& face : faces ) {
+	for( size_t i = 0; i + 2 < verts.size(); i += 3 )
+		std::fprintf( file, "v %.8f %.8f %.8f\n", verts[i], verts[i + 1], verts[i + 2] );
+	size_t offset = 0;
+	for( const int32_t n : face_sizes ) {
 		std::fprintf( file, "f" );
-		for( const size_t index : face )
-			std::fprintf( file, " %zu", index + 1 );
+		for( int32_t k = 0; k < n; ++k )
+			std::fprintf( file, " %d", faces[offset + ( size_t )k] + 1 );
 		std::fprintf( file, "\n" );
+		offset += ( size_t )n;
 	}
 	std::fclose( file );
 	return true;
 }
 
-double polygon_area( const std::vector<AutoRemesher::Vector3>& verts, const std::vector<size_t>& face )
-{
-	// Fan decomposition; adequate for the near-planar faces produced here.
-	double area = 0.0;
-	for( size_t i = 2; i < face.size(); ++i )
-		area += AutoRemesher::Vector3::area( verts[face[0]], verts[face[i - 1]], verts[face[i]] );
-	return area;
-}
-
-double total_area( const std::vector<AutoRemesher::Vector3>& verts, const std::vector<std::vector<size_t>>& faces )
-{
-	double area = 0.0;
-	for( const auto& face : faces )
-		area += polygon_area( verts, face );
-	return area;
-}
-
 // Edges used by exactly one face. Zero means closed; anything else means the
 // output has holes, which is expected and is precisely why this path does not
 // replace CGAL Alpha Wrap for printing.
+double triangle_area( const float* a, const float* b, const float* c )
+{
+	const double ab[3] = { ( double )b[0] - a[0], ( double )b[1] - a[1], ( double )b[2] - a[2] };
+	const double ac[3] = { ( double )c[0] - a[0], ( double )c[1] - a[1], ( double )c[2] - a[2] };
+	const double n[3]  = { ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2], ab[0] * ac[1] - ab[1] * ac[0] };
+	return 0.5 * std::sqrt( n[0] * n[0] + n[1] * n[1] + n[2] * n[2] );
+}
+
 size_t boundary_edges( const std::vector<std::vector<size_t>>& faces )
 {
 	std::map<std::pair<size_t, size_t>, int> counts;
@@ -202,13 +254,16 @@ int main( int argc, char** argv )
 	}
 
 	// Defaults mirror the upstream CLI (src/main.cpp).
-	int	   target_quads		 = 50000;
-	double edge_scaling		 = 0.0; // 0 -> leave unset, as upstream does
-	double adaptivity		 = 1.0;
-	double anisotropy		 = 1.0;
-	double sharp_edge_deg	 = 90.0;
-	double smooth_normal_deg = 0.0;
-	bool   hard_surface		 = false;
+	int	   target_quads		  = 50000;
+	double edge_scaling		  = 0.0; // 0 -> leave unset, as upstream does
+	double adaptivity		  = 1.0;
+	double anisotropy		  = 1.0;
+	double sharp_edge_deg	  = 90.0;
+	double smooth_normal_deg  = 0.0;
+	bool   hard_surface		  = false;
+	bool   split_non_manifold = true;
+	int	   input_budget		  = 0;
+	double min_area			  = 0.5;
 
 	for( int i = 3; i < argc; ++i ) {
 		const bool has_value = i + 1 < argc;
@@ -226,6 +281,12 @@ int main( int argc, char** argv )
 			smooth_normal_deg = std::atof( argv[++i] );
 		else if( std::strcmp( argv[i], "--hard-surface" ) == 0 )
 			hard_surface = true;
+		else if( std::strcmp( argv[i], "--no-split" ) == 0 )
+			split_non_manifold = false;
+		else if( std::strcmp( argv[i], "--input-budget" ) == 0 && has_value )
+			input_budget = std::atoi( argv[++i] );
+		else if( std::strcmp( argv[i], "--min-area" ) == 0 && has_value )
+			min_area = std::atof( argv[++i] );
 		else {
 			std::fprintf( stderr, "unknown or incomplete option: %s\n", argv[i] );
 			return 2;
@@ -236,68 +297,57 @@ int main( int argc, char** argv )
 		return 2;
 	}
 
-	std::vector<AutoRemesher::Vector3> in_verts;
-	std::vector<std::vector<size_t>>   in_tris;
-	std::string						   err;
-	if( !read_obj( argv[1], in_verts, in_tris, err ) ) {
+	std::vector<float>	 in_verts;
+	std::vector<int32_t> in_tris;
+	std::string			 err;
+	const size_t		 path_len  = std::strlen( argv[1] );
+	const bool			 is_t2mesh = path_len > 7 && 0 == std::strcmp( argv[1] + path_len - 7, ".t2mesh" );
+	if( !( is_t2mesh ? read_t2mesh( argv[1], in_verts, in_tris, err ) : read_obj( argv[1], in_verts, in_tris, err ) ) ) {
 		std::fprintf( stderr, "%s\n", err.c_str() );
 		return 1;
 	}
-	const double in_area = total_area( in_verts, in_tris );
-	std::fprintf( stderr, "in : %zu verts  %zu tris  area %.6f\n", in_verts.size(), in_tris.size(), in_area );
+	double in_area = 0.0;
+	for( size_t t = 0; t + 2 < in_tris.size(); t += 3 )
+		in_area += triangle_area( in_verts.data() + ( size_t )in_tris[t] * 3, in_verts.data() + ( size_t )in_tris[t + 1] * 3, in_verts.data() + ( size_t )in_tris[t + 2] * 3 );
+	std::fprintf( stderr, "in : %zu verts  %zu tris  area %.6f\n", in_verts.size() / 3, in_tris.size() / 3, in_area );
 
-	AutoRemesher::AutoRemesher remesher( in_verts, in_tris );
-	// Upstream maps target quads onto twice as many triangles (mainwindow.cpp).
-	remesher.setTargetTriangleCount( ( size_t )target_quads * 2 );
-	if( edge_scaling > 0.0 )
-		remesher.setScaling( edge_scaling );
-	remesher.setModelType( hard_surface ? AutoRemesher::ModelType::HardSurface : AutoRemesher::ModelType::Organic );
-	remesher.setGradientAdaptivity( adaptivity );
-	remesher.setAnisotropy( anisotropy );
-	remesher.setSharpEdgeDegrees( sharp_edge_deg );
-	remesher.setSmoothNormalDegrees( smooth_normal_deg );
-	remesher.setProgressHandler( report_progress );
+	t2quad::QuadRemeshOptions opt;
+	opt.target_quads		  = target_quads;
+	opt.edge_scaling		  = ( float )edge_scaling;
+	opt.adaptivity			  = ( float )adaptivity;
+	opt.anisotropy			  = ( float )anisotropy;
+	opt.sharp_edge_deg		  = ( float )sharp_edge_deg;
+	opt.smooth_normal_deg	  = ( float )smooth_normal_deg;
+	opt.hard_surface		  = hard_surface;
+	opt.split_non_manifold	  = split_non_manifold;
+	opt.input_triangle_budget = input_budget;
+	opt.min_area_retained	  = ( float )min_area;
 
-	const auto started	= std::chrono::steady_clock::now();
-	const bool ok		= remesher.remesh();
-	const auto finished = std::chrono::steady_clock::now();
-	std::fprintf( stderr, "\r%-52s\r", "" );
-
+	std::vector<float>		out_verts;
+	std::vector<int32_t>	out_faces, out_face_sizes;
+	t2quad::QuadRemeshStats stats;
+	const auto				started	 = std::chrono::steady_clock::now();
+	const bool				ok		 = t2quad::remesh( in_verts, in_tris, opt, out_verts, out_faces, out_face_sizes, stats, err, report_progress, nullptr );
+	const auto				finished = std::chrono::steady_clock::now();
+	std::fprintf( stderr, "\n%-52s\n", "" );
 	if( !ok ) {
-		std::fprintf( stderr, "remesh failed\n" );
+		std::fprintf( stderr, "remesh failed: %s\n", err.c_str() );
 		return 1;
 	}
 
-	const std::vector<AutoRemesher::Vector3>& out_verts = remesher.remeshedVertices();
-	const std::vector<std::vector<size_t>>&	  out_faces = remesher.remeshedQuads();
-	if( out_faces.empty() ) {
-		std::fprintf( stderr, "remesh produced no faces\n" );
-		return 1;
-	}
-
-	size_t quads = 0, tris_out = 0, ngons = 0;
-	for( const auto& face : out_faces ) {
-		if( face.size() == 4 )
-			++quads;
-		else if( face.size() == 3 )
-			++tris_out;
-		else
-			++ngons;
-	}
-	const double out_area = total_area( out_verts, out_faces );
-	const double seconds  = std::chrono::duration<double>( finished - started ).count();
-	const double rss	  = peak_rss_mib();
-
-	std::fprintf( stderr, "out: %zu verts  %zu faces  area %.6f\n", out_verts.size(), out_faces.size(), out_area );
-	std::fprintf( stderr, "     quads %zu (%.1f%%)  tris %zu  ngons %zu\n", quads, 100.0 * ( double )quads / ( double )out_faces.size(), tris_out, ngons );
-	std::fprintf( stderr, "     boundary edges %zu%s\n", boundary_edges( out_faces ), boundary_edges( out_faces ) ? "  (open surface — not printable as is)" : "  (closed)" );
-	std::fprintf( stderr, "     area retained %.1f%%%s\n", in_area > 0.0 ? 100.0 * out_area / in_area : 0.0, ( in_area > 0.0 && out_area < 0.9 * in_area ) ? "  (islands likely dropped)" : "" );
+	const double seconds = std::chrono::duration<double>( finished - started ).count();
+	const double rss	 = peak_rss_mib();
+	std::fprintf( stderr, "prep: %d tris after cleanup  %d verts split  %d faces dropped\n", stats.input_tris_after_prep, stats.vertices_split, stats.faces_dropped );
+	std::fprintf( stderr, "out: %zu verts  %zu faces\n", out_verts.size() / 3, out_face_sizes.size() );
+	std::fprintf( stderr, "     quads %d  tris %d  ngons %d\n", stats.quads, stats.triangles, stats.ngons );
+	std::fprintf( stderr, "     boundary edges %d%s\n", stats.boundary_edges, stats.boundary_edges ? "  (open surface)" : "  (closed)" );
+	std::fprintf( stderr, "     area retained %.1f%%\n", 100.0 * stats.area_retained );
 	std::fprintf( stderr, "     wall %.2f s", seconds );
 	if( rss >= 0.0 )
 		std::fprintf( stderr, "   peak RSS %.1f MiB", rss );
 	std::fprintf( stderr, "\n" );
 
-	if( !write_obj( argv[2], out_verts, out_faces, err ) ) {
+	if( !write_obj( argv[2], out_verts, out_faces, out_face_sizes, err ) ) {
 		std::fprintf( stderr, "%s\n", err.c_str() );
 		return 1;
 	}

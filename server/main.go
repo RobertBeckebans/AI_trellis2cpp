@@ -109,9 +109,38 @@ func (sl *stageLog) dump(title string) {
 	}
 	log.Printf("─── %s ───", title)
 	for _, name := range sl.order {
+		// Names starting with "-" are sub-stages of the entry above them.
+		if strings.HasPrefix(name, "-") {
+			log.Printf("    %-30s %6.2f s", name, float64(sl.ms[name])/1000)
+			continue
+		}
 		log.Printf("  %-32s %6.2f s", name, float64(sl.ms[name])/1000)
 	}
 	log.Printf("  %-32s %6.2f s", "total", time.Since(sl.started).Seconds())
+}
+
+// track runs fn under a heartbeat: none of the export stages report progress
+// across the C ABI, and on real geometry each of them can run for minutes. The
+// periodic line is the difference between "working" and "hung" for whoever is
+// watching the console.
+func (sl *stageLog) trackLive(name, verb string, fn func() error) error {
+	done := make(chan struct{})
+	go func() {
+		started := time.Now()
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				log.Printf("    ... still %s (%.0f s)", verb, time.Since(started).Seconds())
+			}
+		}
+	}()
+	err := sl.track(name, fn)
+	close(done)
+	return err
 }
 
 type stageTiming struct {
@@ -865,7 +894,8 @@ func (s *server) preparedExportMesh(j *job, o exportOptions, sl *stageLog) (*mes
 	}
 	var mesh *meshData
 	if o.printWrap {
-		err = sl.track("alpha wrap (CGAL)", func() (e error) {
+		log.Printf("  alpha wrap (CGAL, detail %.3f%%) on %d tris ...", 100*o.alphaRatio, source.NTris)
+		err = sl.trackLive("alpha wrap (CGAL)", "wrapping", func() (e error) {
 			mesh, e = s.eng.PreparePrintMesh(source, o.componentFilter, o.alphaRatio, o.offsetRatio)
 			return
 		})
@@ -885,11 +915,13 @@ func (s *server) preparedExportMesh(j *job, o exportOptions, sl *stageLog) (*mes
 	if o.quadRemesh {
 		var quadded *meshData
 		var stats *QuadStats
-		log.Printf("  quad remesh (target %d quads, adaptivity %.2f) ...", o.targetQuads, o.quadAdaptivity)
-		if qerr := sl.track("quad remesh (AutoRemesher)", func() (e error) {
+		log.Printf("  quad remesh (target %d quads, adaptivity %.2f) on %d tris ...",
+			o.targetQuads, o.quadAdaptivity, mesh.NTris)
+		qerr := sl.trackLive("quad remesh (AutoRemesher)", "remeshing", func() (e error) {
 			quadded, stats, e = s.eng.PrepareQuadMesh(mesh, 2, o.targetQuads, o.quadAdaptivity)
 			return
-		}); qerr != nil {
+		})
+		if qerr != nil {
 			return nil, qerr
 		}
 		mesh = quadded
@@ -920,7 +952,14 @@ func (s *server) handleExportPreview(w http.ResponseWriter, r *http.Request) {
 	}
 	o := parseExportOptions(r)
 	sl := newStageLog()
+	// Serialize per job, like the GLB download already does. Without this a
+	// browser retry (or two viewers) starts a second full preparation while the
+	// first is still running - with quad remeshing that means two multi-minute
+	// runs of several GB competing for the same cores, which makes both slower
+	// and looks like a hang. Waiting here means the retry hits the cache.
+	j.exportMu.Lock()
 	mesh, err := s.preparedExportMesh(j, o, sl)
+	j.exportMu.Unlock()
 	if err != nil {
 		http.Error(w, "prepare export: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -1017,7 +1056,8 @@ func (s *server) handleGLB(w http.ResponseWriter, r *http.Request) {
 				return nil, fmt.Errorf("load projection source: %w", sourceErr)
 			}
 			if len(source.PBR) == 6*source.NVerts {
-				err = sl.track("projected GLB bake (unwrap + per-texel PBR)", func() (e error) {
+				log.Printf("  projected GLB bake (%d px atlas) on %d tris ...", o.textureSize, mesh.NTris)
+				err = sl.trackLive("projected GLB bake (unwrap + per-texel PBR)", "baking", func() (e error) {
 					glb, e = s.eng.BakeProjectedGLB(mesh, source, o.textureSize, o.componentFilter)
 					return
 				})
@@ -1036,6 +1076,17 @@ func (s *server) handleGLB(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, fmt.Errorf("bake glb: %w", err)
 		}
+		// The bake is the largest single export cost on dense meshes and the UV
+		// unwrap usually dominates it, so report the split instead of one number.
+		bt := s.eng.LastBakeTimings()
+		sl.add("- xatlas UV unwrap", time.Duration(float64(bt.Unwrap)*float64(time.Second)))
+		sl.add("- rasterize coverage", time.Duration(float64(bt.Rasterize)*float64(time.Second)))
+		if bt.Projection > 0 {
+			sl.add("- closest-surface projection ("+s.eng.ProjectionBackend()+")",
+				time.Duration(float64(bt.Projection)*float64(time.Second)))
+		}
+		sl.add("- texel fill", time.Duration(float64(bt.TexelFill)*float64(time.Second)))
+		sl.add("- inpaint + PNG + glTF", time.Duration(float64(bt.Encode)*float64(time.Second)))
 		j.mu.Lock()
 		j.glb, j.glbKey = glb, key
 		j.mu.Unlock()

@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <exception>
 #include <limits>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -66,11 +67,28 @@ bool projection_available()
 
 const char* projection_backend()
 {
+	// The build-time default, overridable at runtime with
+	// TRELLIS2_PROJECTION_BACKEND=cgal|tinybvh. Both are compiled whenever CGAL
+	// is present, so comparing them costs an environment variable rather than a
+	// rebuild. An unknown or unavailable value falls back to the default.
+	static const char* selected = [] {
 #ifdef T2_PROJECT_PBR_CGAL
-	return "cgal";
+		const char* fallback = "cgal";
 #else
-	return "tinybvh";
+		const char* fallback = "tinybvh";
 #endif
+		const char* want = std::getenv( "TRELLIS2_PROJECTION_BACKEND" );
+		if( !want )
+			return fallback;
+		if( 0 == std::strcmp( want, "tinybvh" ) )
+			return "tinybvh";
+#ifdef TRELLIS2_USE_CGAL
+		if( 0 == std::strcmp( want, "cgal" ) )
+			return "cgal";
+#endif
+		return fallback;
+	}();
+	return selected;
 }
 
 namespace
