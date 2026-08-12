@@ -17,7 +17,7 @@ import (
 	"github.com/ebitengine/purego"
 )
 
-const abiVersion = 12
+const abiVersion = 13
 
 // Progress stages (enum t2_stage).
 const (
@@ -96,6 +96,7 @@ type engine struct {
 	meshFree     func(r uintptr)
 	prepareMeshC func(verts unsafe.Pointer, nv int32, tris unsafe.Pointer, nt int32, pbr unsafe.Pointer,
 		componentFilter int32, err unsafe.Pointer, errLen int32) uintptr
+	projectionBackendC  func() uintptr
 	quadRemeshAvailable func() int32
 	prepareQuadMeshC    func(verts unsafe.Pointer, nv int32, tris unsafe.Pointer, nt int32, pbr unsafe.Pointer,
 		componentFilter, targetQuads int32, adaptivity float32,
@@ -170,6 +171,7 @@ func newEngine(libPath, dinoGGUF, flowGGUF, decGGUF, slatGGUF, slatHRGGUF, shape
 	purego.RegisterLibFunc(&e.meshPBR, lib, "t2_mesh_pbr")
 	purego.RegisterLibFunc(&e.meshFree, lib, "t2_mesh_free")
 	purego.RegisterLibFunc(&e.prepareMeshC, lib, "t2_prepare_mesh")
+	purego.RegisterLibFunc(&e.projectionBackendC, lib, "t2_projection_backend")
 	purego.RegisterLibFunc(&e.quadRemeshAvailable, lib, "t2_quad_remesh_available")
 	purego.RegisterLibFunc(&e.prepareQuadMeshC, lib, "t2_prepare_quad_mesh")
 	purego.RegisterLibFunc(&e.quadMeshStats, lib, "t2_quad_mesh_stats")
@@ -431,6 +433,29 @@ func (e *engine) PreparePrintMesh(m *meshData, componentFilter int, alphaRatio, 
 		out.PBR = copyFloats(e.meshPBR(r), 6*nv)
 	}
 	return out, nil
+}
+
+// ProjectionBackend names the closest-surface backend behind project_pbr and
+// the projected GLB bake: "cgal" or "tinybvh", fixed at build time. Reporting
+// only - both produce a result.
+func (e *engine) ProjectionBackend() string {
+	if e == nil || e.projectionBackendC == nil {
+		return ""
+	}
+	p := e.projectionBackendC()
+	if p == 0 {
+		return ""
+	}
+	// Static string owned by the library; read it until the NUL.
+	buf := make([]byte, 0, 16)
+	for i := 0; i < 64; i++ {
+		c := *(*byte)(unsafe.Pointer(p + uintptr(i)))
+		if c == 0 {
+			break
+		}
+		buf = append(buf, c)
+	}
+	return string(buf)
 }
 
 // HasQuadRemesh reports whether this library was built with the AutoRemesher

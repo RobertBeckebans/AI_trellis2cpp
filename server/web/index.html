@@ -408,6 +408,12 @@ function applyRuntimeInfo(i) {
   $("quadremeshlabel").title = hasQuad
     ? "rebuild as mid-poly quad-dominant topology (AutoRemesher). Not watertight - use the print wrap when the result has to be printable."
     : "unavailable: rebuild libtrellis2 with Eigen 5.x so the AutoRemesher backend is compiled in";
+  // Which library does the closest-surface search for the texture rebake.
+  // Build-time only; shown because otherwise it cannot be told from outside.
+  if (i.projection_backend) {
+    $("printwraplabel").title += ` · PBR projection backend: ${i.projection_backend}`;
+    $("quadremeshlabel").title += ` · PBR projection backend: ${i.projection_backend}`;
+  }
   if (!hasQuad) $("quadremesh").checked = false;
   $("quadremeshsettings").hidden = !($("quadremesh").checked && hasQuad);
 }

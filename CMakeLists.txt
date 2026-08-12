@@ -133,6 +133,15 @@ if(TRELLIS2_CGAL)
     endif()
 endif()
 
+# Which closest-surface backend project_pbr ends up with. The rule lives in
+# print_remesh.cpp; report it here so a build does not have to be reverse
+# engineered from the CMake options.
+if(TRELLIS2_HAVE_CGAL AND NOT TRELLIS2_FORCE_TINYBVH)
+    message(STATUS "PBR projection backend: cgal (set TRELLIS2_FORCE_TINYBVH=ON for tinybvh)")
+else()
+    message(STATUS "PBR projection backend: tinybvh")
+endif()
+
 # AutoRemesher turns the dense dual-grid soup into quad-dominant mid-poly
 # topology. The core is vendored under third_party/autoremesher (MIT), but it
 # needs Eigen, which is MPL-2.0 and therefore consumed externally rather than

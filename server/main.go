@@ -987,15 +987,16 @@ func (s *server) info() map[string]interface{} {
 	generationActive := s.active || s.queued > 0
 	s.mu.Unlock()
 	return map[string]interface{}{
-		"backend":           backend,
-		"qualities":         qualities,
-		"best":              best,
-		"textured":          textured,
-		"models_loaded":     loaded,
-		"unload_idle":       unloadIdle,
-		"generation_active": generationActive,
-		"print_remesh":      s.eng.HasPrintRemesh(),
-		"quad_remesh":       s.eng.HasQuadRemesh(),
+		"backend":            backend,
+		"qualities":          qualities,
+		"best":               best,
+		"textured":           textured,
+		"models_loaded":      loaded,
+		"unload_idle":        unloadIdle,
+		"generation_active":  generationActive,
+		"print_remesh":       s.eng.HasPrintRemesh(),
+		"quad_remesh":        s.eng.HasQuadRemesh(),
+		"projection_backend": s.eng.ProjectionBackend(),
 		"defaults": map[string]interface{}{
 			"steps":         12,
 			"guidance":      7.5,

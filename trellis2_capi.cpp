@@ -7,6 +7,7 @@
 #include "trellis2_capi.h"
 #include "trellis2.h"
 #include "mesh_export.h"
+#include "print_remesh.h"
 #include "pbr_utils.h"
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -1215,6 +1216,11 @@ t2_mesh_result* t2_prepare_print_mesh(
 	r->tris.assign( prepared.tris.begin(), prepared.tris.end() );
 	r->pbr = std::move( prepared.pbr );
 	return r;
+}
+
+const char* t2_projection_backend()
+{
+	return t2print::projection_backend();
 }
 
 int t2_quad_remesh_available()

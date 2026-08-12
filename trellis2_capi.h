@@ -26,7 +26,7 @@
 extern "C" {
 #endif
 
-#define T2_CAPI_ABI_VERSION 12
+#define T2_CAPI_ABI_VERSION 13
 
 TRELLIS2_CAPI int t2_abi_version();
 
@@ -183,6 +183,12 @@ TRELLIS2_CAPI t2_mesh_result* t2_prepare_print_mesh(
 ** and its quad extraction can leave boundaries. Use t2_prepare_print_mesh when
 ** the result has to be printable. The call fails rather than returning a
 ** half-remeshed model when too much surface area was lost. */
+/* "cgal" or "tinybvh": which closest-surface backend project_pbr and the
+** projected GLB bake use. Fixed at build time. Reporting only - both produce a
+** result, they differ in which library does the nearest-surface search. The
+** returned pointer is a static string and is never freed. */
+TRELLIS2_CAPI const char*	  t2_projection_backend( void );
+
 TRELLIS2_CAPI int			  t2_quad_remesh_available( void );
 TRELLIS2_CAPI t2_mesh_result* t2_prepare_quad_mesh(
 	const float* verts, int n_verts, const int* tris, int n_tris, const float* pbr, int component_filter, int target_quads, float adaptivity, char* err, int err_len );
