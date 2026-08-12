@@ -17,7 +17,7 @@ import (
 	"github.com/ebitengine/purego"
 )
 
-const abiVersion = 11
+const abiVersion = 12
 
 // Progress stages (enum t2_stage).
 const (
@@ -96,6 +96,12 @@ type engine struct {
 	meshFree     func(r uintptr)
 	prepareMeshC func(verts unsafe.Pointer, nv int32, tris unsafe.Pointer, nt int32, pbr unsafe.Pointer,
 		componentFilter int32, err unsafe.Pointer, errLen int32) uintptr
+	quadRemeshAvailable func() int32
+	prepareQuadMeshC    func(verts unsafe.Pointer, nv int32, tris unsafe.Pointer, nt int32, pbr unsafe.Pointer,
+		componentFilter, targetQuads int32, adaptivity float32,
+		err unsafe.Pointer, errLen int32) uintptr
+	quadMeshStats func(r uintptr, quads, triangles, ngons, boundaryEdges unsafe.Pointer, areaRetained unsafe.Pointer)
+
 	printRemeshAvailable func() int32
 	preparePrintMeshC    func(verts unsafe.Pointer, nv int32, tris unsafe.Pointer, nt int32, pbr unsafe.Pointer,
 		componentFilter int32, alphaRatio, offsetRatio float32,
@@ -164,6 +170,9 @@ func newEngine(libPath, dinoGGUF, flowGGUF, decGGUF, slatGGUF, slatHRGGUF, shape
 	purego.RegisterLibFunc(&e.meshPBR, lib, "t2_mesh_pbr")
 	purego.RegisterLibFunc(&e.meshFree, lib, "t2_mesh_free")
 	purego.RegisterLibFunc(&e.prepareMeshC, lib, "t2_prepare_mesh")
+	purego.RegisterLibFunc(&e.quadRemeshAvailable, lib, "t2_quad_remesh_available")
+	purego.RegisterLibFunc(&e.prepareQuadMeshC, lib, "t2_prepare_quad_mesh")
+	purego.RegisterLibFunc(&e.quadMeshStats, lib, "t2_quad_mesh_stats")
 	purego.RegisterLibFunc(&e.printRemeshAvailable, lib, "t2_print_remesh_available")
 	purego.RegisterLibFunc(&e.preparePrintMeshC, lib, "t2_prepare_print_mesh")
 	purego.RegisterLibFunc(&e.bakeGLB, lib, "t2_bake_glb")
@@ -424,6 +433,71 @@ func (e *engine) PreparePrintMesh(m *meshData, componentFilter int, alphaRatio, 
 	return out, nil
 }
 
+// HasQuadRemesh reports whether this library was built with the AutoRemesher
+// quad backend. That depends on Eigen 5.x, not on CGAL.
+func (e *engine) HasQuadRemesh() bool {
+	return e != nil && e.quadRemeshAvailable != nil && e.quadRemeshAvailable() != 0
+}
+
+// QuadStats is the quality of a quad remesh, reported so the UI can show it
+// instead of implying a guarantee. BoundaryEdges > 0 means the surface is open
+// and must not be presented as printable.
+type QuadStats struct {
+	Quads         int     `json:"quads"`
+	Triangles     int     `json:"triangles"`
+	NGons         int     `json:"ngons"`
+	BoundaryEdges int     `json:"boundary_edges"`
+	AreaRetained  float32 `json:"area_retained"`
+}
+
+// PrepareQuadMesh rebuilds the mesh as mid-poly quad-dominant topology and
+// triangulates it for transport. targetQuads is a density hint, not a face
+// count. Unlike PreparePrintMesh this needs no CGAL - and unlike it, the result
+// is NOT guaranteed watertight.
+func (e *engine) PrepareQuadMesh(m *meshData, componentFilter, targetQuads int, adaptivity float32) (*meshData, *QuadStats, error) {
+	if m == nil || m.NVerts == 0 || m.NTris == 0 {
+		return nil, nil, fmt.Errorf("empty mesh")
+	}
+	if !e.HasQuadRemesh() || e.prepareQuadMeshC == nil {
+		return nil, nil, fmt.Errorf("quad remeshing is unavailable (library was built without the AutoRemesher backend)")
+	}
+	var pbr unsafe.Pointer
+	if len(m.PBR) == 6*m.NVerts {
+		pbr = unsafe.Pointer(&m.PBR[0])
+	}
+	errBuf := make([]byte, 512)
+	r := e.prepareQuadMeshC(unsafe.Pointer(&m.Verts[0]), int32(m.NVerts),
+		unsafe.Pointer(&m.Tris[0]), int32(m.NTris), pbr,
+		int32(componentFilter), int32(targetQuads), adaptivity,
+		unsafe.Pointer(&errBuf[0]), int32(len(errBuf)))
+	if r == 0 {
+		return nil, nil, fmt.Errorf("%s", cstr(errBuf))
+	}
+	defer e.meshFree(r)
+	nv, nt := int(e.meshNVerts(r)), int(e.meshNTris(r))
+	if nv == 0 || nt == 0 {
+		return nil, nil, fmt.Errorf("empty quad mesh")
+	}
+	out := &meshData{NVerts: nv, NTris: nt}
+	out.Verts = copyFloats(e.meshVerts(r), 3*nv)
+	out.Normals = copyFloats(e.meshNormals(r), 3*nv)
+	out.Tris = copyInts(e.meshTris(r), 3*nt)
+	if e.meshHasPBR(r) != 0 {
+		out.PBR = copyFloats(e.meshPBR(r), 6*nv)
+	}
+
+	stats := &QuadStats{}
+	if e.quadMeshStats != nil {
+		var quads, tris, ngons, boundary int32
+		var area float32
+		e.quadMeshStats(r, unsafe.Pointer(&quads), unsafe.Pointer(&tris),
+			unsafe.Pointer(&ngons), unsafe.Pointer(&boundary), unsafe.Pointer(&area))
+		stats.Quads, stats.Triangles, stats.NGons = int(quads), int(tris), int(ngons)
+		stats.BoundaryEdges, stats.AreaRetained = int(boundary), area
+	}
+	return out, stats, nil
+}
+
 // BakeGLB turns a generated mesh into a portable vertex-coloured GLB. texSize
 // remains an atlas hint for the explicit T2GLB_XATLAS mode. Geometry retains its
 // original polygon density. CPU-only; it can run while the GPU is idle.
@@ -457,8 +531,11 @@ func (e *engine) BakeProjectedGLB(target, source *meshData, texSize, sourceCompo
 		source == nil || source.NVerts == 0 || source.NTris == 0 || len(source.PBR) != 6*source.NVerts {
 		return nil, fmt.Errorf("empty projected GLB mesh or missing source PBR")
 	}
-	if !e.HasPrintRemesh() || e.bakeProjectedGLB == nil {
-		return nil, fmt.Errorf("PBR projection is unavailable (library was built without CGAL)")
+	// Deliberately not gated on HasPrintRemesh: the closest-surface projection
+	// moved to tinybvh and works in every build. Only alpha_wrap still needs
+	// CGAL, and that is PreparePrintMesh's problem, not this call's.
+	if e.bakeProjectedGLB == nil {
+		return nil, fmt.Errorf("PBR projection is unavailable")
 	}
 	var outLen int32
 	errBuf := make([]byte, 512)

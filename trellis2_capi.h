@@ -26,7 +26,7 @@
 extern "C" {
 #endif
 
-#define T2_CAPI_ABI_VERSION 11
+#define T2_CAPI_ABI_VERSION 12
 
 TRELLIS2_CAPI int t2_abi_version();
 
@@ -171,6 +171,24 @@ TRELLIS2_CAPI t2_mesh_result* t2_prepare_mesh( const float* verts, int n_verts, 
 TRELLIS2_CAPI int			  t2_print_remesh_available();
 TRELLIS2_CAPI t2_mesh_result* t2_prepare_print_mesh(
 	const float* verts, int n_verts, const int* tris, int n_tris, const float* pbr, int component_filter, float alpha_ratio, float offset_ratio, char* err, int err_len );
+
+/* Optional AutoRemesher quad remeshing. Availability is fixed at build time and
+** depends on Eigen 5.x, not on CGAL. target_quads is a density hint rather than
+** a face count (it feeds a voxel size, and adaptivity moves the result a long
+** way from it); adaptivity is 0..1, <0 keeps the default. The returned geometry
+** is triangulated from a quad-dominant remesh and carries PBR sampled onto its
+** new vertices.
+**
+** NOT watertight: AutoRemesher can drop islands whose parameterization fails
+** and its quad extraction can leave boundaries. Use t2_prepare_print_mesh when
+** the result has to be printable. The call fails rather than returning a
+** half-remeshed model when too much surface area was lost. */
+TRELLIS2_CAPI int			  t2_quad_remesh_available( void );
+TRELLIS2_CAPI t2_mesh_result* t2_prepare_quad_mesh(
+	const float* verts, int n_verts, const int* tris, int n_tris, const float* pbr, int component_filter, int target_quads, float adaptivity, char* err, int err_len );
+/* Quality of the last t2_prepare_quad_mesh result, for hosts that want to
+** report it. Written only on success; any pointer may be NULL. */
+TRELLIS2_CAPI void	   t2_quad_mesh_stats( const t2_mesh_result* r, int* out_quads, int* out_triangles, int* out_ngons, int* out_boundary_edges, float* out_area_retained );
 
 /* Bake a mesh into a portable UV-atlas-textured GLB (glTF 2.0 binary): optional
 ** component cleanup -> UV unwrap -> per-texel PBR bake (from the dense

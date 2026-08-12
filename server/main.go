@@ -109,7 +109,8 @@ type job struct {
 	previews     [][]byte // every preview blob, in order; served by /api/preview?seq=
 	mesh         *meshData
 	exportMesh   *meshData  // cached component-cleanup/print-wrap preview
-	exportKey    string     // component mode + optional Alpha Wrap parameters
+	exportKey    string     // component mode + optional Alpha Wrap / quad parameters
+	quadStats    *QuadStats // quality of the last quad remesh, nil when unused
 	glb          []byte     // cached last GLB bake
 	glbKey       string     // "tex-components" the cached GLB was baked with
 	exportMu     sync.Mutex // serializes large export preparation/bakes per job
@@ -723,6 +724,9 @@ type exportOptions struct {
 	printWrap       bool
 	alphaRatio      float32
 	offsetRatio     float32
+	quadRemesh      bool
+	targetQuads     int
+	quadAdaptivity  float32
 }
 
 func parseExportOptions(r *http.Request) exportOptions {
@@ -731,6 +735,8 @@ func parseExportOptions(r *http.Request) exportOptions {
 		componentFilter: 2,          // safe default: preserve every connected component
 		alphaRatio:      0.005,      // detail size: 0.5% of the bbox diagonal
 		offsetRatio:     0.005 / 30, // shell standoff ~alpha/30 (CGAL guideline)
+		targetQuads:     20000,      // density hint for the quad remesher, not a face count
+		quadAdaptivity:  1,          // curvature-adaptive density
 	}
 	if n := int(formUint(r, "tex", uint64(o.textureSize))); n >= 256 && n <= 4096 {
 		o.textureSize = n
@@ -742,6 +748,13 @@ func parseExportOptions(r *http.Request) exportOptions {
 		o.componentFilter = 1
 	}
 	o.printWrap = r.FormValue("print") == "1" || r.FormValue("print") == "true"
+	o.quadRemesh = r.FormValue("quad") == "1" || r.FormValue("quad") == "true"
+	if n := int(formFloat(r, "quads", float32(o.targetQuads))); n >= 100 && n <= 500000 {
+		o.targetQuads = n
+	}
+	if a := formFloat(r, "adaptivity", o.quadAdaptivity); a >= 0 && a <= 1 {
+		o.quadAdaptivity = a
+	}
 	if pct := formFloat(r, "alpha", o.alphaRatio*100); pct >= 0.01 && pct <= 50 {
 		o.alphaRatio = pct / 100
 	}
@@ -752,10 +765,14 @@ func parseExportOptions(r *http.Request) exportOptions {
 }
 
 func (o exportOptions) prepareKey() string {
-	if !o.printWrap {
-		return strconv.Itoa(o.componentFilter)
+	key := strconv.Itoa(o.componentFilter)
+	if o.printWrap {
+		key = fmt.Sprintf("%s-wrap-%g-%g", key, o.alphaRatio, o.offsetRatio)
 	}
-	return fmt.Sprintf("%d-wrap-%g-%g", o.componentFilter, o.alphaRatio, o.offsetRatio)
+	if o.quadRemesh {
+		key = fmt.Sprintf("%s-quad-%d-%g", key, o.targetQuads, o.quadAdaptivity)
+	}
+	return key
 }
 
 func (o exportOptions) glbKey() string {
@@ -765,7 +782,7 @@ func (o exportOptions) glbKey() string {
 func (s *server) preparedExportMesh(j *job, o exportOptions) (*meshData, error) {
 	// Keep-all preview is the saved source object itself: no copying, normal
 	// recomputation, topology cleanup, or other opportunity to alter it.
-	if o.componentFilter == 2 && !o.printWrap {
+	if o.componentFilter == 2 && !o.printWrap && !o.quadRemesh {
 		return s.loadJobMesh(j)
 	}
 	key := o.prepareKey()
@@ -789,6 +806,20 @@ func (s *server) preparedExportMesh(j *job, o exportOptions) (*meshData, error) 
 	if err != nil {
 		return nil, err
 	}
+	// Quad remeshing runs after the optional wrap: Alpha Wrap hands it a clean
+	// 2-manifold, which is the input it wants. The combination is still not
+	// guaranteed watertight - the quad stage can reintroduce boundaries - so the
+	// stats below are what the UI must show, not a printable claim.
+	if o.quadRemesh {
+		quadded, stats, qerr := s.eng.PrepareQuadMesh(mesh, 2, o.targetQuads, o.quadAdaptivity)
+		if qerr != nil {
+			return nil, qerr
+		}
+		mesh = quadded
+		j.mu.Lock()
+		j.quadStats = stats
+		j.mu.Unlock()
+	}
 	j.mu.Lock()
 	j.exportMesh, j.exportKey = mesh, key
 	// A restored source can always be re-read. Avoid pinning duplicate full-size
@@ -806,10 +837,26 @@ func (s *server) handleExportPreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no such job", http.StatusNotFound)
 		return
 	}
-	mesh, err := s.preparedExportMesh(j, parseExportOptions(r))
+	o := parseExportOptions(r)
+	mesh, err := s.preparedExportMesh(j, o)
 	if err != nil {
 		http.Error(w, "prepare export: "+err.Error(), http.StatusInternalServerError)
 		return
+	}
+	// Quad quality travels as headers because the body is the binary mesh. The
+	// viewer shows these rather than implying a guarantee the stage cannot give:
+	// boundary edges > 0 means the surface is open.
+	if o.quadRemesh {
+		j.mu.Lock()
+		qs := j.quadStats
+		j.mu.Unlock()
+		if qs != nil {
+			w.Header().Set("X-Quad-Quads", strconv.Itoa(qs.Quads))
+			w.Header().Set("X-Quad-Triangles", strconv.Itoa(qs.Triangles))
+			w.Header().Set("X-Quad-Ngons", strconv.Itoa(qs.NGons))
+			w.Header().Set("X-Quad-Boundary-Edges", strconv.Itoa(qs.BoundaryEdges))
+			w.Header().Set("X-Quad-Area-Retained", strconv.FormatFloat(float64(qs.AreaRetained), 'f', 4, 32))
+		}
 	}
 	writeMesh(w, mesh)
 }
@@ -948,6 +995,7 @@ func (s *server) info() map[string]interface{} {
 		"unload_idle":       unloadIdle,
 		"generation_active": generationActive,
 		"print_remesh":      s.eng.HasPrintRemesh(),
+		"quad_remesh":       s.eng.HasQuadRemesh(),
 		"defaults": map[string]interface{}{
 			"steps":         12,
 			"guidance":      7.5,

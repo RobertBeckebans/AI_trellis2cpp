@@ -74,10 +74,14 @@ struct t2_pipeline {
 // A generated mesh: verts (3/vertex), normals (3/vertex), tris (3/tri), and
 // optional per-vertex PBR (6/vertex: base_color rgb, metallic, roughness, alpha).
 struct t2_mesh_result {
-	std::vector<float> verts;
-	std::vector<float> normals;
-	std::vector<int>   tris;
-	std::vector<float> pbr; // empty when untextured
+	std::vector<float>	 verts;
+	std::vector<float>	 normals;
+	std::vector<int>	 tris;
+	std::vector<float>	 pbr; // empty when untextured
+	// Only filled by t2_prepare_quad_mesh; read back with t2_quad_mesh_stats.
+	// The struct is opaque to hosts, so growing it costs them nothing.
+	t2glb::QuadMeshStats quad_stats;
+	bool				 has_quad_stats = false;
 };
 
 namespace
@@ -1211,6 +1215,55 @@ t2_mesh_result* t2_prepare_print_mesh(
 	r->tris.assign( prepared.tris.begin(), prepared.tris.end() );
 	r->pbr = std::move( prepared.pbr );
 	return r;
+}
+
+int t2_quad_remesh_available()
+{
+	return t2glb::quad_remesh_available() ? 1 : 0;
+}
+
+t2_mesh_result* t2_prepare_quad_mesh( const float* verts, int n_verts, const int* tris, int n_tris, const float* pbr, int component_filter, int target_quads, float adaptivity, char* err, int err_len )
+{
+	if( !verts || !tris || n_verts <= 0 || n_tris <= 0 ) {
+		copy_err( err, err_len, "empty mesh" );
+		return nullptr;
+	}
+	if( component_filter < 0 || component_filter > 2 ) {
+		copy_err( err, err_len, "bad component filter" );
+		return nullptr;
+	}
+	t2glb::MeshExportOptions opt;
+	opt.components = ( t2glb::ComponentFilter )component_filter;
+	t2glb::PreparedMesh	 prepared;
+	t2glb::QuadMeshStats stats;
+	std::string			 e;
+	if( !t2glb::prepare_quad_mesh( verts, n_verts, ( const int32_t* )tris, n_tris, pbr, opt, target_quads, adaptivity, prepared, &stats, e ) ) {
+		copy_err( err, err_len, e );
+		return nullptr;
+	}
+	auto* r	   = new t2_mesh_result();
+	r->verts   = std::move( prepared.verts );
+	r->normals = std::move( prepared.normals );
+	r->tris.assign( prepared.tris.begin(), prepared.tris.end() );
+	r->pbr			  = std::move( prepared.pbr );
+	r->quad_stats	  = stats;
+	r->has_quad_stats = true;
+	return r;
+}
+
+void t2_quad_mesh_stats( const t2_mesh_result* r, int* out_quads, int* out_triangles, int* out_ngons, int* out_boundary_edges, float* out_area_retained )
+{
+	const bool ok = r && r->has_quad_stats;
+	if( out_quads )
+		*out_quads = ok ? r->quad_stats.quads : 0;
+	if( out_triangles )
+		*out_triangles = ok ? r->quad_stats.triangles : 0;
+	if( out_ngons )
+		*out_ngons = ok ? r->quad_stats.ngons : 0;
+	if( out_boundary_edges )
+		*out_boundary_edges = ok ? r->quad_stats.boundary_edges : 0;
+	if( out_area_retained )
+		*out_area_retained = ok ? r->quad_stats.area_retained : 0.0f;
 }
 
 uint8_t* t2_bake_glb( const float* verts, int n_verts, const int* tris, int n_tris, const float* pbr, int texture_size, int component_filter, int* out_len, char* err, int err_len )

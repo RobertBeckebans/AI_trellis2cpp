@@ -252,6 +252,40 @@
         <input id="printwrap" type="checkbox" checked disabled>
         <span>watertight print wrap (CGAL)</span>
       </label>
+      <label class="idle-option" for="quadremesh" id="quadremeshlabel"
+             title="rebuild as mid-poly quad-dominant topology (AutoRemesher). Not watertight - use the print wrap when the result has to be printable.">
+        <input id="quadremesh" type="checkbox" disabled>
+        <span>quad retopology (mid-poly)</span>
+      </label>
+      <div class="row" id="quadremeshsettings" hidden>
+        <div style="flex:1 1 100%">
+          <label for="quaddensity" title="density hint, not an exact face count: it feeds a voxel size and the adaptivity setting moves the result away from it">target quads <output id="quaddensityval" style="opacity:.7"></output></label>
+          <input id="quaddensity" type="range" min="500" max="100000" value="20000" step="500" style="width:100%">
+          <div style="display:flex;justify-content:space-between;opacity:.55;font-size:.85em">
+            <span>fewer · coarser</span><span>more · denser</span>
+          </div>
+        </div>
+        <div style="flex:1 1 100%">
+          <label for="quadadapt" title="0 = uniform quad size, 1 = concentrate quads where the surface curves">curvature adaptivity <output id="quadadaptval" style="opacity:.7"></output></label>
+          <input id="quadadapt" type="range" min="0" max="100" value="100" step="5" style="width:100%">
+        </div>
+        <div id="quadstats" style="flex:1 1 100%;opacity:.65;font-size:.85em"></div>
+      <script>
+        // Filled from the X-Quad-* headers of /api/export-preview. Reports what
+        // the remesh actually produced instead of what was requested - target
+        // quads is a density hint and the result routinely differs a lot.
+        function showQuadStats(headers) {
+          const q = headers.get("X-Quad-Quads");
+          if (!q) { $("quadstats").textContent = ""; return; }
+          const bnd = +headers.get("X-Quad-Boundary-Edges") || 0;
+          const area = +headers.get("X-Quad-Area-Retained") || 0;
+          $("quadstats").textContent =
+            `${q} quads · ${headers.get("X-Quad-Triangles")} tris · ${headers.get("X-Quad-Ngons")} n-gons · `
+            + `${(area * 100).toFixed(1)}% of the surface kept · `
+            + (bnd ? `${bnd} open edges (not printable)` : "closed surface");
+        }
+      </script>
+      </div>
       <div class="row" id="printwrapsettings" hidden>
         <div style="flex:1 1 100%">
           <label for="wrapdetail" title="higher = finer detail: sharper surface, more triangles, slower. The wrap offset is derived automatically (~detail/30).">detail <output id="wrapdetailval" style="opacity:.7"></output></label>
@@ -368,6 +402,14 @@ function applyRuntimeInfo(i) {
   }
   // Watertight wrap defaults on; reveal its detail slider to match the checkbox.
   $("printwrapsettings").hidden = !($("printwrap").checked && hasPrintWrap);
+
+  const hasQuad = !!i.quad_remesh;
+  $("quadremesh").disabled = !hasQuad;
+  $("quadremeshlabel").title = hasQuad
+    ? "rebuild as mid-poly quad-dominant topology (AutoRemesher). Not watertight - use the print wrap when the result has to be printable."
+    : "unavailable: rebuild libtrellis2 with Eigen 5.x so the AutoRemesher backend is compiled in";
+  if (!hasQuad) $("quadremesh").checked = false;
+  $("quadremeshsettings").hidden = !($("quadremesh").checked && hasQuad);
 }
 async function refreshRuntimeInfo() {
   const r = await fetch("/api/info");
@@ -823,6 +865,11 @@ function exportQuery() {
   const q = new URLSearchParams({
     components: $("exportcomponents").value,
   });
+  if ($("quadremesh").checked) {
+    q.set("quad", "1");
+    q.set("quads", String($("quaddensity").value));
+    q.set("adaptivity", String(+$("quadadapt").value / 100));
+  }
   if ($("printwrap").checked) {
     q.set("print", "1");
     const a = detailAlpha();               // detail size, % of the bbox diagonal
@@ -851,10 +898,21 @@ updateDetailLabel();
 function exportSettingsChanged() {
   if (previewingExport) showOriginalExport();
   if (!glbJobId) return;
+  if ($("printwrap").checked && $("quadremesh").checked) {
+    $("exportinfo").textContent =
+      "CGAL rebuilds a watertight mesh, then quad retopology replaces its topology — the quad stage can reopen boundaries, so the result is no longer guaranteed printable";
+    return;
+  }
   if ($("printwrap").checked) {
     $("exportinfo").textContent = originalExportMesh?.textured
       ? "CGAL will rebuild a watertight mesh; download rebakes source PBR onto its new UV atlas"
       : "CGAL will rebuild a watertight print mesh; this source has no material to transfer";
+    return;
+  }
+  if ($("quadremesh").checked) {
+    $("exportinfo").textContent = originalExportMesh?.textured
+      ? "quad retopology replaces the topology; download rebakes source PBR onto its new UV atlas. Not watertight — enable the print wrap if it has to be printable"
+      : "quad retopology replaces the topology. Not watertight — enable the print wrap if it has to be printable";
     return;
   }
   if (!originalExportMesh?.textured) {
@@ -871,6 +929,20 @@ function exportSettingsChanged() {
 }
 
 $("exportcomponents").addEventListener("change", exportSettingsChanged);
+$("quadremesh").addEventListener("change", () => {
+  $("quadremeshsettings").hidden = !$("quadremesh").checked;
+  exportSettingsChanged();
+});
+$("quaddensity").addEventListener("input", () => {
+  $("quaddensityval").textContent = $("quaddensity").value;
+});
+$("quaddensity").addEventListener("change", exportSettingsChanged);
+$("quadadapt").addEventListener("change", exportSettingsChanged);
+$("quadadapt").addEventListener("input", () => {
+  $("quadadaptval").textContent = (+$("quadadapt").value / 100).toFixed(2);
+});
+$("quaddensityval").textContent = $("quaddensity").value;
+$("quadadaptval").textContent = (+$("quadadapt").value / 100).toFixed(2);
 $("printwrap").addEventListener("change", () => {
   $("printwrapsettings").hidden = !$("printwrap").checked;
   exportSettingsChanged();
@@ -970,6 +1042,7 @@ $("pexport").addEventListener("click", async () => {
     } else {
       const r = await fetch(`/api/export-preview/${glbJobId}?${exportQuery()}`);
       if (!r.ok) throw new Error(await r.text());
+      showQuadStats(r.headers);
       const m = parseMesh(await r.arrayBuffer());
       viewer.setMesh(m.verts, m.normals, m.tris, m.pbr);
       $("meshinfo").textContent = meshDescription(m, "export preview · ");

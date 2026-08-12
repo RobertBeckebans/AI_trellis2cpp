@@ -560,16 +560,34 @@ Results: `docs/progress/autoremesher-quad-remesh_phase3-quad-module.md`.
 
 ### Phase 4 — C-API, server, viewer
 
-- [ ] `t2_quad_remesh_available()` and `t2_prepare_quad_mesh(...)` in
-      `trellis2_capi.{h,cpp}`, documented in the header's existing
-      style.
-- [ ] **Bump `T2_CAPI_ABI_VERSION`** and propagate in
-      `server/engine.go`.
-- [ ] Server: expose the mode as a job parameter; keep the single
-      inference mutex semantics; make sure a long quad remesh cannot
-      block progress polling.
-- [ ] Viewer: a mode selector next to the existing export options; no
-      CDN, no build step.
+Results: `docs/progress/autoremesher-quad-remesh_phase4-capi-server-viewer.md`.
+
+- [x] `t2_quad_remesh_available()`, `t2_prepare_quad_mesh()` and
+      `t2_quad_mesh_stats()` in `trellis2_capi.{h,cpp}`.
+- [x] **`T2_CAPI_ABI_VERSION` 11 → 12**, propagated to `const abiVersion`
+      in `server/engine.go`. Verified against the built DLL: the ABI check
+      passes and all three symbols resolve.
+- [x] Server: `quad` / `quads` / `adaptivity` job parameters, quad stage
+      after the optional wrap, quad parameters in the prepare and GLB
+      cache keys, `quad_remesh` in `/api/info`.
+- [x] Fixed a stale gate found on the way: `BakeProjectedGLB` refused to
+      run without CGAL, an assumption Phase 2 had already invalidated.
+- [x] Viewer: quad checkbox with target-quads and adaptivity sliders,
+      disabled with a reason when the backend is absent; quality readout
+      fed by new `X-Quad-*` headers; export hints for all four
+      wrap/quad combinations, including "not printable" for the pair.
+- [ ] Bridge `t2quad::ProgressFn` to the server progress callback. On the
+      coarse mesh the remesh is fast enough that nothing stalls; on 512³
+      it will look like a hang.
+- [ ] Confirm a long quad remesh cannot block progress polling — untested,
+      since no slow enough run has been made through the server yet.
+
+**First measurement on real pipeline geometry** (coarse 64³ path):
+221 668 tris → 5 748 tris, 2104 quads / 347 tris / 695 n-gons,
+**796 boundary edges**, 87.2 % area retained. Every synthetic fixture so
+far was closed at 98 %+, so the real output is both open and lossier than
+the fixtures suggested. The stage is still useful, but the UI must keep
+showing these numbers instead of implying a clean retopology.
 
 ### Phase 5 — Validation and documentation
 
