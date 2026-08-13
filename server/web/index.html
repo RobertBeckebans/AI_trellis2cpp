@@ -1925,6 +1925,23 @@ const viewer = (() => {
     },
   };
 
+  // Everything the viewer draws is in TRELLIS axes - except a parsed GLB, which
+  // write_glb already rotated to glTF's Y-up convention, (x,y,z) -> (x,z,-y).
+  // Without undoing that, switching between the per-vertex preview and the baked
+  // one tips the model by 90 degrees. This is the inverse, (x,y,z) -> (x,-z,y),
+  // applied as a model-space pre-rotation rather than by rewriting the uploaded
+  // vertices: the textured path exists to show the downloaded bytes unaltered,
+  // and the file itself is right - Blender reads it correctly.
+  //
+  // It is a proper rotation (det +1), so it carries normals and tangents through
+  // mat3(viewModel) unchanged in meaning and leaves the TANGENT handedness sign
+  // alone.
+  const GLB_TO_NATIVE = (() => {
+    const o = new Float32Array(16);
+    o[0] = 1; o[6] = 1; o[9] = -1; o[15] = 1;
+    return o;
+  })();
+
   /* input */
   let dragging = false, panning = false, lx = 0, ly = 0;
   canvas.addEventListener("mousedown", e => {
@@ -1993,8 +2010,11 @@ const viewer = (() => {
       const proj = M.persp(0.9, w / h, 0.05, 100);
       // Translation precedes each object's local rotation, so every showcase
       // asset spins in place instead of the whole row orbiting around its centre.
-      const matricesAt = offset => {
-        const model = offset ? M.mul(M.trans(offset, 0, 0), rotation) : rotation;
+      // `pre` is an optional model-space rotation applied before the orbit, for
+      // geometry that does not arrive in the viewer's native axes.
+      const matricesAt = (offset, pre) => {
+        let model = offset ? M.mul(M.trans(offset, 0, 0), rotation) : rotation;
+        if (pre) model = M.mul(model, pre);
         const viewModel = M.mul(view, model);
         return { viewModel, mvp: M.mul(proj, viewModel) };
       };
@@ -2072,7 +2092,7 @@ const viewer = (() => {
         }
         gl.bindVertexArray(null);
       } else if (renderMode === "textured" && texNIndices) {
-        const matrices = matricesAt(0);
+        const matrices = matricesAt(0, GLB_TO_NATIVE);   // parsed GLB is Y-up
         gl.useProgram(prog);
         gl.uniformMatrix4fv(uMVP, false, matrices.mvp);
         gl.uniformMatrix4fv(uViewModel, false, matrices.viewModel);
