@@ -48,6 +48,11 @@ ctest --test-dir build                  # full parity (needs ggufs/ + dumps/)
 | **1024 cascade** — decoder upsample(×4) → 512³ coords | `test_cascade` | full coord set + quantized 64³ HR scaffold | **PASS**, set match to 0.0001% (1 voxel of 995k) |
 | **1024 cascade** — HR (1024-model) flow forward | `test_cascade` | full output | **PASS**, rel-L2 ~3e-4 (CPU); ~1e-2 on GPU flash |
 | **1024 cascade** — final 1024³ decode (3.97M voxels) | `test_cascade` | per-level features + subdivision + 7-ch output | **PASS**, rel-L2 ≤ 2e-2, set within 0.0001% |
+| **cascade token budget** — quantize (truncating) + step-down loop + 1024 floor | `test_cascade_tokens` | formula on hand-checked cells; chosen resolution vs. independently derived per-grid counts for every budget; 1024 scaffold vs. an independent re-implementation of the pre-1536 inline code | **PASS**, no assets needed (runs in `-LE model`) |
+| **1536 cascade** — 96³ HR scaffold + selected resolution | `test_cascade` | full coord set + `hr_resolution` | gated against `hr_coords_1536` / `hr_resolution_1536` when the dump carries them; **invariants only** until `scripts/dump_cascade_reference.py` is rerun |
+| **1536 cascade** — end-to-end run on the R9700 | manual (`server/`, 2026-08-13) | achieved resolution, stage wall clock, mesh size, VRAM ceiling | **RUNS at full 1536³**, 2 of 2 objects, no budget reduction. 315 s total, 1536³ decode 20.2 s, 6.66M-tri mesh, VRAM ceiling < 16 GB of 32 GB. See `docs/progress/1536-cascade_phase3-measure.md` |
+| **1536 cascade** — RoPE extrapolation at coords up to 95 (model declares `resolution: 64`) | visual | fine-scale geometry on a character subject | **no breakup**: jacket emblem, shoulder spikes, zipper runs, goggle band, boot soles all distinct; judged better than the lower tiers. Inspection, not a recorded same-seed pair |
+| **1536 cascade** — decode VRAM peak, host RAM high-water | — | — | **NOT INSTRUMENTED.** The < 16 GB ceiling is an external reading, so it bounds but does not pin the decode transient; `decode_vram_peak`'s 1536 entry stays the conservative extrapolation. Host RAM: generation side ~0.5 GB (derived from the mesh size), export side (plan D5) still unmeasured |
 
 Notes:
 - **Flash attention (default for every flow forward).** `sdpa_auto()` uses

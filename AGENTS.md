@@ -494,7 +494,10 @@ are fixed.
 - Meshes live in the centered unit cube; `--normalize` in `ss_mesh`
   establishes this explicitly.
 - Resolution levels: 64³ occupancy → 32³ scaffold → 512³ (fine) →
-  optional 1024³ cascade. The 1536 cascade from upstream is not ported.
+  optional 1024³ or 1536³ cascade. The 1536 tier reuses the 1024
+  checkpoints and can be stepped back down toward 1024 by the HR token
+  budget (`src/cascade_tokens.h`); it is implemented but not yet
+  measured end to end (`docs/plan/1536-cascade.md` phase 3).
 - Own container formats: `.dinodata` (conditioning), `.latent` (z_s),
   `.occ` (occupancy logits), `.t2mesh` (`T2MESH01/02/03`, versioned).
   Format changes require a plan and need a version bump plus a read

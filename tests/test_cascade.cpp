@@ -1,8 +1,11 @@
-// Validation of the 1024_cascade HR stage against the PyTorch reference
+// Validation of the cascade HR stage against the PyTorch reference
 // (scripts/dump_cascade_reference.py -> dumps/reference_cascade.gguf):
 //
 //   1. shape-decoder upsample(x4): the LR slat -> 512^3 candidate coord set,
 //      and its quantized 64^3 HR scaffold (subdivision-boundary set tolerance).
+//   1b. the same candidate set at the 1536 tier: the token budget's choice and
+//      the resulting 96^3 scaffold, against the reference when the dump carries
+//      one (hr_coords_1536), otherwise as invariants.
 //   2. HR (1024-model) flow forward at t=500 on the HR scaffold  (tight gate).
 //   3. final 1024^3 decode of the reference HR slat: per-level features,
 //      subdivision, and 7-channel output.
@@ -14,6 +17,7 @@
 // exits 77 (ctest SKIP) when inputs are missing.
 
 #include "trellis2.h"
+#include "cascade_tokens.h"
 #include "parity.hpp"
 
 #include <cmath>
@@ -153,6 +157,55 @@ int main( int argc, char** argv )
 		std::printf( "[hr scaffold]     got %zu vs ref %d, sym-diff %.4f%% -> %s\n", my_hr.size() / 3, Lhr, 100.0 * hr_frac, hr_frac <= 5e-4 ? "OK" : "FAIL" );
 		if( hr_frac > 5e-4 )
 			++n_fail;
+
+		// ── 1b. the shipped budget path, at both cascade tiers ────────────────
+		// The check above quantizes with a local copy of the formula; this one
+		// goes through the code the pipeline actually runs, so a change to
+		// cascade_tokens.h that moves the 1024 tier fails here.
+		{
+			std::vector<int32_t>	   sel_1024;
+			const t2cascade::selection s1024 = t2cascade::select_scaffold( got_up, 512, 1024, t2cascade::default_max_num_tokens, sel_1024 );
+			const bool				   same	 = s1024.resolution == 1024 && sel_1024 == my_hr;
+			std::printf( "[budget 1024]     res %d, %d tokens, %d reductions -> %s\n", s1024.resolution, s1024.tokens, s1024.reductions, same ? "OK" : "FAIL" );
+			if( !same )
+				++n_fail;
+
+			std::vector<int32_t>	   sel_1536;
+			const t2cascade::selection s1536 = t2cascade::select_scaffold( got_up, 512, 1536, t2cascade::default_max_num_tokens, sel_1536 );
+			std::printf( "[budget 1536]     res %d (grid %d), %d tokens, %d reductions\n", s1536.resolution, s1536.grid, s1536.tokens, s1536.reductions );
+
+			// Invariants that hold with or without a 1536 reference in the dump.
+			bool inv = s1536.resolution >= 1024 && s1536.resolution <= 1536 && s1536.resolution % 128 == 0 && s1536.grid == s1536.resolution / 16 &&
+				( s1536.tokens < t2cascade::default_max_num_tokens || s1536.resolution == 1024 ) && s1536.tokens >= s1024.tokens;
+			int mx = -1;
+			for( int32_t v : sel_1536 )
+				if( v > mx )
+					mx = v;
+			inv = inv && mx < s1536.grid;
+			std::printf( "[budget 1536 inv] max coord %d < %d, fits budget or floored -> %s\n", mx, s1536.grid, inv ? "OK" : "FAIL" );
+			if( !inv )
+				++n_fail;
+
+			// Tight gate when the dump was regenerated with the 1536 capture.
+			std::vector<float> ref_1536f, ref_res_1536;
+			if( ref.load( "hr_coords_1536", ref_1536f ) && ref.load( "hr_resolution_1536", ref_res_1536 ) && !ref_res_1536.empty() ) {
+				const int			 want_res = ( int )ref_res_1536[0];
+				std::vector<int32_t> ref_1536 = coords_xyz( ref_1536f );
+				const double		 f		  = set_diff_frac( sel_1536, ref_1536 );
+				const bool			 ok		  = s1536.resolution == want_res && f <= 5e-4;
+				std::printf( "[hr scaffold 1536] res %d vs ref %d, got %zu vs ref %zu, sym-diff %.4f%% -> %s\n",
+					s1536.resolution,
+					want_res,
+					sel_1536.size() / 3,
+					ref_1536.size() / 3,
+					100.0 * f,
+					ok ? "OK" : "FAIL" );
+				if( !ok )
+					++n_fail;
+			} else {
+				std::printf( "[hr scaffold 1536] no reference in the dump (regenerate with scripts/dump_cascade_reference.py), invariants only\n" );
+			}
+		}
 	}
 
 	// ── 2. HR flow forward at t=500 on the reference HR scaffold ──────────────

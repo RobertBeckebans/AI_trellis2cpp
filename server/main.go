@@ -159,6 +159,11 @@ type job struct {
 	FinishedAt int64  `json:"finishedAt,omitempty"`
 	DurationMS int64  `json:"durationMs,omitempty"`
 	Quality    string `json:"quality,omitempty"`
+	// Grid the geometry was actually extracted at. Usually the tier Quality
+	// asked for, but the 1536 cascade's token budget can step it back toward
+	// 1024 in units of 128 on a dense object — that has to be visible rather
+	// than showing up as a mesh that is quietly coarser than requested.
+	Resolution int    `json:"resolution,omitempty"`
 	Thumbnail  string `json:"thumbnail,omitempty"`
 	Stage      string `json:"stage,omitempty"`
 	Step       int    `json:"step"`
@@ -250,8 +255,11 @@ func (s *server) worker() {
 			j.mu.Unlock()
 			// Minimal progress trace, throttled: a multi-minute stage should look
 			// alive in the console rather than hung. Only stages reporting a step
-			// count produce these.
-			if total > 0 && (now.Sub(lastProgressLog) >= 2*time.Second || step >= total) {
+			// count produce these — the upsample stage's step/total are the
+			// cascade's (achieved, requested) resolution, already logged above,
+			// and would otherwise read as a nonsensical "1536 / 1536".
+			if total > 0 && stage != stageNames[stageUpsample] &&
+				(now.Sub(lastProgressLog) >= 2*time.Second || step >= total) {
 				lastProgressLog = now
 				log.Printf("    ... %d / %d (%.1f s)", step, total, now.Sub(stageStarted).Seconds())
 			}
@@ -309,6 +317,16 @@ func (s *server) worker() {
 				setStage("loading models", 0, 0)
 			},
 			func(stage, step, total int) {
+				// The cascade reports its settled resolution as a second
+				// upsample event — (achieved, requested), not a step counter.
+				// Say so in the log rather than letting it read as "1536/1536".
+				if stage == stageUpsample && total > 0 {
+					if step < total {
+						log.Printf("    cascade reduced to %d³ (%d³ would exceed the token budget)", step, total)
+					} else {
+						log.Printf("    cascade resolution %d³", step)
+					}
+				}
 				setStage(stageNames[stage], step, total)
 			},
 			onPreview)
@@ -321,6 +339,7 @@ func (s *server) worker() {
 			j.Error = err.Error()
 		} else {
 			j.mesh = mesh
+			j.Resolution = mesh.GridRes
 		}
 		j.mu.Unlock()
 		if err == nil {
@@ -453,7 +472,8 @@ func (s *server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// quality: "coarse" | "512" | "1024" (default auto → best available)
+	// quality: "coarse" | "512" | "1024" | "1536" (default auto → best available,
+	// which stops at 1024: 1536 is an explicit choice, not a default)
 	pt := pipelineForQuality(r.FormValue("quality"))
 
 	// Browser uploads are already cleaned so they pass "keep" to prevent a
@@ -508,6 +528,8 @@ func pipelineForQuality(quality string) int {
 		return pipe512
 	case "1024":
 		return pipe1024
+	case "1536":
+		return pipe1536
 	default:
 		return pipeAuto
 	}
@@ -1185,6 +1207,11 @@ func (s *server) info() map[string]interface{} {
 	if caps&cap1024 != 0 {
 		qualities = append(qualities, "1024")
 	}
+	if caps&cap1536 != 0 {
+		qualities = append(qualities, "1536")
+	}
+	// "best" is what auto picks, and auto stops at 1024 — 1536 needs a card that
+	// can hold its decode, so offering it is right but defaulting to it is not.
 	best := "coarse"
 	if caps&cap1024 != 0 {
 		best = "1024"
@@ -1367,7 +1394,9 @@ func main() {
 	}
 	backend, caps, textured, loaded := eng.Info()
 	mode := "coarse (marching cubes)"
-	if caps&cap1024 != 0 {
+	if caps&cap1536 != 0 {
+		mode = "1536 cascade (+ 1024 cascade, 512 fine, coarse)"
+	} else if caps&cap1024 != 0 {
 		mode = "1024 cascade (+ 512 fine, coarse)"
 	} else if caps&cap512 != 0 {
 		mode = "512 fine (+ coarse)"

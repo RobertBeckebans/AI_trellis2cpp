@@ -405,6 +405,10 @@ const QUALITY_LABELS = {
   coarse: "coarse preview (64³, fast)",
   "512":  "512³ fine",
   "1024": "1024³ cascade (high detail, slow)",
+  // Kept short enough to survive the sidebar width, like the entries above.
+  // The token budget can step 1536 back toward 1024 on a dense object; the
+  // status line reports what the run actually landed on (job.resolution).
+  "1536": "1536³ cascade (most detail, slowest)",
 };
 let backendName = "";
 function applyRuntimeInfo(i) {
@@ -676,7 +680,12 @@ async function poll(id, thumb, quality) {
       addHistory(id, thumb, quality);
       try { await refreshRuntimeInfo(); } catch (e) { /* informational only */ }
       const elapsed = j.durationMs ? ` in ${(j.durationMs / 1000).toFixed(1)}s` : "";
-      setStatus(`done${elapsed} · live steps ${j.livePreview ? "on" : "off"}`);
+      // Say which grid it actually came out at whenever that is not simply the
+      // tier that was asked for — a cascade run reduced by the token budget
+      // must not look like a full-resolution one.
+      const gotRes = (j.resolution && String(j.resolution) !== quality)
+        ? ` · ${j.resolution}³` : "";
+      setStatus(`done${elapsed}${gotRes} · live steps ${j.livePreview ? "on" : "off"}`);
       setTimeout(() => { $("bar").style.display = "none"; }, 600);
       return;
     }
@@ -693,7 +702,16 @@ async function poll(id, thumb, quality) {
       if (j.stage === "sampling material" && j.total > 0)
         pct = 95 + 4 * (j.step / j.total);
       $("bar").firstElementChild.style.width = pct + "%";
-      setStatus(j.stage + (j.total ? ` (${j.step}/${j.total})` : "") + "…");
+      // "upsampling scaffold" is the one stage whose step/total are not a step
+      // counter: the cascade reports (achieved resolution, requested one) there
+      // once its token budget has settled. Render it as such.
+      if (j.stage === "upsampling scaffold" && j.total > 0) {
+        setStatus(j.step < j.total
+          ? `${j.stage} · reduced to ${j.step}³ (${j.total}³ needs too many tokens)…`
+          : `${j.stage} · ${j.step}³…`);
+      } else {
+        setStatus(j.stage + (j.total ? ` (${j.step}/${j.total})` : "") + "…");
+      }
     } else {
       setStatus("queued…");
     }

@@ -6,6 +6,7 @@
 
 #include "trellis2_capi.h"
 #include "trellis2.h"
+#include "cascade_tokens.h"
 #include "mesh_export.h"
 #include "print_remesh.h"
 #include "pbr_utils.h"
@@ -42,10 +43,49 @@ void copy_err( char* err, int err_len, const std::string& msg )
 // level-3 conv output; rounded up for headroom). Mesh-dependent, so treated as
 // a threshold, not an exact reservation — the free-flows fallback then gives a
 // several-GB cushion if the estimate is low.
+//
+// The 1536 entry is NOT measured: it is surface-area-scaled from the 1024 tier
+// (~9M voxels, ~15 GB) per docs/plan/1536-cascade.md D4, and Phase 3 of that
+// plan replaces it with a real number. It is only ever compared against free
+// VRAM to decide whether to free the finished flow DiTs first, so erring high
+// costs a reload, not a failure.
 size_t decode_vram_peak( int pipeline_type )
 {
 	const double GB = ( double )( 1ULL << 30 );
-	return ( size_t )( ( pipeline_type == T2_PIPE_1024 ? 7.5 : 3.0 ) * GB );
+	double		 gb = 3.0; // 512³
+	if( pipeline_type == T2_PIPE_1024 )
+		gb = 7.5;
+	else if( pipeline_type == T2_PIPE_1536 )
+		gb = 15.0;
+	return ( size_t )( gb * GB );
+}
+
+// Both cascade tiers run the same HR flow (the 1024 model) on the same
+// conditioning and therefore share every model-selection decision; they differ
+// only in the scaffold resolution the token budget lands on.
+bool is_cascade_pipeline( int pipeline_type )
+{
+	return pipeline_type == T2_PIPE_1024 || pipeline_type == T2_PIPE_1536;
+}
+
+// The resolution a cascade tier asks the token budget for.
+int requested_cascade_resolution( int pipeline_type )
+{
+	return pipeline_type == T2_PIPE_1536 ? 1536 : 1024;
+}
+
+// TRELLIS.2's HR token budget. T2_MAX_NUM_TOKENS overrides it, because the
+// default was chosen for cards much smaller than the one the 1536 tier targets
+// and docs/plan/1536-cascade.md Phase 3 has to measure before that default can
+// responsibly move. Unset, this reproduces upstream exactly.
+int cascade_max_tokens()
+{
+	if( const char* e = std::getenv( "T2_MAX_NUM_TOKENS" ) ) {
+		const int v = std::atoi( e );
+		if( v > 0 )
+			return v;
+	}
+	return t2cascade::default_max_num_tokens;
 }
 
 } // namespace
@@ -83,6 +123,9 @@ struct t2_mesh_result {
 	// The struct is opaque to hosts, so growing it costs them nothing.
 	t2glb::QuadMeshStats quad_stats;
 	bool				 has_quad_stats = false;
+	// Grid the geometry was extracted at (t2_mesh_grid_resolution). Set only by
+	// t2_generate; 0 means "not from a generation".
+	int					 grid_res		= 0;
 };
 
 namespace
@@ -357,13 +400,15 @@ bool run_texture_stage( t2_pipeline* p,
 		return false;
 	}
 
-	// A 64^3/1024 shape SLAT must use the 1024 material model; feeding it to the
-	// 32^3/512 model is not a valid fallback.
-	if( pt == T2_PIPE_1024 && p->texflow_hr_path.empty() ) {
+	// A cascade shape SLAT (64^3 and up) must use the 1024 material model;
+	// feeding it to the 32^3/512 model is not a valid fallback. Upstream picks
+	// tex_slat_flow_model_1024 for the 1536 tier too — the texture stage is
+	// resolution-agnostic in the same way the shape HR flow is.
+	if( is_cascade_pipeline( pt ) && p->texflow_hr_path.empty() ) {
 		e = "1024 texture flow model is not loaded";
 		return false;
 	}
-	const std::string&		  fp   = pt == T2_PIPE_1024 ? p->texflow_hr_path : p->texflow_path;
+	const std::string&		  fp   = is_cascade_pipeline( pt ) ? p->texflow_hr_path : p->texflow_path;
 	trellis2_slat_flow_model* flow = trellis2_slat_flow_load( fp.c_str(), true, &e );
 	if( !flow ) {
 		e = "tex_flow load: " + e;
@@ -638,8 +683,9 @@ int t2_pipeline_caps( t2_pipeline* p )
 	int c = T2_CAP_COARSE;
 	if( p->fine )
 		c |= T2_CAP_512;
+	// One flag, two tiers: 1536 needs no model 1024 does not already need.
 	if( p->cascade )
-		c |= T2_CAP_1024;
+		c |= T2_CAP_1024 | T2_CAP_1536;
 	if( p->texture )
 		c |= T2_CAP_TEXTURE;
 	return c;
@@ -747,12 +793,14 @@ t2_mesh_result* t2_generate( t2_pipeline* p,
 		return nullptr;
 	}
 
-	// Resolve the requested path to what is actually loaded.
+	// Resolve the requested path to what is actually loaded. AUTO stops at 1024
+	// on purpose: 1536 buys detail with a much larger decode and a longer run,
+	// so it stays an explicit request rather than the best-available default.
 	int pt = pipeline_type;
 	if( pt == T2_PIPE_AUTO ) {
 		pt = p->cascade ? T2_PIPE_1024 : ( p->fine ? T2_PIPE_512 : T2_PIPE_COARSE );
 	}
-	if( pt == T2_PIPE_1024 && !p->cascade )
+	if( is_cascade_pipeline( pt ) && !p->cascade )
 		pt = p->fine ? T2_PIPE_512 : T2_PIPE_COARSE;
 	if( pt == T2_PIPE_512 && !p->fine )
 		pt = T2_PIPE_COARSE;
@@ -873,9 +921,10 @@ t2_mesh_result* t2_generate( t2_pipeline* p,
 		const float inv = 1.0f / ( float )Rout;
 		for( size_t i = 0; i < mesh.verts.size(); ++i )
 			mesh.verts[i] = mesh.verts[i] * inv - 0.5f;
-		r->verts   = std::move( mesh.verts );
-		r->normals = std::move( mesh.normals );
-		r->tris	   = std::move( mesh.tris );
+		r->verts	= std::move( mesh.verts );
+		r->normals	= std::move( mesh.normals );
+		r->tris		= std::move( mesh.tris );
+		r->grid_res = Rout; // the occupancy grid is the coarse path's resolution
 		return r;
 	}
 
@@ -978,7 +1027,7 @@ t2_mesh_result* t2_generate( t2_pipeline* p,
 		}
 		grid = ss_res * dhp2.upscale(); // 32 * 16 = 512
 	} else {
-		// ── 1024 cascade: upsample -> quantize -> HR flow -> decode grid 1024 ─
+		// ── cascade: upsample -> quantize -> HR flow -> decode at 1024 or 1536 ─
 		if( progress )
 			progress( user, T2_STAGE_UPSAMPLE, 0, 0 );
 		std::vector<int32_t> up_coords; // 512^3 candidate coords
@@ -993,30 +1042,28 @@ t2_mesh_result* t2_generate( t2_pipeline* p,
 			delete r;
 			return nullptr;
 		}
-		// quantize (c+0.5)/512*64 and dedup into the 64^3 HR scaffold
-		const int					 lr_res	 = ss_res * dhp2.upscale(); // 512
-		const int					 hr_grid = shp.resolution * 2;		// 64 (HR flow resolution)
-		std::unordered_set<uint64_t> seen;
+		// Quantize (c+0.5)/512*(res/16) and dedup into the HR scaffold, stepping
+		// the requested resolution down by 128 while the scaffold would reach the
+		// HR flow's token budget (t2cascade::select_scaffold). At T2_PIPE_1024
+		// that loop quantizes once at 64^3 and stops on the floor, so this tier
+		// stays exactly what it was.
+		const int					 lr_res = ss_res * dhp2.upscale();		 // 512
+		const int					 req_res = requested_cascade_resolution( pt ); // 1024 or 1536
 		std::vector<int32_t>		 hr_coords;
-		auto						 key = []( int32_t a, int32_t b, int32_t c ) { return ( ( uint64_t )( uint32_t )a << 40 ) | ( ( uint64_t )( uint32_t )b << 20 ) | ( uint64_t )( uint32_t )c; };
-		for( size_t i = 0; i < up_coords.size(); i += 3 ) {
-			int32_t qx = ( int32_t )( ( up_coords[i] + 0.5f ) / lr_res * hr_grid );
-			int32_t qy = ( int32_t )( ( up_coords[i + 1] + 0.5f ) / lr_res * hr_grid );
-			int32_t qz = ( int32_t )( ( up_coords[i + 2] + 0.5f ) / lr_res * hr_grid );
-			if( seen.insert( key( qx, qy, qz ) ).second ) {
-				hr_coords.push_back( qx );
-				hr_coords.push_back( qy );
-				hr_coords.push_back( qz );
-			}
-		}
-		const int Lhr = ( int )( hr_coords.size() / 3 );
+		const t2cascade::selection	 sel	 = t2cascade::select_scaffold( up_coords, lr_res, req_res, cascade_max_tokens(), hr_coords );
+		const int					 hr_grid = sel.grid; // 64 at 1024, 96 at 1536
+		const int					 Lhr	 = sel.tokens;
 		if( Lhr == 0 ) {
 			copy_err( err, err_len, "empty HR scaffold" );
 			delete r;
 			return nullptr;
 		}
+		// Make the budget's decision visible instead of quietly returning a
+		// coarser mesh than asked for — upstream prints a notice here.
+		if( progress )
+			progress( user, T2_STAGE_UPSAMPLE, sel.resolution, req_res );
 
-		// Sharper 64^3 HR-scaffold checkpoint (the cascade's refined structure).
+		// Sharper HR-scaffold checkpoint (the cascade's refined structure).
 		emit_voxels( preview, preview_user, T2_STAGE_UPSAMPLE, 0, 0, hr_grid, hr_coords );
 
 		// 1024-res conditioning (separate preprocess + encode at 1024)
@@ -1045,6 +1092,11 @@ t2_mesh_result* t2_generate( t2_pipeline* p,
 			kf_hr.coords	= hr_coords;
 			while( ( hr_grid << ( kf_hr.levels + 1 ) ) <= 128 )
 				kf_hr.levels++; // -> 128^3
+			// One level is the minimum that produces a usable preview surface.
+			// At hr_grid 64 that lands on 128^3; at 96 the first shift already
+			// overshoots, so the keyframe grid is 192^3 (~28 MB of scratch per
+			// frame). Opt-in (T2_KEYFRAMES) and off the generation path, so the
+			// larger grid is a cost, not a correctness problem.
 			if( kf_hr.levels < 1 )
 				kf_hr.levels = 1;
 			kf_hr.stride	 = std::max( 1, slp.steps / keyframes );
@@ -1060,16 +1112,20 @@ t2_mesh_result* t2_generate( t2_pipeline* p,
 
 		if( progress )
 			progress( user, T2_STAGE_SHAPE_DEC_HR, 0, 0 );
-		ensure_decode_vram( p, T2_PIPE_1024 ); // free the flow DiTs (all done) for the 1024³ decode
+		// Free the flow DiTs (all done) for the HR decode. Budget against what
+		// the loop actually settled on, not what was requested: a 1536 request
+		// that fell back to 1024 needs the 1024 threshold.
+		ensure_decode_vram( p, sel.resolution > 1024 ? T2_PIPE_1536 : T2_PIPE_1024 );
 		if( !trellis2_shape_dec_decode( p->shapedec, hr_slat.data(), Lhr, hr_coords.data(), dec_feats, dec_coords, nullptr, &e ) ) {
 			copy_err( err, err_len, "HR shape decode: " + e );
 			delete r;
 			return nullptr;
 		}
-		grid = hr_grid * dhp2.upscale(); // 64 * 16 = 1024
+		grid = hr_grid * dhp2.upscale(); // 64 * 16 = 1024, 96 * 16 = 1536
 	}
 
 	// ── mesh extraction (shared) ─────────────────────────────────────────────
+	r->grid_res = grid; // 512, or what the cascade token budget settled on
 	if( progress )
 		progress( user, T2_STAGE_MESH, 0, 0 );
 	const int nvox = ( int )( dec_coords.size() / 3 );
@@ -1118,7 +1174,7 @@ t2_mesh_result* t2_generate( t2_pipeline* p,
 				p->slat_hr = nullptr;
 			}
 		}
-		const trellis2_dino_cond& texcond = ( pt == T2_PIPE_1024 ) ? cond1024 : cond;
+		const trellis2_dino_cond& texcond = is_cascade_pipeline( pt ) ? cond1024 : cond;
 		std::vector<float>		  pbr;
 		std::string				  te;
 		if( !run_texture_stage( p, dec_feats, dec_coords, r->verts, grid, pt, texcond, seed ^ 0x7ec0ULL, texture_steps, progress, user, pbr, te ) ) {
@@ -1158,6 +1214,10 @@ int t2_mesh_has_pbr( const t2_mesh_result* r )
 const float* t2_mesh_pbr( const t2_mesh_result* r )
 {
 	return ( r && !r->pbr.empty() ) ? r->pbr.data() : nullptr;
+}
+int t2_mesh_grid_resolution( const t2_mesh_result* r )
+{
+	return r ? r->grid_res : 0;
 }
 void t2_mesh_free( t2_mesh_result* r )
 {

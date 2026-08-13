@@ -10,6 +10,8 @@ be validated stage by stage:
   lr_slat    [L,32]          512-model sampler output, denormalized
   up_coords  [Nup,4]         decoder.upsample(lr_slat, upsample_times=4) → 512^3
   hr_coords  [Lhr,4]         quantized+unique → 64^3 (the HR flow scaffold)
+  hr_coords_1536 [L',4]      the same candidates through the 1536 token budget
+  hr_resolution_1536 [1]     the resolution that budget settled on (1024..1536)
   hr_noise   [Lhr,32]        HR sampling noise (seed 5678)
   hr_flow_t500_out [Lhr,32]  1024-model flow forward at t=500 on hr_coords
   hr_slat    [Lhr,32]        1024-model sampler output, denormalized
@@ -85,6 +87,10 @@ def main():
     ap.add_argument("--hr-seed", type=int, default=5678)
     ap.add_argument("--lr-resolution", type=int, default=512)
     ap.add_argument("--resolution", type=int, default=1024)
+    ap.add_argument("--resolution-1536", type=int, default=1536,
+                    help="second tier captured for the token-budget reference")
+    ap.add_argument("--max-num-tokens", type=int, default=49152,
+                    help="HR token budget the reduction loop is run against")
     ap.add_argument("--out", default=os.path.join(ref_common.DUMPS, "reference_cascade.gguf"))
     args = ap.parse_args()
 
@@ -172,6 +178,27 @@ def main():
     Lhr = hr_coords.shape[0]
     caps["hr_coords"] = hr_coords.float()
     print(f"hr scaffold: {Lhr} voxels at {hr_res // 16}^3")
+
+    # ── the same candidates through the 1536 tier's token budget ────────────
+    # Pipeline lines 411-424: start at the requested resolution, quantize,
+    # dedup, and step down by 128 while the scaffold would reach
+    # max_num_tokens, with 1024 as the floor. Pure coordinate work — no extra
+    # model runs — so it costs nothing to capture alongside the 1024 chain and
+    # gives the C++ token loop a real reference instead of a synthetic one.
+    hr_res_1536 = args.resolution_1536
+    while True:
+        q1536 = torch.cat([
+            up_coords[:, :1],
+            ((up_coords[:, 1:] + 0.5) / args.lr_resolution * (hr_res_1536 // 16)).int(),
+        ], dim=1)
+        coords_1536 = q1536.unique(dim=0)
+        if coords_1536.shape[0] < args.max_num_tokens or hr_res_1536 == 1024:
+            break
+        hr_res_1536 -= 128
+    caps["hr_coords_1536"] = coords_1536.float()
+    caps["hr_resolution_1536"] = torch.tensor([float(hr_res_1536)])
+    print(f"1536 budget: {coords_1536.shape[0]} voxels at {hr_res_1536 // 16}^3 "
+          f"(resolution {hr_res_1536}, budget {args.max_num_tokens})")
 
     # ── HR flow: forward @ t=500 + full sampler with 1024 model + cond_1024 ──
     flow_hr, cfg_hr = load_flow(os.path.join(args.models, "slat_flow_img2shape_dit_1_3B_1024_bf16"), dev)

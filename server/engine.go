@@ -17,7 +17,7 @@ import (
 	"github.com/ebitengine/purego"
 )
 
-const abiVersion = 15
+const abiVersion = 16
 
 // Progress stages (enum t2_stage).
 const (
@@ -43,6 +43,9 @@ var stageNames = map[int]string{
 	stageShapeDec:   "decoding shape",
 	stageMesh:       "extracting mesh",
 	stageUpsample:   "upsampling scaffold",
+	// The HR stages keep their "(1024)" label at every cascade tier: it names
+	// the model doing the work, which is the 1024 checkpoint at 1536 too. The
+	// grid the run actually landed on is reported separately, as job.resolution.
 	stageSLATFlowHR: "sampling shape SLAT (1024)",
 	stageShapeDecHR: "decoding shape (1024)",
 	stageTexture:    "sampling material",
@@ -54,11 +57,13 @@ const (
 	pipeCoarse = 1
 	pipe512    = 2
 	pipe1024   = 3
+	pipe1536   = 4
 
 	capCoarse  = 1
 	cap512     = 2
 	cap1024    = 4
 	capTexture = 8
+	cap1536    = 16
 
 	backgroundAuto  = 0
 	backgroundKeep  = 1
@@ -93,6 +98,7 @@ type engine struct {
 	meshTris     func(r uintptr) uintptr
 	meshHasPBR   func(r uintptr) int32
 	meshPBR      func(r uintptr) uintptr
+	meshGridRes  func(r uintptr) int32
 	meshFree     func(r uintptr)
 	prepareMeshC func(verts unsafe.Pointer, nv int32, tris unsafe.Pointer, nt int32, pbr unsafe.Pointer,
 		componentFilter int32, err unsafe.Pointer, errLen int32) uintptr
@@ -171,6 +177,7 @@ func newEngine(libPath, dinoGGUF, flowGGUF, decGGUF, slatGGUF, slatHRGGUF, shape
 	purego.RegisterLibFunc(&e.meshTris, lib, "t2_mesh_tris")
 	purego.RegisterLibFunc(&e.meshHasPBR, lib, "t2_mesh_has_pbr")
 	purego.RegisterLibFunc(&e.meshPBR, lib, "t2_mesh_pbr")
+	purego.RegisterLibFunc(&e.meshGridRes, lib, "t2_mesh_grid_resolution")
 	purego.RegisterLibFunc(&e.meshFree, lib, "t2_mesh_free")
 	purego.RegisterLibFunc(&e.prepareMeshC, lib, "t2_prepare_mesh")
 	purego.RegisterLibFunc(&e.projectionBackendC, lib, "t2_projection_backend")
@@ -236,7 +243,7 @@ func configuredCaps(m engineModels) int {
 	if m.slat != "" && m.shapeDec != "" {
 		caps |= cap512
 		if m.slatHR != "" {
-			caps |= cap1024
+			caps |= cap1024 | cap1536
 		}
 		if m.shapeEnc != "" && m.texDec != "" && m.texFlow != "" {
 			caps |= capTexture
@@ -296,6 +303,10 @@ type meshData struct {
 	Normals []float32 // 3 * NVerts
 	Tris    []int32   // 3 * NTris
 	PBR     []float32 // 6 * NVerts (base_color rgb, metallic, roughness, alpha); nil if untextured
+	// Grid the geometry was extracted at (64/512/1024/1536, or an intermediate
+	// multiple of 128 when the cascade token budget stepped 1536 down). 0 for
+	// meshes produced by the CPU-side transforms rather than by a generation.
+	GridRes int
 }
 
 // Generate runs the full image->mesh pipeline. onProgress and onPreview may be
@@ -352,7 +363,7 @@ func (e *engine) Generate(image []byte, pipelineType, backgroundMode int, seed u
 		return nil, fmt.Errorf("empty mesh")
 	}
 
-	m := &meshData{NVerts: nv, NTris: nt}
+	m := &meshData{NVerts: nv, NTris: nt, GridRes: int(e.meshGridRes(r))}
 	m.Verts = copyFloats(e.meshVerts(r), 3*nv)
 	m.Normals = copyFloats(e.meshNormals(r), 3*nv)
 	m.Tris = copyInts(e.meshTris(r), 3*nt)

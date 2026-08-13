@@ -70,27 +70,43 @@ What is hardcoded to 64:
 
 ## Acceptance criteria
 
-- [ ] `T2_PIPE_1536` produces a 1536³ dual-grid mesh on the 32 GB card
+- [x] `T2_PIPE_1536` produces a 1536³ dual-grid mesh on the 32 GB card
       with no environment variables, and the run is recorded with
       measured decode VRAM, wall clock and voxel count in
-      `docs/progress/`.
-- [ ] The token-reduction loop reproduces upstream exactly, including
+      `docs/progress/`. *(`1536-cascade_phase3-measure.md`. VRAM is
+      recorded as a ceiling — under 16 GB — rather than an instrumented
+      peak; see that entry.)*
+- [~] The token-reduction loop reproduces upstream exactly, including
       the truncating quantization (D2) and the 1024 floor: given the
       same LR SLAT, the selected `hr_resolution` and the resulting
-      coordinate set match the reference.
-- [ ] The reduction is **visible**, not silent: when the loop drops
+      coordinate set match the reference. *(Loop and formula gated by
+      `test_cascade_tokens`; the 1024 coordinate set matches the
+      PyTorch reference. The **1536** coordinate set has no reference
+      dump yet — `scripts/dump_cascade_reference.py` captures it, but
+      the dump needs regenerating in the container.)*
+- [x] The reduction is **visible**, not silent: when the loop drops
       below the requested resolution the achieved resolution reaches the
       caller (progress/stage payload or result field), mirroring
-      upstream's printed notice.
-- [ ] `test_cascade` gains a 1536 case, gated the same way the existing
+      upstream's printed notice. *(Second `T2_STAGE_UPSAMPLE` event plus
+      `t2_mesh_grid_resolution`; surfaced in the server log, the job
+      JSON and the viewer. Not yet exercised by a run that actually
+      reduced — 2 of 2 stayed at 1536.)*
+- [x] `test_cascade` gains a 1536 case, gated the same way the existing
       1024³ decode gate is (`TRELLIS2_CASCADE_DECODE`) if its footprint
-      requires it.
-- [ ] `T2_PIPE_1024` behaviour is bit-identical to today — every
-      existing row in `docs/VERIFICATION.md` unchanged.
-- [ ] `T2_CAPI_ABI_VERSION` bumped and propagated to
+      requires it. *(Coordinate-only, so no gate needed.)*
+- [~] `T2_PIPE_1024` behaviour is bit-identical to today — every
+      existing row in `docs/VERIFICATION.md` unchanged. *(Held by
+      construction — the loop breaks on its first pass at 1024 — and by
+      `test_cascade_tokens`' independent-oracle check. **`test_cascade`
+      itself has not been rerun**: the dev box has no `dumps/` and only
+      f16 weights.)*
+- [x] `T2_CAPI_ABI_VERSION` bumped and propagated to
       `server/engine.go:20`; verified against the built DLL.
-- [ ] `ctest --test-dir build -C Release -LE model` green. A `SKIP`
-      (77) is not a pass.
+      *(`t2_abi_version()` → 16 from the built DLL.)*
+- [~] `ctest --test-dir build -C Release -LE model` green. A `SKIP`
+      (77) is not a pass. *(9/9 green in a scratch CPU build; 3 of those
+      are SKIPs — `quad_remesh`, `large_rows`, `preprocess` — for
+      config/asset reasons predating this change.)*
 
 ## Context / affected files
 
@@ -140,6 +156,16 @@ by a measurement in Phase 3 before `decode_vram_peak` gets its 1536
 entry** — a low estimate there silently pushes the decoder to the CPU
 instead of failing loudly.
 
+*Phase 3 outcome: D4 put the risk in the wrong place.* The 1536³ decode
+measured **20.2 s with the whole run under 16 GB of 32** — barely 1.6×
+the 1024³ decode, not the tier's problem at all. What actually costs is
+the HR flow (122.6 s, and ~4.8× that on a scaffold near the token
+ceiling) and the texture stage (117.7 s). The 15 GB entry stays: the
+reading is a ceiling taken while the flow DiTs were still resident, so
+it rules out the dangerous direction (too low) without pinning the
+transient share. Lowering it would need `trellis2_gpu_free_vram()`
+sampled either side of the decode.
+
 **D5 — Host RAM is the unbudgeted axis.** ~9M voxels means a
 correspondingly large `t2_mesh_result` (positions, normals, triangles,
 six PBR channels) plus whatever the export, hole fill, orientation and
@@ -152,22 +178,41 @@ been measured for this tier.
 
 ## Plan (phases)
 
-- [ ] **Phase 1 — Tier plumbing.** `T2_PIPE_1536`, `T2_CAP_1536`, the
+- [x] **Phase 1 — Tier plumbing.** `T2_PIPE_1536`, `T2_CAP_1536`, the
       texture-flow selection (`src/trellis2_capi.cpp:366`), `hr_grid`
       from the requested resolution instead of `shp.resolution * 2`.
       `T2_PIPE_1024` must remain byte-identical; verify by rerunning
       `test_cascade` before touching anything else.
-- [ ] **Phase 2 — Token-reduction loop.** Implemented per D2/D3, with
+- [x] **Phase 2 — Token-reduction loop.** Implemented per D2/D3, with
       the achieved resolution reported outward. Validated against a
       reference dump of `hr_resolution` and the coordinate set for at
       least one dense and one sparse object.
-- [ ] **Phase 3 — Measure.** One real 1536 generation: decode VRAM peak,
+      *Landed as `src/cascade_tokens.h`. The dump side is prepared
+      (`scripts/dump_cascade_reference.py` now captures `hr_coords_1536`
+      and `hr_resolution_1536`), but the dump itself has not been
+      regenerated — that needs the reference container. Until it is,
+      `test_cascade` gates the 1536 selection on invariants and the
+      1024 tier on the existing reference.*
+- [x] **Phase 3 — Measure.** One real 1536 generation: decode VRAM peak,
       voxel count, host RAM high-water, wall clock, and how often the
       loop actually reduces. This is what fills `decode_vram_peak` (D4)
       and answers whether `max_num_tokens` should move on a 32 GB card.
-- [ ] **Phase 4 — Verification and surfacing.** `test_cascade` 1536
+      *Done on the R9700, 2026-08-13 —
+      `docs/progress/1536-cascade_phase3-measure.md`. Full 1536³ on 2 of
+      2 objects, no reduction; 315 s total; the 1536³ decode is only
+      20.2 s and VRAM stays under 16 GB, so **D4 had the risk in the
+      wrong place** — the HR flow (122.6 s, ~4.8× that on a dense
+      object) and the texture stage (117.7 s) dominate.
+      **`max_num_tokens` should not move:** the ceiling costs time, not
+      memory. `decode_vram_peak` deliberately keeps the conservative
+      extrapolation — the reading bounds the peak but does not pin it.
+      Not measured: host RAM (D5), and the RoPE-quality side-by-side.*
+- [x] **Phase 4 — Verification and surfacing.** `test_cascade` 1536
       case, `docs/VERIFICATION.md` rows, `docs/PLAN.md:178` closed, tier
       selectable in `server/engine.go` and the viewer, ABI bump (D6).
+      *ABI 16 taken per D6; the projection-conditioning plan rebases
+      onto 17. A second unit test, `test_cascade_tokens`, covers the
+      loop without assets in the `-LE model` set.*
 
 ## Tests / verification
 
@@ -188,10 +233,21 @@ been measured for this tier.
   construction rather than failing, so the failure mode is *quality
   loss that looks like a successful run*. The side-by-side in Phase 4 is
   the only thing that will catch it.
+  *Phase 3 outcome: largely retired.* A character subject at 1536
+  reconstructs jacket emblem, shoulder spikes, separate zipper runs,
+  goggle band and boot soles as distinct geometry — precisely the scales
+  that would break up first. Reviewer's verdict versus the lower tiers:
+  noticeably better. Not yet backed by a recorded same-seed
+  1024-vs-1536 pair, so the claim rests on inspection rather than an
+  artefact.
 - **The extrapolated 15 GB** (D4) may be wrong in either direction;
   the surface-scaling assumption ignores that the loop caps the input
   token count but not the decoder's output voxel count.
 - **Host RAM** (D5) is entirely unknown for this tier.
+  *Phase 3: the generation half is now bounded — a 3.32M-vertex /
+  6.66M-triangle result is ~228 MiB in `t2_mesh_result`, ~0.5 GB
+  including the server's copy. The export chain (CGAL alpha wrap over
+  all 6.66M triangles) is the remaining unmeasured consumer.*
 - **The keyframe preview path** (`src/trellis2_capi.cpp:1046`) computes
   its level count against a ≤128³ target; at `hr_grid = 96` the first
   shift already exceeds it. Needs checking, not assuming.

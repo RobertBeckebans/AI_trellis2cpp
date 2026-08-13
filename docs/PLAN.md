@@ -175,7 +175,29 @@ generations exercise the free/reload path with no OOM.
   HR flow forward rel-L2 3.1e-4 (CPU). The 1024³ decode is the same decoder
   validated exactly at the 512 tier; its explicit parity gate is behind
   `TRELLIS2_CASCADE_DECODE` because it transiently needs ~14 GB host RAM.
-- **Still to do:** `1536_cascade` (add the token-reduction loop + res 1536). The
+- **`1536_cascade` — IMPLEMENTED, NOT YET MEASURED.** `T2_PIPE_1536` /
+  `T2_CAP_1536` reuse the 1024 checkpoints on a 96³ HR scaffold, with upstream's
+  token-reduction loop (`src/cascade_tokens.h`): quantize at the requested
+  resolution, and while the deduplicated scaffold would reach `max_num_tokens`,
+  step down by 128 with 1024 as the floor. The achieved resolution reaches the
+  host as a second `T2_STAGE_UPSAMPLE` progress event and as
+  `t2_mesh_grid_resolution`, so a reduced run is never silent. `T2_PIPE_AUTO`
+  deliberately still stops at 1024. Unit-gated by `test_cascade_tokens` and, on
+  the real reference coordinates, by `test_cascade`. **Measured on the R9700
+  (2026-08-13):** runs at full 1536³ with no budget reduction on 2 of 2 objects;
+  315 s total, of which the HR flow is 122.6 s and the texture stage 117.7 s —
+  the 1536³ decode is only 20.2 s, ~1.6× the 1024³ one, and VRAM stays under
+  16 GB of 32. So the cost is time, not memory, and `max_num_tokens` should
+  *not* rise (a near-ceiling scaffold already spends ~10 min in the HR flow).
+  Quality holds up at the scales the RoPE-extrapolation risk threatened (a 96³
+  scaffold feeds the `resolution: 64` HR model coordinates up to 95): a
+  character subject keeps jacket emblem, shoulder spikes, zipper runs and boot
+  soles as distinct geometry — 3.32M vertices / 6.66M triangles, judged
+  noticeably better than the lower tiers. Numbers in
+  `docs/progress/1536-cascade_phase3-measure.md`. **Still open:** a *recorded*
+  same-seed 1024-vs-1536 pair (the quality claim currently rests on inspection),
+  and the export path's host-RAM high-water (plan D5).
+- **Still to do (low VRAM):** the
   `<8 GB` case is now partly covered: the shape decoder auto-frees the flow DiTs
   around a GPU decode (see below), so the pieces of the `T2_LOAD_LOW_VRAM`
   lifecycle exist; a full per-stage load/free mode would extend that to the flow

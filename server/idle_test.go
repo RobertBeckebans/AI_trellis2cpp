@@ -61,10 +61,11 @@ func TestConfiguredCapsForLazyStartup(t *testing.T) {
 	}{
 		{"coarse", engineModels{}, capCoarse},
 		{"512", engineModels{slat: "slat", shapeDec: "shape"}, capCoarse | cap512},
-		{"1024 textured", engineModels{
+		// The HR model unlocks both cascade tiers: 1536 reuses it unchanged.
+		{"cascade textured", engineModels{
 			slat: "slat", slatHR: "hr", shapeDec: "shape", shapeEnc: "shapeenc",
 			texDec: "texdec", texFlow: "texflow",
-		}, capCoarse | cap512 | cap1024 | capTexture},
+		}, capCoarse | cap512 | cap1024 | cap1536 | capTexture},
 		{"texture missing encoder", engineModels{
 			slat: "slat", shapeDec: "shape", texDec: "texdec", texFlow: "texflow",
 		}, capCoarse | cap512},

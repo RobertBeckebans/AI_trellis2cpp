@@ -26,8 +26,8 @@
 extern "C" {
 #endif
 
-/* 15: t2_bake_projected_glb gained normal_map; t2_last_normal_map_stats added. */
-#define T2_CAPI_ABI_VERSION 15
+/* 16: T2_PIPE_1536 / T2_CAP_1536; t2_mesh_grid_resolution added. */
+#define T2_CAPI_ABI_VERSION 16
 
 TRELLIS2_CAPI int t2_abi_version();
 
@@ -41,8 +41,8 @@ enum t2_stage {
 	T2_STAGE_SHAPE_DEC	  = 5, /* shape decoder -> dual-grid fields      */
 	T2_STAGE_MESH		  = 6, /* mesh extraction                        */
 	T2_STAGE_UPSAMPLE	  = 7, /* cascade: LR slat -> HR voxel scaffold  */
-	T2_STAGE_SLAT_FLOW_HR = 8, /* cascade: 1024 shape-SLAT flow (steps)  */
-	T2_STAGE_SHAPE_DEC_HR = 9, /* cascade: 1024^3 shape decoder          */
+	T2_STAGE_SLAT_FLOW_HR = 8, /* cascade: 1024-model shape-SLAT flow     */
+	T2_STAGE_SHAPE_DEC_HR = 9, /* cascade: HR shape decoder (1024/1536^3) */
 	T2_STAGE_TEXTURE	  = 10 /* PBR texture: flow + guided decode      */
 };
 
@@ -51,7 +51,13 @@ enum t2_pipeline_type {
 	T2_PIPE_AUTO   = 0, /* cascade if available, else 512 fine, else coarse */
 	T2_PIPE_COARSE = 1, /* 64^3 occupancy -> marching cubes preview        */
 	T2_PIPE_512	   = 2, /* 512 fine dual-grid                              */
-	T2_PIPE_1024   = 3	/* 1024 cascade                                    */
+	T2_PIPE_1024   = 3, /* 1024 cascade                                    */
+	/* 1536 cascade: same checkpoints as T2_PIPE_1024 on a 96^3 HR scaffold.
+	** The HR token budget can step the achieved resolution back down toward
+	** 1024 in units of 128 (see T2_STAGE_UPSAMPLE below and
+	** t2_mesh_grid_resolution). Needs a card that can hold the larger decode;
+	** T2_PIPE_AUTO deliberately never selects it. */
+	T2_PIPE_1536   = 4
 };
 
 /* Solid-background handling before the alpha-bbox crop. */
@@ -62,8 +68,12 @@ enum t2_background_mode {
 	T2_BACKGROUND_WHITE = 3	 /* force removal of border-connected near-white   */
 };
 
-/* Capability bits reported by t2_pipeline_caps (loaded qualities/features). */
-enum t2_caps { T2_CAP_COARSE = 1, T2_CAP_512 = 2, T2_CAP_1024 = 4, T2_CAP_TEXTURE = 8 };
+/* Capability bits reported by t2_pipeline_caps (loaded qualities/features).
+** T2_CAP_1536 accompanies T2_CAP_1024 — the tier reuses the same checkpoints,
+** so having the models is what makes it available. Whether the card can hold
+** the 1536^3 decode is not part of the capability; that shows up as a decode
+** failure, not as a silently downgraded run. */
+enum t2_caps { T2_CAP_COARSE = 1, T2_CAP_512 = 2, T2_CAP_1024 = 4, T2_CAP_TEXTURE = 8, T2_CAP_1536 = 16 };
 
 /* Load-time flags for t2_pipeline_load. */
 enum t2_load_flags {
@@ -71,7 +81,13 @@ enum t2_load_flags {
 };
 
 /* step/total are meaningful for T2_STAGE_SS_FLOW; other stages send 0/0 at
-** entry. Called from the generating thread. */
+** entry. Called from the generating thread.
+**
+** One exception, so a reduced cascade run is visible rather than silent:
+** T2_STAGE_UPSAMPLE fires a SECOND time once the HR token budget has settled,
+** with step = the achieved resolution and total = the requested one. They are
+** equal whenever nothing was reduced, and both are >= 1024, so a host that
+** only understands step counters still shows a sane "0/0 then 1024/1536". */
 typedef void ( *t2_progress_fn )( void* user, int stage, int step, int total );
 
 /* Optional live intermediate-preview callback. During generation the host
@@ -155,6 +171,12 @@ TRELLIS2_CAPI const int*	  t2_mesh_tris( const t2_mesh_result* r );	  /* 3*n_tri
 ** the mesh is untextured. t2_mesh_has_pbr reports availability. */
 TRELLIS2_CAPI int			  t2_mesh_has_pbr( const t2_mesh_result* r );
 TRELLIS2_CAPI const float*	  t2_mesh_pbr( const t2_mesh_result* r ); /* 6*n_verts   */
+/* Grid resolution this mesh was actually extracted at: 64 (coarse), 512, 1024,
+** 1536, or an intermediate multiple of 128 when the cascade token budget
+** stepped a 1536 request down. 0 for meshes that did not come from t2_generate
+** (t2_prepare_mesh and the remesh entry points), which only transform geometry
+** and have no tier of their own. */
+TRELLIS2_CAPI int			  t2_mesh_grid_resolution( const t2_mesh_result* r );
 TRELLIS2_CAPI void			  t2_mesh_free( t2_mesh_result* r );
 
 /* Prepare the exact component-cleaned geometry used for export so hosts can preview it.

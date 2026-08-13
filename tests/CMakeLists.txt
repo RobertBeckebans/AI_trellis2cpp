@@ -37,11 +37,18 @@ add_executable(test_slat test_slat.cpp)
 target_link_libraries(test_slat PRIVATE trellis2)
 target_compile_features(test_slat PRIVATE cxx_std_14)
 
-# 1024_cascade HR-stage parity vs the PyTorch reference
+# Cascade HR-stage parity vs the PyTorch reference
 # (scripts/dump_cascade_reference.py -> dumps/reference_cascade.gguf).
 add_executable(test_cascade test_cascade.cpp)
 target_link_libraries(test_cascade PRIVATE trellis2)
 target_compile_features(test_cascade PRIVATE cxx_std_14)
+
+# The cascade HR token budget (src/cascade_tokens.h) on synthetic coordinate
+# sets: the quantization formula, the step-down loop, and the 1024 floor.
+# Header-only, so it needs no library and no model assets.
+add_executable(test_cascade_tokens test_cascade_tokens.cpp)
+target_include_directories(test_cascade_tokens PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_features(test_cascade_tokens PRIVATE cxx_std_14)
 
 # PBR-texture stage parity vs the PyTorch reference
 # (scripts/dump_texture_reference.py -> dumps/reference_texture.gguf).
@@ -111,6 +118,7 @@ add_test(NAME pbr_sampling COMMAND test_pbr_sampling)
 add_test(NAME mesh_export COMMAND test_mesh_export)
 add_test(NAME print_remesh COMMAND test_print_remesh)
 add_test(NAME background_removal COMMAND test_background_removal)
+add_test(NAME cascade_tokens COMMAND test_cascade_tokens)
 
 # Skips (77) in a build without the AutoRemesher backend. No model assets.
 add_test(NAME quad_remesh COMMAND test_quad_remesh)
