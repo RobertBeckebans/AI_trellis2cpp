@@ -235,6 +235,16 @@ mean something rather than being permanently zero.
   whether V runs up or down the image. This must not be "fixed" by
   flipping the green channel on a hunch — the round-trip test in the
   acceptance criteria is what settles it.
+- **The frame is the glTF frame, unmodified.** `N`, the interpolated
+  `TANGENT` straight out of meshoptimizer, and `B = cross(N, T) * w`.
+  No Gram-Schmidt re-orthogonalization on either side. It is tempting,
+  since interpolation across a triangle bends `T` slightly off `N`, and
+  an earlier revision did it in both the bake and the viewer — which
+  made the two agree with each other while both drifted away from
+  Blender and three.js. That is the wrong pair to be consistent with,
+  and it quietly undoes the whole reason for D2. Anything that reads
+  this file reconstructs the frame per the spec, so the bake must
+  encode against exactly that frame.
 - **Gutter:** the dilation pass currently averages 6 channels; it
   extends to 9, with the normal renormalized after averaging (an
   average of unit vectors is not one).
@@ -312,9 +322,10 @@ Results: `docs/progress/tangent-space-normal-bake_phase2-tangents.md`.
 - [x] `write_glb` emits `TANGENT`. The hardcoded accessor/bufferView
       literals were replaced by counters handed out as streams are
       appended, so a conditional attribute cannot shift an index.
-- [ ] Check how many vertices the split adds on a real atlas. If it is
-      large, that is a finding about UV distortion, not a reason to
-      skip the split.
+- [x] Vertex cost of the split, measured on a real 2.1 M-triangle
+      textured mesh: **25959 atlas verts → 26303** over 121206 corners,
+      **+1.3 %**. xatlas' chart splitting really does absorb almost all
+      of it.
 
 ### Phase 3 — The bake
 
@@ -357,13 +368,16 @@ Results: `docs/progress/tangent-space-normal-bake_phase4-capi-server.md`.
 Results: `docs/progress/tangent-space-normal-bake_phase5-validation-docs.md`.
 
 - [x] Analytic round-trip test (in `tests/test_mesh_export.cpp`).
-- [ ] Thin-wall rejection test — the guard is exercised only in its
-      *inactive* direction so far (0 rejected on a source that faces
-      the target everywhere). A fixture that actually trips it is still
-      missing, so the counter is proven to be reachable but not proven
-      to fire.
+- [ ] Thin-wall rejection *test*. The guard demonstrably fires on real
+      geometry — **47906 of 802165 covered texels, 5.97 %**, on the
+      2.1 M-triangle mesh above — so it is no longer merely reachable in
+      principle. What is still missing is a deterministic fixture that
+      trips it, so the behaviour is observed but not regression-guarded.
 - [ ] Bake-cost and GLB-size table beside the quad-remesh benchmarks in
-      `docs/architecture/`.
+      `docs/architecture/`. First real data point: 1024 px atlas over
+      2.1 M source triangles → unwrap 8.75 s, projection **0.25 s**
+      *including* the shading normals, texel fill 0.20 s, encode 0.55 s,
+      6.36 MB GLB. The bake is not the cost; the unwrap is.
 - [ ] `AGENTS.md` third-party list and options table.
 - [x] `THIRD_PARTY.md` extended with `tangentspace.cpp`.
 - [x] Blender check: an exported asset imports and shades correctly
@@ -403,14 +417,13 @@ Results: `docs/progress/tangent-space-normal-bake_phase5-validation-docs.md`.
    `meshopt_TangentCompatible` was chosen for — had the basis differed,
    this is where it would have shown.
 
-2b. **The built-in viewer cannot show the map.** It is a hand-written
-   WebGL2 renderer, not three.js `GLTFLoader`: no `TANGENT` attribute
-   and no normal sampler. The UI checkbox is therefore labelled
-   "download only", and the rejected-texel readout is the only feedback
-   the viewer can give about the bake. Teaching the preview to render it
-   is a contained change (one attribute, one sampler, perturb N in the
-   fragment shader) but needs the preview transport to carry the tangent
-   stream and the texture, so it is its own piece of work.
+2b. ~~**The built-in viewer cannot show the map.**~~ **Resolved, and the
+   original assessment was wrong.** The viewer is a hand-written WebGL2
+   renderer, but it already parses the baked GLB (`parseGLB` /
+   `setTexturedGLB`) and renders that exact file for the export preview —
+   there was never a preview-transport problem. It needed only a `TANGENT`
+   attribute at location 5, a third sampler, and the inverse of the bake in
+   the fragment shader. Done; the checkbox no longer says "download only".
 3. **Low-poly / high-poly divergence.** Where the quad remesh strays
    far from the source (the quad stage already measures 87 % retained
    area on real geometry), the closest point is far away and the baked

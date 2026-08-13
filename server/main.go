@@ -1151,11 +1151,23 @@ func (s *server) handleGLB(w http.ResponseWriter, r *http.Request) {
 	// numbers are the only feedback on how much detail actually transferred.
 	j.mu.Lock()
 	nms := j.normalMapStats
+	qs := j.quadStats
 	j.mu.Unlock()
 	if nms != nil {
 		w.Header().Set("X-Normal-Map", "1")
 		w.Header().Set("X-Normal-Map-Texels", strconv.Itoa(int(nms.CoveredTexels)))
 		w.Header().Set("X-Normal-Map-Rejected", strconv.Itoa(int(nms.RejectedTexels)))
+	}
+	// The viewer previews this exact GLB for either replacement path, so the
+	// quad quality figures have to be reachable here too and not only from
+	// /api/export-preview - otherwise previewing a quad remesh through the baked
+	// GLB would silently drop the boundary-edge and retained-area readout.
+	if o.quadRemesh && qs != nil {
+		w.Header().Set("X-Quad-Quads", strconv.Itoa(qs.Quads))
+		w.Header().Set("X-Quad-Triangles", strconv.Itoa(qs.Triangles))
+		w.Header().Set("X-Quad-Ngons", strconv.Itoa(qs.NGons))
+		w.Header().Set("X-Quad-Boundary-Edges", strconv.Itoa(qs.BoundaryEdges))
+		w.Header().Set("X-Quad-Area-Retained", strconv.FormatFloat(float64(qs.AreaRetained), 'f', 4, 32))
 	}
 	// ServeContent supplies Content-Length plus byte-range support. Browsers can
 	// stream these 100+ MiB assets directly to disk and resume an interrupted

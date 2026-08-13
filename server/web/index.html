@@ -60,7 +60,10 @@
     padding: 10px; font-weight: 700; font-size: 14px; cursor: pointer;
   }
   button:disabled { opacity: .45; cursor: default; }
-  #status { font-size: 13px; color: var(--dim); min-height: 34px; }
+  /* Same trap as #exportinfo below: an explicit min-height on a flex child of
+     #side replaces the automatic content minimum, so a long status line can be
+     squeezed and painted over its neighbours. */
+  #status { font-size: 13px; color: var(--dim); min-height: 34px; flex-shrink: 0; }
   #status.error { color: var(--err); }
   .idle-option {
     display: flex; align-items: center; gap: 7px; margin: -2px 0 0;
@@ -73,6 +76,10 @@
   #exportpanel {
     border-top: 1px solid var(--edge); padding-top: 10px;
     display: flex; flex-direction: column; gap: 8px;
+    /* #side is a column flex container that scrolls. Without this the panel is
+       compressed to make room for its siblings instead of scrolling, and the
+       compression lands on whichever child is allowed to shrink. */
+    flex-shrink: 0;
   }
   #exportpanel select {
     width: 100%; background: var(--bg); color: var(--text);
@@ -80,7 +87,14 @@
   }
   .export-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .export-actions button { padding: 8px 6px; font-size: 12px; }
-  #exportinfo { min-height: 17px; font-size: 11px; color: var(--dim); }
+  /* min-height reserves one line so the panel does not jump as the message
+     changes, but on a flex item it also *overrides* the automatic content
+     minimum - which let a wrapped multi-line message be squeezed to 17px and
+     render underneath the toggles below. flex-shrink: 0 keeps it at its
+     content height; the sidebar scrolls instead. */
+  #exportinfo { min-height: 17px; flex-shrink: 0; font-size: 11px; color: var(--dim); }
+  #normalmapstats { font-size: .85em; opacity: .65; }
+  #normalmapstats:empty { display: none; }   /* no stray gap before a bake */
   #view { flex: 1; position: relative; min-width: 0; }
   canvas#gl { width: 100%; height: 100%; display: block; }
   #hint {
@@ -258,11 +272,11 @@
         <span>quad retopology (mid-poly)</span>
       </label>
       <label class="idle-option" for="normalmap" id="normalmaplabel"
-             title="bake the dense mesh's surface detail into a tangent-space normal map, with the MikkTSpace-compatible TANGENT attribute it was baked against. Applies to the downloaded GLB only - this viewer does not render normal maps. Costs a third texture in the file.">
+             title="bake the dense mesh's surface detail into a tangent-space normal map, with the MikkTSpace-compatible TANGENT attribute it was baked against. The export preview renders it, so it can be judged here before downloading. Costs a third texture in the file.">
         <input id="normalmap" type="checkbox" checked>
-        <span>bake normal map (download only)</span>
+        <span>bake normal map (surface detail)</span>
       </label>
-      <div id="normalmapstats" style="flex:1 1 100%;opacity:.65;font-size:.85em"></div>
+      <div id="normalmapstats"></div>
       <div class="row" id="quadremeshsettings" hidden>
         <div style="flex:1 1 100%">
           <label for="quaddensity" title="density hint, not an exact face count: it feeds a voxel size and the adaptivity setting moves the result away from it">target quads <output id="quaddensityval" style="opacity:.7"></output></label>
@@ -919,7 +933,7 @@ function updateNormalMapAvailability() {
   $("normalmap").disabled = !usable;
   $("normalmaplabel").style.opacity = usable ? "" : ".45";
   $("normalmaplabel").title = usable
-    ? "bake the dense mesh's surface detail into a tangent-space normal map, with the MikkTSpace-compatible TANGENT attribute it was baked against. Applies to the downloaded GLB only - this viewer does not render normal maps. Costs a third texture in the file."
+    ? "bake the dense mesh's surface detail into a tangent-space normal map, with the MikkTSpace-compatible TANGENT attribute it was baked against. The export preview renders it, so it can be judged here before downloading. Costs a third texture in the file."
     : "needs the print wrap or quad retopology: without replacement geometry there is nothing to transfer detail onto";
   if (!usable) $("normalmapstats").textContent = "";
 }
@@ -1075,23 +1089,37 @@ $("pexport").addEventListener("click", async () => {
   const btn = $("pexport");
   btn.disabled = true;
   const wrapping = $("printwrap").checked;
-  // A textured wrap previews the exact baked GLB (per-texel atlas), so the
-  // preview material is identical to the download instead of a per-vertex
-  // approximation. Untextured wraps and plain cleanup keep the light mesh path.
-  const texturedWrap = wrapping && !!originalExportMesh?.textured;
-  btn.textContent = texturedWrap ? "wrapping + baking…" : wrapping ? "wrapping…" : "preparing…";
-  setStatus(texturedWrap ? "baking watertight mesh + per-texel PBR (same as the download)…"
+  const quadding = $("quadremesh").checked;
+  // Either replacement path previews the exact baked GLB (per-texel atlas), so
+  // the preview material is identical to the download instead of a per-vertex
+  // approximation - and it is the only path that can show the baked normal map,
+  // since the per-vertex preview has no atlas at all. Untextured sources and
+  // plain component cleanup keep the light mesh path.
+  const texturedBake = (wrapping || quadding) && !!originalExportMesh?.textured;
+  // The two stages chain rather than compete: the wrap runs first and hands the
+  // quad remesher the clean 2-manifold it wants, so the combination has to read
+  // as one sequence and not as an either/or.
+  const replacing = wrapping && quadding ? "wrapping + remeshing" : wrapping ? "wrapping" : "remeshing";
+  btn.textContent = texturedBake ? replacing + " + baking…" : wrapping || quadding ? replacing + "…" : "preparing…";
+  setStatus(texturedBake ? `${replacing} + per-texel PBR bake (same as the download)…`
           : wrapping ? "constructing watertight CGAL Alpha Wrap…"
+          : quadding ? "rebuilding quad topology…"
                      : "preparing component-cleanup preview…");
   try {
-    if (texturedWrap) {
+    if (texturedBake) {
       const r = await fetch(`/api/glb/${glbJobId}?${exportQuery()}`);
       if (!r.ok) throw new Error(r.headers.get("x-trellis-error") || await r.text());
+      showQuadStats(r.headers);
+      showNormalMapStats(r.headers);
       const nt = await viewer.setTexturedGLB(await r.arrayBuffer());
+      // Only claim watertight for the wrap; the quad stage can reopen
+      // boundaries, and its own statistics readout says by how much.
+      const shape = wrapping && !quadding ? " · watertight" : "";
+      const detail = viewer.previewHasNormalMap() ? " + normal map" : "";
       $("meshinfo").textContent = `export preview · ${nt.toLocaleString()} tris`;
       $("exportinfo").textContent =
-        `${nt.toLocaleString()} triangles · watertight · per-texel PBR (identical to the GLB download)`;
-      setStatus("previewing the exact GLB download — watertight, per-texel PBR");
+        `${nt.toLocaleString()} triangles${shape} · per-texel PBR${detail} (identical to the GLB download)`;
+      setStatus(`previewing the exact GLB download — per-texel PBR${detail}`);
     } else {
       const r = await fetch(`/api/export-preview/${glbJobId}?${exportQuery()}`);
       if (!r.ok) throw new Error(await r.text());
@@ -1307,8 +1335,10 @@ const viewer = (() => {
   layout(location=2) in vec3 baseColor;
   layout(location=3) in vec3 metalRoughAlpha;
   layout(location=4) in vec2 uv;
+  layout(location=5) in vec4 tangent;   // glTF TANGENT: xyz + handedness in w
   uniform mat4 mvp, viewModel;
   out vec3 vN; out vec3 vV; out vec3 vNw; out vec3 vCol; out vec2 vMR; out float vA; out vec2 vUV;
+  out vec3 vT; out float vTw;
   void main() {
     gl_Position = mvp * vec4(pos, 1.0);
     vec4 vp = viewModel * vec4(pos, 1.0);
@@ -1319,6 +1349,10 @@ const viewer = (() => {
     vMR = metalRoughAlpha.xy;
     vA = metalRoughAlpha.z;
     vUV = uv;
+    // The tangent is a direction and takes the same transform as the normal;
+    // the handedness is a sign and must not be transformed at all.
+    vT  = mat3(viewModel) * tangent.xyz;
+    vTw = tangent.w;
   }`;
   // Lightweight metallic-roughness PBR in view space. The dual-grid mesh has
   // unoriented winding (faithful to TRELLIS.2), so a normal is a direction line,
@@ -1334,11 +1368,15 @@ const viewer = (() => {
   const FS = `#version 300 es
   precision highp float;
   in vec3 vN; in vec3 vV; in vec3 vNw; in vec3 vCol; in vec2 vMR; in float vA; in vec2 vUV;
+  in vec3 vT; in float vTw;
   uniform int wire;
   uniform int textured;   // 1 = per-vertex PBR (base_color/metallic/roughness)
   uniform int useTex;     // 1 = sample base/metal/rough from the baked UV atlas (glTF)
+  uniform int useNormalMap;     // 1 = perturb the normal from the baked map
+  uniform float normalScale;    // glTF normalTexture.scale
   uniform sampler2D uBaseTex;   // baseColor (sRGB-encoded rgb + alpha)
   uniform sampler2D uMRTex;     // glTF packing: G = roughness, B = metallic
+  uniform sampler2D uNormTex;   // tangent-space normal map (linear, never sRGB)
   out vec4 frag;
   // procedural environment radiance in a direction (view space; +y = up)
   vec3 envColor(vec3 d) {
@@ -1350,6 +1388,25 @@ const viewer = (() => {
     if (wire == 1) { frag = vec4(0.30, 0.64, 1.00, 1.0); return; }
     vec3 N = normalize(vN), V = normalize(vV);
     if (dot(N, V) < 0.0) N = -N;   // face the camera (mesh is unoriented)
+    // Undo exactly what the bake did: it stored (dot(n,T), dot(n,B), dot(n,N))
+    // with B = cross(N,T)*w, so reading it back is T*x + B*y + N*z.
+    //
+    // T is the GLB's own TANGENT (meshoptimizer, MikkTSpace-compatible), used
+    // as glTF defines it - no re-orthogonalization against N. Gram-Schmidt here
+    // would agree with a bake that did the same and disagree with Blender and
+    // three.js, which is the wrong pair to be consistent with.
+    if (useNormalMap == 1) {
+      vec3 T = vT;
+      if (dot(T, T) > 1e-12) {
+        T = normalize(T);
+        // cross with the *possibly camera-flipped* N above, so a back-facing
+        // triangle keeps a consistent basis instead of mirroring its detail.
+        vec3 B = cross(N, T) * vTw;
+        vec3 n = texture(uNormTex, vUV).xyz * 2.0 - 1.0;
+        n.xy *= normalScale;
+        if (dot(n, n) > 1e-12) N = normalize(T * n.x + B * n.y + N * n.z);
+      }
+    }
     // The network/baseColorTexture convention stores gamma-encoded base color.
     // PBR math must operate on linear reflectance, as in upstream (** 2.2).
     vec3 base; float metal, rough, opacity;
@@ -1415,9 +1472,14 @@ const viewer = (() => {
   const uWire = gl.getUniformLocation(prog, "wire");
   const uTextured = gl.getUniformLocation(prog, "textured");
   const uUseTex = gl.getUniformLocation(prog, "useTex");
+  const uUseNormalMap = gl.getUniformLocation(prog, "useNormalMap");
+  const uNormalScale = gl.getUniformLocation(prog, "normalScale");
   gl.useProgram(prog);
   gl.uniform1i(gl.getUniformLocation(prog, "uBaseTex"), 0);   // texture unit 0
   gl.uniform1i(gl.getUniformLocation(prog, "uMRTex"), 1);     // texture unit 1
+  gl.uniform1i(gl.getUniformLocation(prog, "uNormTex"), 2);   // texture unit 2
+  gl.uniform1i(uUseNormalMap, 0);
+  gl.uniform1f(uNormalScale, 1);
 
   const vao = gl.createVertexArray();
   const vbo = gl.createBuffer(), nbo = gl.createBuffer(), cbo = gl.createBuffer(), ibo = gl.createBuffer();
@@ -1427,12 +1489,16 @@ const viewer = (() => {
   // The wrap preview renders the exact baked GLB the download produces, so the
   // preview material matches the file byte-for-byte instead of the per-vertex
   // approximation. Only positions/normals/uv + two PNG maps are needed.
-  let texVao = null, texVbo, texNbo, texUbo, texIbo, texWireIbo, texNIndices = 0, texNWire = 0;
-  let texBaseTex = null, texMRTex = null;
+  let texVao = null, texVbo, texNbo, texUbo, texIbo, texWireIbo, texTbo, texNIndices = 0, texNWire = 0;
+  let texBaseTex = null, texMRTex = null, texNormalTex = null;
+  let texHasNormalMap = false, texNormalScale = 1;
 
   // Parse the fixed-shape glTF 2.0 binary we emit (write_glb): one mesh, one
   // primitive with POSITION/NORMAL/TEXCOORD_0/indices and a metallic-roughness
-  // material with baseColor + metallicRoughness PNG textures.
+  // material with baseColor + metallicRoughness PNG textures. TANGENT and the
+  // normalTexture are optional - the bake omits both when the normal map is
+  // switched off, and older cached GLBs predate them - so both are read
+  // defensively and the renderer falls back to plain geometric normals.
   function parseGLB(buf) {
     const dv = new DataView(buf);
     if (dv.getUint32(0, true) !== 0x46546C67) throw new Error("not a GLB");
@@ -1456,9 +1522,13 @@ const viewer = (() => {
       return new Uint8Array(bin.buffer, bin.byteOffset + (bv.byteOffset || 0), bv.byteLength);
     };
     const prim = json.meshes[0].primitives[0];
-    const mat = json.materials[prim.material].pbrMetallicRoughness;
+    const material = json.materials[prim.material];
+    const mat = material.pbrMetallicRoughness;
     const srcOf = ti => json.textures[ti].source;
     const pngOf = imgIdx => bvBytes(json.images[imgIdx].bufferView);
+    // A normal map is only usable with the basis it was baked against, so both
+    // have to be present or neither is used.
+    const hasNormalMap = material.normalTexture !== undefined && prim.attributes.TANGENT !== undefined;
     return {
       positions: accessor(prim.attributes.POSITION),
       normals:   accessor(prim.attributes.NORMAL),
@@ -1466,8 +1536,15 @@ const viewer = (() => {
       indices:   accessor(prim.indices),
       basePng:   pngOf(srcOf(mat.baseColorTexture.index)),
       mrPng:     pngOf(srcOf(mat.metallicRoughnessTexture.index)),
+      tangents:  hasNormalMap ? accessor(prim.attributes.TANGENT) : null,
+      normalPng: hasNormalMap ? pngOf(srcOf(material.normalTexture.index)) : null,
+      normalScale: hasNormalMap ? (material.normalTexture.scale ?? 1) : 1,
     };
   }
+
+  // Tangent-space identity, for GLBs that carry no normal map. texImage2D takes
+  // ImageData through the same overload as ImageBitmap.
+  const FLAT_NORMAL_PIXEL = new ImageData(new Uint8ClampedArray([128, 128, 255, 255]), 1, 1);
 
   function uploadAtlasTex(unit, bmp, old) {
     if (old) gl.deleteTexture(old);
@@ -1489,15 +1566,19 @@ const viewer = (() => {
   async function setTexturedGLB(buf) {
     disposeShowcaseMeshes();
     const g = parseGLB(buf);
+    // colorSpaceConversion "none" matters twice as much for the normal map: its
+    // bytes are a direction, not a colour, and any sRGB decode would bend it.
     const bmpOpts = { imageOrientation: "none", premultiplyAlpha: "none", colorSpaceConversion: "none" };
-    const [baseBmp, mrBmp] = await Promise.all([
+    const [baseBmp, mrBmp, nrmBmp] = await Promise.all([
       createImageBitmap(new Blob([g.basePng], { type: "image/png" }), bmpOpts),
       createImageBitmap(new Blob([g.mrPng], { type: "image/png" }), bmpOpts),
+      g.normalPng ? createImageBitmap(new Blob([g.normalPng], { type: "image/png" }), bmpOpts) : null,
     ]);
     if (!texVao) {
       texVao = gl.createVertexArray();
       texVbo = gl.createBuffer(); texNbo = gl.createBuffer();
       texUbo = gl.createBuffer(); texIbo = gl.createBuffer(); texWireIbo = gl.createBuffer();
+      texTbo = gl.createBuffer();
     }
     gl.bindVertexArray(texVao);
     gl.bindBuffer(gl.ARRAY_BUFFER, texVbo);
@@ -1510,6 +1591,15 @@ const viewer = (() => {
     gl.bufferData(gl.ARRAY_BUFFER, g.uvs, gl.STATIC_DRAW);
     gl.enableVertexAttribArray(4); gl.vertexAttribPointer(4, 2, gl.FLOAT, false, 0, 0);
     gl.disableVertexAttribArray(2); gl.disableVertexAttribArray(3);
+    if (g.tangents) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, texTbo);
+      gl.bufferData(gl.ARRAY_BUFFER, g.tangents, gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(5); gl.vertexAttribPointer(5, 4, gl.FLOAT, false, 0, 0);
+    } else {
+      // A constant is fine: the shader ignores the basis when the map is off,
+      // but the attribute still has to read something defined.
+      gl.disableVertexAttribArray(5); gl.vertexAttrib4f(5, 1, 0, 0, 1);
+    }
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, texIbo);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, g.indices, gl.STATIC_DRAW);
     // wireframe edges (3 per triangle) so the wire toggle works on the preview too
@@ -1527,6 +1617,12 @@ const viewer = (() => {
     gl.bindVertexArray(null);
     texBaseTex = uploadAtlasTex(0, baseBmp, texBaseTex);
     texMRTex = uploadAtlasTex(1, mrBmp, texMRTex);
+    // Unit 2 always carries a valid texture, even without a map: a sampler that
+    // is declared but unbound is undefined behaviour in WebGL, and a flat 1x1
+    // (128,128,255) is the tangent-space identity anyway.
+    texNormalTex = uploadAtlasTex(2, nrmBmp || FLAT_NORMAL_PIXEL, texNormalTex);
+    texHasNormalMap = !!g.tangents && !!nrmBmp;
+    texNormalScale = g.normalScale;
     texNIndices = g.indices.length;
     renderMode = "textured";
     return g.indices.length / 3;
@@ -2003,10 +2099,14 @@ const viewer = (() => {
           gl.uniform1i(uWire, 0);
           gl.uniform1i(uTextured, 0);
           gl.uniform1i(uUseTex, 1);
+          gl.uniform1i(uUseNormalMap, texHasNormalMap ? 1 : 0);
+          gl.uniform1f(uNormalScale, texNormalScale);
           gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, texBaseTex);
           gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, texMRTex);
+          gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, texNormalTex);
           gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, texIbo);
           gl.drawElements(gl.TRIANGLES, texNIndices, gl.UNSIGNED_INT, 0);
+          gl.uniform1i(uUseNormalMap, 0);
         }
         gl.bindVertexArray(null);
       }
@@ -2018,6 +2118,10 @@ const viewer = (() => {
   return {
     setMesh, setTexturedGLB, setVoxels, clear, setShowcaseAssets, setShowcaseFrame,
     setShowcaseFocus, finishShowcase, clearShowcase,
+    // Whether the GLB currently previewed actually carried a usable normal map
+    // (both the TANGENT attribute and the texture), so the UI states what is on
+    // screen rather than what was requested.
+    previewHasNormalMap: () => texHasNormalMap,
   };
 })();
 

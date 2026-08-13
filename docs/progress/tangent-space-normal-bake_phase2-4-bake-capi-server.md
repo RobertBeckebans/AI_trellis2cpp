@@ -136,18 +136,109 @@ different target topologies — AutoRemesher quads versus an Alpha Wrap
 triangle shell — the tangent basis demonstrably does not depend on the
 replacement stage that produced the geometry.
 
+## Measured on real geometry
+
+`mesh2glb --print` at a 1024 px atlas over a textured 2.1 M-triangle
+generation (1042824 verts after the component filter):
+
+| | |
+|---|---|
+| Tangent split | 25959 atlas verts → **26303** over 121206 corners (**+1.3 %**) |
+| Covered texels | 802165 |
+| Closest-surface projection *including* normals | **0.25 s** |
+| xatlas unwrap | 8.75 s |
+| Texel fill / encode | 0.20 s / 0.55 s |
+| Normal map texels left flat by the guard | **47906 (5.97 %)** |
+| GLB | 6.36 MB, atlas 1091×1124 |
+
+Two things worth keeping. The tangent split costs almost nothing, because
+xatlas' chart boundaries already absorb nearly all of the disagreement.
+And the bake is not the expensive part of the export — the unwrap is,
+by a factor of 35 over the projection that now carries nine channels
+instead of six.
+
+**The back-facing guard fires on real input.** 5.97 % of covered texels
+land on a source surface facing away from the low-poly texel and are left
+flat. That is the D3 case actually occurring, not a theoretical one, and it
+is the number the viewer readout exists to show.
+
+## Viewer: the map is rendered, and an earlier assessment was wrong
+
+The first pass through this recorded that the built-in viewer could not
+display the map and would need the preview transport to carry a tangent
+stream. That was wrong. The viewer already parses the baked GLB
+(`parseGLB` / `setTexturedGLB`) and renders that exact file as the export
+preview, so the only missing pieces were a `TANGENT` attribute at location
+5, a third sampler, and the inverse of the bake in the fragment shader:
+
+```glsl
+vec3 T = normalize(vT);                 // the GLB's own TANGENT
+vec3 B = cross(N, T) * vTw;
+vec3 n = texture(uNormTex, vUV).xyz * 2.0 - 1.0;
+N = normalize(T * n.x + B * n.y + N * n.z);
+```
+
+The cross product uses the *already camera-flipped* `N` the viewer applies
+to its unoriented dual-grid geometry, which keeps the basis consistent on a
+back-facing triangle instead of mirroring the detail there.
+`colorSpaceConversion: "none"` on the `createImageBitmap` matters more for
+this texture than for the other two: its bytes are a direction, and any
+sRGB decode would bend it. Unit 2 always carries a texture — a 1×1
+(128,128,255) when the GLB has no map — because a declared but unbound
+sampler is undefined behaviour.
+
+## Correction: no Gram-Schmidt, on either side
+
+A first revision re-orthogonalized the tangent against the normal —
+`T -= dot(T,N)*N` — in **both** the bake and the viewer shader. Raised in
+review, and right: glTF defines the frame as `N`, the interpolated
+`TANGENT`, and `bitangent = cross(normal, tangent.xyz) * tangent.w`, with
+no such step. Doing it in both places made the bake and our own viewer
+agree with each other while both drifted away from Blender and three.js —
+the wrong pair to be consistent with, and a quiet reversal of the entire
+reason `meshopt_TangentCompatible` was chosen. Removed from
+`mesh_export.cpp` and from the fragment shader; the tangents now go from
+meshoptimizer through the GLB to the shader untouched.
+
+**The round-trip test cannot see this change** and returned an identical
+0.248 deg. Its target is a flat quad, where the tangent is already exactly
+perpendicular to the normal and the Gram-Schmidt was a no-op. So the
+correction rests on the specification, not on that number, and the fixture
+has a blind spot for frame-convention errors of this class. Closing it
+needs a *curved* target, which breaks the test's constant-frame assumption
+and would mean reconstructing the frame per texel — i.e. replicating the
+rasterizer in the test.
+
+**A second correction.** The preview's GLB path was gated on `printwrap`
+alone, and this was first described as leaving quad remeshing without a
+normal map. That overstated it: the two stages *chain* — the wrap runs
+first and hands the quad remesher its clean 2-manifold — so the
+wrap+quad combination always went through the GLB preview. Only quad
+*without* a wrap fell back to the per-vertex path. The condition is now
+`printwrap || quadremesh`, which closes that case too, and `/api/glb`
+gained the `X-Quad-*` headers so previewing a quad remesh through the baked
+GLB keeps its boundary-edge and retained-area readout.
+
+Verified by replaying the viewer's parse against the produced file:
+`TANGENT` as accessor 3, `normalTexture` at material level, 3 images /
+3 textures / 8 bufferViews, 26303 tangents for 26303 vertices, every `w`
+exactly ±1, xyz unit to 1.5e-7, and a 1091×1124 RGB8 PNG with no sRGB
+chunk. The GLSL itself is only verified by review — it compiles in the
+browser, not in CI.
+
 ## Not done
 
-- **No quantitative measurement on real pipeline geometry.** Correctness is
-  confirmed above, but the numbers are not: the rejected-texel share, the
-  GLB size delta against a bake without the map, and the bake cost relative
-  to the rest of the export are all still unmeasured. That also leaves plan
-  risk 3 (a max-distance guard beside the back-facing one) undecided, as
-  agreed — it should be decided from a measured rejection profile, not from
-  a guessed threshold.
-  (An earlier attempt was abandoned for picking a 208 MB full 1024³ dual
-  grid, where the AutoRemesher stage rather than the bake dominates the
-  runtime.)
+- **No GLB size delta** against a bake without the map (the comparison run
+  was not made).
+- Plan risk 3 — a max-distance guard beside the back-facing one — remains
+  open, but now has a measured rejection share (5.97 %) to be decided
+  against rather than a guess.
+- A deterministic thin-wall fixture. The guard is observed firing on real
+  input but nothing in the test suite trips it, so it is not
+  regression-guarded.
+- A round-trip fixture with a **curved** target, which is what would make
+  the test sensitive to the tangent-frame convention it currently cannot
+  distinguish (see the correction above).
 - **The viewer cannot render the map.** It is a hand-written WebGL2
   renderer, not three.js `GLTFLoader`: no `TANGENT` attribute, no normal
   sampler. The checkbox is labelled "download only" for that reason. Adding

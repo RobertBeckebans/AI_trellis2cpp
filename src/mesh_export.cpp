@@ -970,11 +970,16 @@ namespace
 					continue; // frame has no normal; leave the texel flat
 				for( int k = 0; k < 3; ++k )
 					N[k] /= nl;
-				// Gram-Schmidt, so T is exactly the tangent a renderer derives
-				// from this N and this T.
-				const float td = T[0] * N[0] + T[1] * N[1] + T[2] * N[2];
-				for( int k = 0; k < 3; ++k )
-					T[k] -= td * N[k];
+				// Deliberately no Gram-Schmidt against N. glTF defines the frame
+				// as N, the interpolated TANGENT, and B = cross(N,T)*w, and that
+				// is what every consumer reconstructs. Re-orthogonalizing here
+				// would only be correct if the renderer did the same, so the bake
+				// and our own viewer would agree while both drifted away from
+				// Blender and three.js — defeating the reason
+				// meshopt_TangentCompatible was chosen in the first place. The
+				// tangents are orthogonal to the normal at the vertices already;
+				// interpolation across a triangle bends them slightly, and that
+				// bend is part of the convention rather than an error to correct.
 				const float tl = std::sqrt( T[0] * T[0] + T[1] * T[1] + T[2] * T[2] );
 				if( tl < 1e-12f )
 					continue; // degenerate UVs here; flat is the honest answer
