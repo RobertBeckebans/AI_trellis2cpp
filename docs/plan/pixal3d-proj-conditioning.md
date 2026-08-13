@@ -59,6 +59,11 @@ instead switches the pipeline into `proj` mode.
   No released checkpoint uses it.
 - **MoGe-2 for FOV estimation.** See D6 — a manual FOV is the first
   iteration.
+- **The 1536 cascade tier.** Pixal3D defaults to `1536_cascade`, but the
+  tier is a TRELLIS.2 feature, independent of projection conditioning
+  and reachable with the checkpoints already converted. It has its own
+  plan, `docs/plan/1536-cascade.md`. This plan targets the 1024 tier and
+  inherits 1536 once that one lands.
 
 ## What actually differs from the current port
 
@@ -79,7 +84,8 @@ sizes:
 | `ss_flow_img_dit_1_3B_64_bf16.safetensors` | 2,584,426,920 B | 5,359,822,584 B |
 | `slat_flow_img2shape_dit_1_3B_512_bf16.safetensors` | 2,584,574,424 B | 5,546,764,048 B |
 | Image preprocess bbox padding | `size * 1` | **`size * 1.1`** |
-| Cascade | 512 / 1024 | 1024 / **1536**, adaptive token budget |
+| HR scaffold quantization | `.int()`, factor `grid_res` | **`.round()`, factor `grid_res - 1`** |
+| Cascade default | 1024 | 1536 (own plan, see non-goals) |
 | Extra models | — | **NAF** feature upsampler (Apache-2.0, 2.7 MB) |
 
 Two numbers carry most of the argument:
@@ -247,9 +253,10 @@ TRELLIS.2 weights.
       evaluation and its exactness proof (D4). `THIRD_PARTY.md` entry.
 - [ ] **Phase 5 — Shape and texture cascade.** Shape 512 → upsample ×4 →
       quantized HR scaffold → shape HR → texture, with `proj_in = 2048`
-      (LR‖HR concat). The adaptive token budget (`max_num_tokens =
-      49152`, shrinking the HR resolution in steps of 128) and the 1536
-      cascade come last, since the fork is currently fixed at 1024.
+      (LR‖HR concat), on the existing 1024 tier. Whether the HR scaffold
+      quantization has to follow Pixal3D's rounding rather than
+      TRELLIS.2's truncation is decided here (see the open question
+      below), because it changes which voxels the HR flow ever sees.
 - [ ] **Phase 6 — C API, server, docs.** NAF GGUF path and proj
       capability bit in `t2_pipeline_load`, FOV in `t2_generate`, ABI
       15 → 16, `server/engine.go:20`, `README.md`,
@@ -281,6 +288,18 @@ TRELLIS.2 weights.
   from the safetensors header. The first converter run settles it.
 - **NAF's RoPE may not match the DINOv3 axial formulation** despite the
   shared base of 100.0 (D5).
+- **Pixal3D quantizes the HR scaffold differently.** TRELLIS.2 uses
+  `((c + 0.5) / lr_res * grid_res).int()`
+  (`docs/ideas/TRELLIS-2_rocm/.../trellis2_image_to_3d.py:415`), which
+  `src/trellis2_capi.cpp:1003` reproduces exactly. Pixal3D uses
+  `((c + 0.5) / lr_res * (grid_res - 1)).round()`
+  (`docs/ideas/Pixal3D/pixal3d/pipelines/pixal3d_image_to_3d.py:717`) —
+  both the rounding mode and the scale factor differ, so the two produce
+  different HR coordinate sets from the same LR SLAT. Whether this is a
+  deliberate change the Pixal3D weights depend on, or incidental drift,
+  is unresolved. It has to be settled before Phase 5, and it means the
+  quantization may need to branch on the conditioning mode rather than
+  being shared (cf. D2 in `docs/plan/1536-cascade.md`).
 - **Halo correctness in the sparse NAF evaluation** (D4) — the internal
   bilinear downsample when the guide exceeds 4× the target size is the
   part most likely to be got wrong.
