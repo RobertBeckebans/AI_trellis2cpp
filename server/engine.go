@@ -17,7 +17,7 @@ import (
 	"github.com/ebitengine/purego"
 )
 
-const abiVersion = 14
+const abiVersion = 15
 
 // Progress stages (enum t2_stage).
 const (
@@ -112,9 +112,10 @@ type engine struct {
 		texSize, componentFilter int32, outLen unsafe.Pointer, err unsafe.Pointer, errLen int32) uintptr
 	bakeProjectedGLB func(targetVerts unsafe.Pointer, targetNV int32, targetTris unsafe.Pointer, targetNT int32,
 		sourceVerts unsafe.Pointer, sourceNV int32, sourceTris unsafe.Pointer, sourceNT int32,
-		sourcePBR unsafe.Pointer, texSize, sourceComponentFilter int32,
+		sourcePBR unsafe.Pointer, texSize, sourceComponentFilter, normalMap int32,
 		outLen unsafe.Pointer, err unsafe.Pointer, errLen int32) uintptr
-	freeBuffer func(buf uintptr)
+	lastNormalMapStats func(coveredTexels, rejectedTexels unsafe.Pointer)
+	freeBuffer         func(buf uintptr)
 }
 
 // engineModels retains only the paths needed to recreate a freed pipeline. The
@@ -181,6 +182,7 @@ func newEngine(libPath, dinoGGUF, flowGGUF, decGGUF, slatGGUF, slatHRGGUF, shape
 	purego.RegisterLibFunc(&e.preparePrintMeshC, lib, "t2_prepare_print_mesh")
 	purego.RegisterLibFunc(&e.bakeGLB, lib, "t2_bake_glb")
 	purego.RegisterLibFunc(&e.bakeProjectedGLB, lib, "t2_bake_projected_glb")
+	purego.RegisterLibFunc(&e.lastNormalMapStats, lib, "t2_last_normal_map_stats")
 	purego.RegisterLibFunc(&e.freeBuffer, lib, "t2_free_buffer")
 
 	if progressCallback == 0 {
@@ -572,9 +574,31 @@ func (e *engine) BakeGLB(m *meshData, texSize, componentFilter int) ([]byte, err
 	return out, nil
 }
 
+// NormalMapStats is how much of a normal map bake the closest-surface search
+// had to leave flat. A nearest-point transfer is not a bake cage: on thin
+// geometry it can land on the far side of a wall, and baking that would invert
+// the shading lobe over a visible patch. Those texels stay flat and are counted
+// here so the UI can show the loss rather than implying full detail transfer.
+type NormalMapStats struct {
+	CoveredTexels  int32
+	RejectedTexels int32
+}
+
+func (e *engine) LastNormalMapStats() NormalMapStats {
+	var s NormalMapStats
+	if e == nil || e.lastNormalMapStats == nil {
+		return s
+	}
+	e.lastNormalMapStats(unsafe.Pointer(&s.CoveredTexels), unsafe.Pointer(&s.RejectedTexels))
+	return s
+}
+
 // BakeProjectedGLB UV-unwraps replacement geometry and transfers the dense
-// source material per texel through the portable CGAL closest-surface backend.
-func (e *engine) BakeProjectedGLB(target, source *meshData, texSize, sourceComponentFilter int) ([]byte, error) {
+// source material per texel through the portable closest-surface backend. With
+// normalMap set it additionally bakes a tangent-space normal map and exports
+// the MikkTSpace-compatible TANGENT attribute it was baked against, which is
+// what carries the dense mesh's surface detail onto the replacement geometry.
+func (e *engine) BakeProjectedGLB(target, source *meshData, texSize, sourceComponentFilter int, normalMap bool) ([]byte, error) {
 	if target == nil || target.NVerts == 0 || target.NTris == 0 ||
 		source == nil || source.NVerts == 0 || source.NTris == 0 || len(source.PBR) != 6*source.NVerts {
 		return nil, fmt.Errorf("empty projected GLB mesh or missing source PBR")
@@ -586,13 +610,17 @@ func (e *engine) BakeProjectedGLB(target, source *meshData, texSize, sourceCompo
 		return nil, fmt.Errorf("PBR projection is unavailable")
 	}
 	var outLen int32
+	normalMapFlag := int32(0)
+	if normalMap {
+		normalMapFlag = 1
+	}
 	errBuf := make([]byte, 512)
 	p := e.bakeProjectedGLB(
 		unsafe.Pointer(&target.Verts[0]), int32(target.NVerts),
 		unsafe.Pointer(&target.Tris[0]), int32(target.NTris),
 		unsafe.Pointer(&source.Verts[0]), int32(source.NVerts),
 		unsafe.Pointer(&source.Tris[0]), int32(source.NTris),
-		unsafe.Pointer(&source.PBR[0]), int32(texSize), int32(sourceComponentFilter),
+		unsafe.Pointer(&source.PBR[0]), int32(texSize), int32(sourceComponentFilter), normalMapFlag,
 		unsafe.Pointer(&outLen), unsafe.Pointer(&errBuf[0]), int32(len(errBuf)))
 	if p == 0 {
 		return nil, fmt.Errorf("%s", cstr(errBuf))

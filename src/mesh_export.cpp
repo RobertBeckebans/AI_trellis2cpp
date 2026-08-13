@@ -4,6 +4,7 @@
 #include "quad_remesh.h"
 
 #include "flexible_dual_grid.h"
+#include "meshoptimizer.h"
 #include "xatlas.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -277,35 +278,56 @@ namespace
 			b.push_back( fill );
 	}
 
+	// `tan` (4 floats per vertex, glTF's xyz + handedness) and `normal_png` are
+	// optional and travel together: a normal map without the tangent basis it was
+	// baked against is worse than none. Pass both empty for the plain PBR bake.
+	//
+	// Accessor and bufferView indices used to be literals in the JSON below,
+	// which stops working the moment an attribute becomes conditional. They are
+	// now counters handed out as the streams are appended, so adding a stream
+	// cannot silently point an accessor at the wrong bytes.
 	void write_glb( const std::vector<float>& pos,
 		const std::vector<float>&			  nrm,
 		const std::vector<float>&			  uv,
+		const std::vector<float>&			  tan,
 		const std::vector<uint32_t>&		  idx,
 		const std::vector<uint8_t>&			  basecolor_png,
 		const std::vector<uint8_t>&			  metalrough_png,
+		const std::vector<uint8_t>&			  normal_png,
 		bool								  transparent,
 		std::vector<uint8_t>&				  out )
 	{
-		const uint32_t		 nv = ( uint32_t )( pos.size() / 3 );
-		const uint32_t		 ni = ( uint32_t )idx.size();
+		const uint32_t		 nv			 = ( uint32_t )( pos.size() / 3 );
+		const uint32_t		 ni			 = ( uint32_t )idx.size();
+		const bool			 has_tangent = tan.size() == ( size_t )nv * 4;
+		const bool			 has_normal	 = has_tangent && !normal_png.empty();
 
-		// Assemble the BIN buffer, tracking 4-aligned bufferView offsets.
+		// Assemble the BIN buffer, tracking 4-aligned bufferView offsets. Each
+		// call hands out the next bufferView index alongside the offset/length.
 		std::vector<uint8_t> bin;
-		auto				 view = [&]( const void* data, size_t bytes, uint32_t& off, uint32_t& len ) {
-			pad4( bin, 0 );
-			off				 = ( uint32_t )bin.size();
-			len				 = ( uint32_t )bytes;
-			const uint8_t* p = ( const uint8_t* )data;
-			bin.insert( bin.end(), p, p + bytes );
+		std::string			 views;
+		uint32_t			 nviews = 0;
+		auto				 view	= [&]( const void* data, size_t bytes, int target ) {
+			  pad4( bin, 0 );
+			  const uint32_t off = ( uint32_t )bin.size();
+			  const uint8_t* p	 = ( const uint8_t* )data;
+			  bin.insert( bin.end(), p, p + bytes );
+			  char vbuf[192];
+			  if( target )
+				  snprintf( vbuf, sizeof vbuf, "%s{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u,\"target\":%d}", nviews ? "," : "", off, ( uint32_t )bytes, target );
+			  else
+				  snprintf( vbuf, sizeof vbuf, "%s{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u}", nviews ? "," : "", off, ( uint32_t )bytes );
+			  views += vbuf;
+			  return nviews++;
 		};
-		uint32_t off_pos, len_pos, off_nrm, len_nrm, off_uv, len_uv, off_idx, len_idx;
-		uint32_t off_bc, len_bc, off_mr, len_mr;
-		view( pos.data(), pos.size() * 4, off_pos, len_pos );
-		view( nrm.data(), nrm.size() * 4, off_nrm, len_nrm );
-		view( uv.data(), uv.size() * 4, off_uv, len_uv );
-		view( idx.data(), idx.size() * 4, off_idx, len_idx );
-		view( basecolor_png.data(), basecolor_png.size(), off_bc, len_bc );
-		view( metalrough_png.data(), metalrough_png.size(), off_mr, len_mr );
+		const uint32_t bv_pos = view( pos.data(), pos.size() * 4, 34962 );
+		const uint32_t bv_nrm = view( nrm.data(), nrm.size() * 4, 34962 );
+		const uint32_t bv_uv  = view( uv.data(), uv.size() * 4, 34962 );
+		const uint32_t bv_tan = has_tangent ? view( tan.data(), tan.size() * 4, 34962 ) : 0u;
+		const uint32_t bv_idx = view( idx.data(), idx.size() * 4, 34963 );
+		const uint32_t bv_bc  = view( basecolor_png.data(), basecolor_png.size(), 0 );
+		const uint32_t bv_mr  = view( metalrough_png.data(), metalrough_png.size(), 0 );
+		const uint32_t bv_nm  = has_normal ? view( normal_png.data(), normal_png.size(), 0 ) : 0u;
 		pad4( bin, 0 );
 
 		float pmin[3] = { 1e30f, 1e30f, 1e30f }, pmax[3] = { -1e30f, -1e30f, -1e30f };
@@ -315,24 +337,45 @@ namespace
 				pmax[k] = std::max( pmax[k], pos[3 * i + k] );
 			}
 
-		char		buf[2048];
-		std::string j = "{\"asset\":{\"version\":\"2.0\",\"generator\":\"trellis2cpp\"},";
+		// Accessors in the same order, so the attribute map below can name them.
+		const uint32_t ac_pos = 0, ac_nrm = 1, ac_uv = 2;
+		const uint32_t ac_tan = has_tangent ? 3u : 0u;
+		const uint32_t ac_idx = has_tangent ? 4u : 3u;
+
+		char		   buf[2048];
+		std::string	   j = "{\"asset\":{\"version\":\"2.0\",\"generator\":\"trellis2cpp\"},";
 		j += "\"scene\":0,\"scenes\":[{\"nodes\":[0]}],\"nodes\":[{\"mesh\":0}],";
-		j += "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"NORMAL\":1,\"TEXCOORD_0\":2},\"indices\":3,\"material\":0}]}],";
+		snprintf( buf, sizeof buf, "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":%u,\"NORMAL\":%u,\"TEXCOORD_0\":%u", ac_pos, ac_nrm, ac_uv );
+		j += buf;
+		if( has_tangent ) {
+			snprintf( buf, sizeof buf, ",\"TANGENT\":%u", ac_tan );
+			j += buf;
+		}
+		snprintf( buf, sizeof buf, "},\"indices\":%u,\"material\":0}]}],", ac_idx );
+		j += buf;
 		j += "\"materials\":[{\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0},\"metallicRoughnessTexture\":{\"index\":1},\"metallicFactor\":1.0,\"roughnessFactor\":1.0},";
+		if( has_normal )
+			j += "\"normalTexture\":{\"index\":2,\"scale\":1.0},";
 		if( transparent )
 			j += "\"alphaMode\":\"BLEND\",";
 		j += "\"doubleSided\":true}],";
-		j += "\"textures\":[{\"source\":0,\"sampler\":0},{\"source\":1,\"sampler\":0}],";
-		j += "\"images\":[{\"bufferView\":4,\"mimeType\":\"image/png\"},{\"bufferView\":5,\"mimeType\":\"image/png\"}],";
+		j += has_normal ? "\"textures\":[{\"source\":0,\"sampler\":0},{\"source\":1,\"sampler\":0},{\"source\":2,\"sampler\":0}]," :
+						  "\"textures\":[{\"source\":0,\"sampler\":0},{\"source\":1,\"sampler\":0}],";
+		snprintf( buf, sizeof buf, "\"images\":[{\"bufferView\":%u,\"mimeType\":\"image/png\"},{\"bufferView\":%u,\"mimeType\":\"image/png\"}", bv_bc, bv_mr );
+		j += buf;
+		if( has_normal ) {
+			snprintf( buf, sizeof buf, ",{\"bufferView\":%u,\"mimeType\":\"image/png\"}", bv_nm );
+			j += buf;
+		}
+		j += "],";
 		// No mipmaps: opt-in xatlas charts use explicit dilation around their seams.
 		j += "\"samplers\":[{\"magFilter\":9729,\"minFilter\":9729,\"wrapS\":33071,\"wrapT\":33071}],";
 		snprintf( buf,
 			sizeof buf,
-			"\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":%u,\"type\":\"VEC3\",\"min\":[%.8g,%.8g,%.8g],\"max\":[%.8g,%.8g,%.8g]},"
-			"{\"bufferView\":1,\"componentType\":5126,\"count\":%u,\"type\":\"VEC3\"},"
-			"{\"bufferView\":2,\"componentType\":5126,\"count\":%u,\"type\":\"VEC2\"},"
-			"{\"bufferView\":3,\"componentType\":5125,\"count\":%u,\"type\":\"SCALAR\"}],",
+			"\"accessors\":[{\"bufferView\":%u,\"componentType\":5126,\"count\":%u,\"type\":\"VEC3\",\"min\":[%.8g,%.8g,%.8g],\"max\":[%.8g,%.8g,%.8g]},"
+			"{\"bufferView\":%u,\"componentType\":5126,\"count\":%u,\"type\":\"VEC3\"},"
+			"{\"bufferView\":%u,\"componentType\":5126,\"count\":%u,\"type\":\"VEC2\"}",
+			bv_pos,
 			nv,
 			pmin[0],
 			pmin[1],
@@ -340,31 +383,18 @@ namespace
 			pmax[0],
 			pmax[1],
 			pmax[2],
+			bv_nrm,
 			nv,
-			nv,
-			ni );
+			bv_uv,
+			nv );
 		j += buf;
-		snprintf( buf,
-			sizeof buf,
-			"\"bufferViews\":[{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u,\"target\":34962},"
-			"{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u,\"target\":34962},"
-			"{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u,\"target\":34962},"
-			"{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u,\"target\":34963},"
-			"{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u},"
-			"{\"buffer\":0,\"byteOffset\":%u,\"byteLength\":%u}],",
-			off_pos,
-			len_pos,
-			off_nrm,
-			len_nrm,
-			off_uv,
-			len_uv,
-			off_idx,
-			len_idx,
-			off_bc,
-			len_bc,
-			off_mr,
-			len_mr );
+		if( has_tangent ) {
+			snprintf( buf, sizeof buf, ",{\"bufferView\":%u,\"componentType\":5126,\"count\":%u,\"type\":\"VEC4\"}", bv_tan, nv );
+			j += buf;
+		}
+		snprintf( buf, sizeof buf, ",{\"bufferView\":%u,\"componentType\":5125,\"count\":%u,\"type\":\"SCALAR\"}],", bv_idx, ni );
 		j += buf;
+		j += "\"bufferViews\":[" + views + "],";
 		snprintf( buf, sizeof buf, "\"buffers\":[{\"byteLength\":%u}]}", ( uint32_t )bin.size() );
 		j += buf;
 
@@ -642,6 +672,98 @@ namespace
 		return true;
 	}
 
+	// MikkTSpace-compatible tangents for the atlas mesh, plus the vertex split
+	// they require.
+	//
+	// meshoptimizer emits one tangent per *corner*, so a vertex whose corners
+	// disagree has to be split before the stream can be attached. xatlas already
+	// splits at every chart boundary, which covers UV mirror seams; this catches
+	// the in-chart remainder. Everything else travels through the same remap, so
+	// positions, normals, both UV copies and any material stay attached to the
+	// same vertices as the tangents.
+	//
+	// meshopt_TangentCompatible is deliberate rather than incidental: Blender's
+	// glTF importer recomputes tangents with MikkTSpace instead of reading
+	// TANGENT, so a map baked against a differently-weighted basis picks up
+	// shading error the moment the asset is opened there — which is exactly the
+	// workflow this bake exists to remove.
+	//
+	// The generator is fed the *normalized* UVs, the ones the GLB carries. Texel
+	// space would scale u and v by AW and AH, which skews the basis whenever the
+	// packed atlas is not square.
+	bool build_atlas_tangents( std::vector<float>& opos,
+		std::vector<float>&						   onrm,
+		std::vector<float>&						   ouv,
+		std::vector<float>&						   guv,
+		std::vector<float>&						   opbr,
+		std::vector<uint32_t>&					   oidx,
+		std::vector<float>&						   otan,
+		std::string&							   err )
+	{
+		const size_t onv	 = opos.size() / 3;
+		const size_t ncorner = oidx.size();
+		if( onv == 0 || ncorner < 3 ) {
+			err = "tangent generation received an empty atlas mesh";
+			return false;
+		}
+		const bool		   has_pbr = opbr.size() == onv * 6;
+
+		std::vector<float> corner_tan( ncorner * 4, 0.0f );
+		meshopt_generateTangents(
+			corner_tan.data(), oidx.data(), ncorner, opos.data(), onv, sizeof( float ) * 3, onrm.data(), sizeof( float ) * 3, guv.data(), sizeof( float ) * 2, meshopt_TangentCompatible );
+
+		// Deindex, so the remap can consider the tangent alongside everything
+		// else and split only where a corner genuinely differs.
+		std::vector<float> cpos( ncorner * 3 ), cnrm( ncorner * 3 ), cuv( ncorner * 2 ), cguv( ncorner * 2 );
+		std::vector<float> cpbr( has_pbr ? ncorner * 6 : 0 );
+		for( size_t c = 0; c < ncorner; ++c ) {
+			const size_t v = oidx[c];
+			std::memcpy( cpos.data() + c * 3, opos.data() + v * 3, 3 * sizeof( float ) );
+			std::memcpy( cnrm.data() + c * 3, onrm.data() + v * 3, 3 * sizeof( float ) );
+			std::memcpy( cuv.data() + c * 2, ouv.data() + v * 2, 2 * sizeof( float ) );
+			std::memcpy( cguv.data() + c * 2, guv.data() + v * 2, 2 * sizeof( float ) );
+			if( has_pbr )
+				std::memcpy( cpbr.data() + c * 6, opbr.data() + v * 6, 6 * sizeof( float ) );
+		}
+
+		std::vector<meshopt_Stream> streams = {
+			{ cpos.data(), sizeof( float ) * 3, sizeof( float ) * 3 },
+			{ cnrm.data(), sizeof( float ) * 3, sizeof( float ) * 3 },
+			{ cuv.data(), sizeof( float ) * 2, sizeof( float ) * 2 },
+			{ cguv.data(), sizeof( float ) * 2, sizeof( float ) * 2 },
+			{ corner_tan.data(), sizeof( float ) * 4, sizeof( float ) * 4 },
+		};
+		if( has_pbr )
+			streams.push_back( { cpbr.data(), sizeof( float ) * 6, sizeof( float ) * 6 } );
+
+		std::vector<uint32_t> remap( ncorner );
+		const size_t		  nnew = meshopt_generateVertexRemapMulti( remap.data(), nullptr, ncorner, ncorner, streams.data(), streams.size() );
+		if( nnew == 0 || nnew > ncorner ) {
+			err = "tangent vertex remap produced an implausible vertex count";
+			return false;
+		}
+
+		std::vector<uint32_t> nidx( ncorner );
+		meshopt_remapIndexBuffer( nidx.data(), nullptr, ncorner, remap.data() );
+
+		auto remap_stream = [&]( std::vector<float>& dst, const std::vector<float>& src, size_t comps ) {
+			std::vector<float> out( nnew * comps );
+			meshopt_remapVertexBuffer( out.data(), src.data(), ncorner, sizeof( float ) * comps, remap.data() );
+			dst.swap( out );
+		};
+		remap_stream( opos, cpos, 3 );
+		remap_stream( onrm, cnrm, 3 );
+		remap_stream( ouv, cuv, 2 );
+		remap_stream( guv, cguv, 2 );
+		remap_stream( otan, corner_tan, 4 );
+		if( has_pbr )
+			remap_stream( opbr, cpbr, 6 );
+		oidx.swap( nidx );
+
+		GLBLOG( "tangents: %zu atlas verts -> %zu after the tangent split (%zu corners)", onv, nnew, ncorner );
+		return true;
+	}
+
 	// UV unwrap and raster bake.  In the ordinary xatlas mode, PBR is interpolated
 	// from the atlas mesh's own vertices.  For print wrapping, projection_source is
 	// the dense pre-wrap mesh: every covered atlas texel is mapped to a 3D point on
@@ -665,18 +787,45 @@ namespace
 		int					  AW = TS, AH = TS;
 		if( !xatlas_unwrap( mesh.verts, mesh.normals, mesh.pbr, dnv, mesh.tris, dnt, opt, TS, opos, onrm, ouv, opbr, oidx, AW, AH, err ) )
 			return false;
+
+		// The UVs the GLB carries, built here rather than at write time because
+		// the tangent generator has to see the same parameterization the
+		// renderer will reconstruct the basis from.
+		std::vector<float> guv( ouv.size() );
+		for( size_t i = 0; i < ouv.size() / 2; ++i ) {
+			guv[2 * i + 0] = ouv[2 * i + 0] / ( float )AW;
+			guv[2 * i + 1] = ouv[2 * i + 1] / ( float )AH;
+		}
+
+		// Only the projected bake gets a normal map: without a distinct source
+		// there is no detail to transfer and the map would be uniformly flat.
+		const bool		   bake_normal_map = projected_pbr && opt.normal_map && !std::getenv( "T2GLB_NO_NORMALMAP" );
+		std::vector<float> otan;
+		if( bake_normal_map && !build_atlas_tangents( opos, onrm, ouv, guv, opbr, oidx, otan, err ) )
+			return false;
+
 		const uint32_t onv	= ( uint32_t )( opos.size() / 3 );
 		const uint32_t ntri = ( uint32_t )( oidx.size() / 3 );
 
 		GLBLOG( "rasterizing %u tris%s ...", ntri, projected_pbr ? " for source-surface PBR projection" : "" );
-		const int			 NP = AW * AH;
-		std::vector<float>	 bc( ( size_t )NP * 3, 0.0f ), met( NP, 0.0f ), rou( NP, 0.0f ), alp( NP, 0.0f );
-		std::vector<uint8_t> mask( NP, 0 );
-		std::vector<float>	 query_points;
-		std::vector<int32_t> query_pixels;
+		const int			  NP = AW * AH;
+		std::vector<float>	  bc( ( size_t )NP * 3, 0.0f ), met( NP, 0.0f ), rou( NP, 0.0f ), alp( NP, 0.0f );
+		std::vector<uint8_t>  mask( NP, 0 );
+		std::vector<float>	  query_points;
+		std::vector<int32_t>  query_pixels;
+		// The tangent frame is reconstructed in the fill loop from the covering
+		// triangle and two barycentric weights (12 B/texel) rather than
+		// materialized here (36 B/texel). Same result, a third of the memory on
+		// an atlas with millions of covered texels.
+		std::vector<uint32_t> query_tri;
+		std::vector<float>	  query_bary;
 		if( projected_pbr ) {
 			query_points.reserve( ( size_t )NP * 2 ); // atlases are normally 60-80% occupied
 			query_pixels.reserve( ( size_t )NP * 2 / 3 );
+			if( bake_normal_map ) {
+				query_tri.reserve( ( size_t )NP * 2 / 3 );
+				query_bary.reserve( ( size_t )NP * 4 / 3 );
+			}
 		}
 		auto set_default = [&]( int pix ) {
 			bc[3 * pix + 0] = bc[3 * pix + 1] = bc[3 * pix + 2] = 0.7f;
@@ -718,6 +867,11 @@ namespace
 						for( int k = 0; k < 3; ++k )
 							query_points.push_back( w0 * opos[3 * ia + k] + w1 * opos[3 * ib + k] + w2 * opos[3 * ic + k] );
 						query_pixels.push_back( pix );
+						if( bake_normal_map ) {
+							query_tri.push_back( t );
+							query_bary.push_back( w0 );
+							query_bary.push_back( w1 );
+						}
 						mask[pix] = 1;
 						continue;
 					}
@@ -743,21 +897,46 @@ namespace
 			}
 		}
 
+		// Tangent-space normal channels. Flat (0,0,1) everywhere the bake has
+		// nothing trustworthy to say, which is also the correct gutter value.
+		std::vector<float> tsn;
+		if( bake_normal_map )
+			tsn.assign( ( size_t )NP * 3, 0.0f );
+		auto set_flat = [&]( int pix ) {
+			tsn[3 * pix + 0] = 0.0f;
+			tsn[3 * pix + 1] = 0.0f;
+			tsn[3 * pix + 2] = 1.0f;
+		};
+		if( bake_normal_map )
+			for( int i = 0; i < NP; ++i )
+				set_flat( i );
+
 		if( projected_pbr ) {
-			GLBLOG( "rasterize done in %.2f s; projecting %zu covered texels to %zu source tris via %s ...",
+			GLBLOG( "rasterize done in %.2f s; projecting %zu covered texels to %zu source tris via %s%s ...",
 				stage_elapsed(),
 				query_pixels.size(),
 				projection_source->tris.size() / 3,
-				t2print::projection_backend() );
-			std::vector<float> query_pbr;
-			if( !t2print::project_pbr( projection_source->verts, projection_source->tris, projection_source->pbr, query_points, query_pbr, err ) )
+				t2print::projection_backend(),
+				bake_normal_map ? " (with shading normals)" : "" );
+			std::vector<float> query_pbr, query_nrm;
+			if( bake_normal_map ) {
+				if( projection_source->normals.size() != projection_source->verts.size() ) {
+					err = "PBR projection source has no per-vertex normals for the normal map bake";
+					return false;
+				}
+				if( !t2print::project_pbr_and_normals(
+						nullptr, projection_source->verts, projection_source->tris, projection_source->pbr, projection_source->normals, query_points, query_pbr, query_nrm, err ) )
+					return false;
+			} else if( !t2print::project_pbr( projection_source->verts, projection_source->tris, projection_source->pbr, query_points, query_pbr, err ) ) {
 				return false;
+			}
 			g_bake_timings.projection = stage_elapsed();
 			GLBLOG( "projection done in %.2f s", g_bake_timings.projection );
-			if( query_pbr.size() != query_pixels.size() * 6 ) {
+			if( query_pbr.size() != query_pixels.size() * 6 || ( bake_normal_map && query_nrm.size() != query_pixels.size() * 3 ) ) {
 				err = "PBR projection returned an invalid sample count";
 				return false;
 			}
+			int rejected = 0;
 			for( size_t i = 0; i < query_pixels.size(); ++i ) {
 				const int	 pix = query_pixels[i];
 				const float* val = query_pbr.data() + i * 6;
@@ -767,11 +946,78 @@ namespace
 				met[pix]		 = val[3];
 				rou[pix]		 = val[4];
 				alp[pix]		 = val[5];
+				if( !bake_normal_map )
+					continue;
+
+				// Rebuild the low-poly frame at this texel from the covering
+				// triangle. The Y-up swizzle applied at write time is a proper
+				// rotation, so these dot products are invariant under it and the
+				// transfer can be done in TRELLIS space.
+				const uint32_t t  = query_tri[i];
+				const uint32_t ia = oidx[3 * t + 0], ib = oidx[3 * t + 1], ic = oidx[3 * t + 2];
+				const float	   w0 = query_bary[2 * i + 0], w1 = query_bary[2 * i + 1], w2 = 1.0f - w0 - w1;
+				float		   N[3], T[3];
+				float		   handedness = 0.0f;
+				for( int k = 0; k < 3; ++k ) {
+					N[k] = w0 * onrm[3 * ia + k] + w1 * onrm[3 * ib + k] + w2 * onrm[3 * ic + k];
+					T[k] = w0 * otan[4 * ia + k] + w1 * otan[4 * ib + k] + w2 * otan[4 * ic + k];
+				}
+				handedness		= w0 * otan[4 * ia + 3] + w1 * otan[4 * ib + 3] + w2 * otan[4 * ic + 3];
+				const float wsg = handedness < 0.0f ? -1.0f : 1.0f;
+
+				const float nl = std::sqrt( N[0] * N[0] + N[1] * N[1] + N[2] * N[2] );
+				if( nl < 1e-12f )
+					continue; // frame has no normal; leave the texel flat
+				for( int k = 0; k < 3; ++k )
+					N[k] /= nl;
+				// Gram-Schmidt, so T is exactly the tangent a renderer derives
+				// from this N and this T.
+				const float td = T[0] * N[0] + T[1] * N[1] + T[2] * N[2];
+				for( int k = 0; k < 3; ++k )
+					T[k] -= td * N[k];
+				const float tl = std::sqrt( T[0] * T[0] + T[1] * T[1] + T[2] * T[2] );
+				if( tl < 1e-12f )
+					continue; // degenerate UVs here; flat is the honest answer
+				for( int k = 0; k < 3; ++k )
+					T[k] /= tl;
+				const float B[3] = {
+					( N[1] * T[2] - N[2] * T[1] ) * wsg,
+					( N[2] * T[0] - N[0] * T[2] ) * wsg,
+					( N[0] * T[1] - N[1] * T[0] ) * wsg,
+				};
+
+				const float* sn = query_nrm.data() + i * 3;
+				const float	 sl = std::sqrt( sn[0] * sn[0] + sn[1] * sn[1] + sn[2] * sn[2] );
+				if( sl < 0.5f )
+					continue; // project_pbr_and_normals reported "no sample"
+				const float ndot = sn[0] * N[0] + sn[1] * N[1] + sn[2] * N[2];
+				if( ndot <= 0.0f ) {
+					// The nearest source surface faces away from this texel, so
+					// the search almost certainly crossed to the far side of a
+					// thin wall. Baking it would invert the shading lobe over a
+					// visible patch; flat says "no detail here" instead.
+					++rejected;
+					continue;
+				}
+				tsn[3 * pix + 0] = sn[0] * T[0] + sn[1] * T[1] + sn[2] * T[2];
+				tsn[3 * pix + 1] = sn[0] * B[0] + sn[1] * B[1] + sn[2] * B[2];
+				tsn[3 * pix + 2] = ndot;
+			}
+			if( bake_normal_map ) {
+				g_bake_timings.normal_texels   = ( int )query_pixels.size();
+				g_bake_timings.normal_rejected = rejected;
+				GLBLOG( "normal map: %d of %zu covered texels left flat (nearest source surface faced away)", rejected, query_pixels.size() );
 			}
 			query_points.clear();
 			query_points.shrink_to_fit();
 			query_pbr.clear();
 			query_pbr.shrink_to_fit();
+			query_nrm.clear();
+			query_nrm.shrink_to_fit();
+			query_tri.clear();
+			query_tri.shrink_to_fit();
+			query_bary.clear();
+			query_bary.shrink_to_fit();
 		}
 
 		// Edge-pad the gutter so bilinear sampling cannot bleed empty texels
@@ -785,7 +1031,7 @@ namespace
 						const int pix = py * AW + px;
 						if( m[pix] )
 							continue;
-						float acc[6] = { 0, 0, 0, 0, 0, 0 };
+						float acc[9] = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 						int	  cnt	 = 0;
 						for( int dy = -1; dy <= 1; ++dy )
 							for( int dx = -1; dx <= 1; ++dx ) {
@@ -801,6 +1047,11 @@ namespace
 								acc[3] += met[q];
 								acc[4] += rou[q];
 								acc[5] += alp[q];
+								if( bake_normal_map ) {
+									acc[6] += tsn[3 * q + 0];
+									acc[7] += tsn[3 * q + 1];
+									acc[8] += tsn[3 * q + 2];
+								}
 								++cnt;
 							}
 						if( cnt ) {
@@ -810,7 +1061,21 @@ namespace
 							met[pix]		= acc[3] / cnt;
 							rou[pix]		= acc[4] / cnt;
 							alp[pix]		= acc[5] / cnt;
-							nm[pix]			= 1;
+							if( bake_normal_map ) {
+								// An average of unit vectors is not one, and a
+								// non-unit normal in the gutter bleeds a wrong
+								// magnitude across the seam under bilinear
+								// filtering.
+								const float l = std::sqrt( acc[6] * acc[6] + acc[7] * acc[7] + acc[8] * acc[8] );
+								if( l > 1e-12f ) {
+									tsn[3 * pix + 0] = acc[6] / l;
+									tsn[3 * pix + 1] = acc[7] / l;
+									tsn[3 * pix + 2] = acc[8] / l;
+								} else {
+									set_flat( pix );
+								}
+							}
+							nm[pix] = 1;
 						}
 					}
 				m.swap( nm );
@@ -843,13 +1108,28 @@ namespace
 		const bool transparent	  = translucent > 0 && ( int64_t )translucent * 1000 >= ( int64_t )covered;
 		g_bake_timings.texel_fill = stage_elapsed();
 		GLBLOG( "texel fill done in %.2f s; inpaint + PNG encode ...", g_bake_timings.texel_fill );
-		std::vector<uint8_t> bc_png, mr_png;
+		std::vector<uint8_t> bc_png, mr_png, nm_png;
 		if( !encode_png( AW, AH, 4, bc8.data(), bc_png ) || !encode_png( AW, AH, 3, mr8.data(), mr_png ) ) {
 			err = "PNG encode failed";
 			return false;
 		}
+		if( bake_normal_map ) {
+			// glTF reads normalTexture as linear data, and the PNG carries no
+			// sRGB chunk, so no colour management applies to these bytes.
+			std::vector<uint8_t> nm8( ( size_t )NP * 3 );
+			for( int i = 0; i < NP; ++i )
+				for( int k = 0; k < 3; ++k )
+					nm8[3 * ( size_t )i + k] = to8( tsn[3 * ( size_t )i + k] * 0.5f + 0.5f );
+			if( !encode_png( AW, AH, 3, nm8.data(), nm_png ) ) {
+				err = "normal map PNG encode failed";
+				return false;
+			}
+		}
 
-		std::vector<float> gpos( ( size_t )onv * 3 ), gnrm( ( size_t )onv * 3 ), guv( ( size_t )onv * 2 );
+		// Trellis -> glTF Y-up, preserving handedness. The tangent is a
+		// direction and takes the same rotation; its w is a sign and does not.
+		std::vector<float> gpos( ( size_t )onv * 3 ), gnrm( ( size_t )onv * 3 ), ggu( ( size_t )onv * 2 );
+		std::vector<float> gtan( bake_normal_map ? ( size_t )onv * 4 : 0 );
 		for( uint32_t i = 0; i < onv; ++i ) {
 			gpos[3 * i + 0] = opos[3 * i + 0];
 			gpos[3 * i + 1] = opos[3 * i + 2];
@@ -857,12 +1137,24 @@ namespace
 			gnrm[3 * i + 0] = onrm[3 * i + 0];
 			gnrm[3 * i + 1] = onrm[3 * i + 2];
 			gnrm[3 * i + 2] = -onrm[3 * i + 1];
-			guv[2 * i + 0]	= ouv[2 * i + 0] / ( float )AW;
-			guv[2 * i + 1]	= ouv[2 * i + 1] / ( float )AH;
+			ggu[2 * i + 0]	= guv[2 * i + 0];
+			ggu[2 * i + 1]	= guv[2 * i + 1];
+			if( bake_normal_map ) {
+				gtan[4 * i + 0] = otan[4 * i + 0];
+				gtan[4 * i + 1] = otan[4 * i + 2];
+				gtan[4 * i + 2] = -otan[4 * i + 1];
+				gtan[4 * i + 3] = otan[4 * i + 3] < 0.0f ? -1.0f : 1.0f;
+			}
 		}
-		write_glb( gpos, gnrm, guv, oidx, bc_png, mr_png, transparent, out );
+		write_glb( gpos, gnrm, ggu, gtan, oidx, bc_png, mr_png, nm_png, transparent, out );
 		g_bake_timings.encode = stage_elapsed();
-		GLBLOG( "inpaint + encode done in %.2f s; GLB %zu bytes (%u verts, %u tris; %s PBR atlas)", g_bake_timings.encode, out.size(), onv, ntri, projected_pbr ? "projected" : "vertex" );
+		GLBLOG( "inpaint + encode done in %.2f s; GLB %zu bytes (%u verts, %u tris; %s PBR atlas%s)",
+			g_bake_timings.encode,
+			out.size(),
+			onv,
+			ntri,
+			projected_pbr ? "projected" : "vertex",
+			bake_normal_map ? " + tangent-space normal map" : "" );
 		return true;
 	}
 

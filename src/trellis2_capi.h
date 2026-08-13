@@ -26,7 +26,8 @@
 extern "C" {
 #endif
 
-#define T2_CAPI_ABI_VERSION 14
+/* 15: t2_bake_projected_glb gained normal_map; t2_last_normal_map_stats added. */
+#define T2_CAPI_ABI_VERSION 15
 
 TRELLIS2_CAPI int t2_abi_version();
 
@@ -221,7 +222,15 @@ TRELLIS2_CAPI uint8_t* t2_bake_glb( const float* verts, int n_verts, const int* 
 ** source PBR. This is the CPU counterpart of upstream's cuBVH rebake, backed by
 ** tinybvh, so it is available in every build — unlike t2_prepare_print_mesh,
 ** which still needs CGAL.
-** source_component_filter has the same 0/1/2 values as component_filter above. */
+** source_component_filter has the same 0/1/2 values as component_filter above.
+**
+** normal_map (nonzero = on, and the recommended default) additionally bakes a
+** tangent-space normal map from the source's shading normals and exports the
+** MikkTSpace-compatible TANGENT attribute it was baked against. That is what
+** carries the dense mesh's surface detail onto replacement geometry, which
+** would otherwise have to be normal-baked by hand in a DCC tool. It costs a
+** third full-resolution PNG in the GLB. Use t2_last_normal_map_stats to report
+** how much of it the closest-surface search had to leave flat. */
 TRELLIS2_CAPI uint8_t* t2_bake_projected_glb( const float* target_verts,
 	int													   target_n_verts,
 	const int*											   target_tris,
@@ -233,9 +242,18 @@ TRELLIS2_CAPI uint8_t* t2_bake_projected_glb( const float* target_verts,
 	const float*										   source_pbr,
 	int													   texture_size,
 	int													   source_component_filter,
+	int													   normal_map,
 	int*												   out_len,
 	char*												   err,
 	int													   err_len );
+
+/* Normal map quality of the most recent t2_bake_projected_glb call. A
+** closest-point search is not a bake cage: on thin geometry the nearest surface
+** is the far side of a wall, which would invert the shading lobe. Those texels
+** are left flat and counted here, so a host can surface the loss instead of
+** shipping a quietly wrong map. Both outputs are 0 when no normal map was
+** baked; either pointer may be NULL. */
+TRELLIS2_CAPI void	   t2_last_normal_map_stats( int* out_covered_texels, int* out_rejected_texels );
 TRELLIS2_CAPI void	   t2_free_buffer( uint8_t* buf );
 
 /* Image decode + TRELLIS.2 preprocessing only (no models). out_rgb must hold

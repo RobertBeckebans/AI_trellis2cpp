@@ -27,7 +27,7 @@ static bool rd( FILE* f, std::vector<T>& v, size_t n )
 int main( int argc, char** argv )
 {
 	if( argc < 3 ) {
-		std::fprintf( stderr, "usage: %s in.bin out.glb [texture_size] [--print [alpha_pct offset_pct]]\n", argv[0] );
+		std::fprintf( stderr, "usage: %s in.bin out.glb [texture_size] [--print [alpha_pct offset_pct]] [--quad [target_quads]] [--no-normal-map]\n", argv[0] );
 		return 2;
 	}
 	t2glb::MeshExportOptions opt;
@@ -47,6 +47,11 @@ int main( int argc, char** argv )
 			quad_remesh = true;
 			if( i + 1 < argc && argv[i + 1][0] != '-' )
 				target_quads = std::atoi( argv[++i] );
+		} else if( std::strcmp( argv[i], "--no-normal-map" ) == 0 ) {
+			// The projected bake transfers the dense mesh's surface detail as a
+			// tangent-space normal map by default; this drops it (and the
+			// TANGENT attribute) for a smaller GLB.
+			opt.normal_map = false;
 		} else {
 			opt.texture_size = std::atoi( argv[i] );
 		}

@@ -40,11 +40,18 @@ inside the vendored file itself; the files are never reformatted
 - **Version:** 1.2 (`MESHOPTIMIZER_VERSION 1020`)
 - **Vendored:** a **subset**, not the whole library —
   `meshoptimizer.h`, `allocator.cpp`, `indexgenerator.cpp`,
-  `simplifier.cpp`, `vfetchoptimizer.cpp`.
+  `simplifier.cpp`, `tangentspace.cpp`, `vfetchoptimizer.cpp`. All taken
+  unmodified from the `v1.2` tag (the header is bit-identical to upstream
+  apart from CRLF line endings, which the whole vendored tree uses).
 - **Used by:** `quad_remesh.cpp` — `meshopt_simplify` bounds the input size
   handed to the quad remesher. Note that these files sat in the tree unused and
   uncompiled until then; they were added to a build target for the first time
-  with the quad stage.
+  with the quad stage. `mesh_export.cpp` —
+  `meshopt_generateTangents` (`tangentspace.cpp`) builds the
+  MikkTSpace-compatible tangent basis the normal map bake is baked
+  against, and `meshopt_generateVertexRemapMulti` splits the atlas mesh
+  where per-corner tangents disagree. `tangentspace.cpp` needs no
+  translation unit beyond `allocator.cpp`, which was already vendored.
 - **Notice:** MIT text at the end of `meshoptimizer.h`.
 
 ### tinybvh

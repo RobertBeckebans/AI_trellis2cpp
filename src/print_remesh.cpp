@@ -606,6 +606,7 @@ namespace
 	bool prepare_faces( const std::vector<float>& source_verts,
 		const std::vector<int32_t>&				  source_tris,
 		const std::vector<float>&				  source_pbr,
+		const std::vector<float>*				  source_normals,
 		const std::vector<float>&				  query_points,
 		std::vector<int32_t>&					  faces,
 		std::string&							  err )
@@ -617,6 +618,10 @@ namespace
 		}
 		if( source_pbr.size() != source_nv * 6 ) {
 			err = "PBR projection source has no six-channel material";
+			return false;
+		}
+		if( source_normals && source_normals->size() != source_nv * 3 ) {
+			err = "PBR projection source has no per-vertex normal for every vertex";
 			return false;
 		}
 		if( query_points.size() % 3 != 0 ) {
@@ -649,17 +654,26 @@ namespace
 	// a disagreement between backends is a disagreement about the search and
 	// nothing else. Templated rather than std::function so the per-query call
 	// stays direct.
+	//
+	// source_normals/out_normals are optional and travel on the same hit: the
+	// triangle and the barycentric weights are already in hand, so the shading
+	// normal costs three more interpolated channels rather than a second
+	// traversal.
 	template<typename Surface>
 	bool project_with( const Surface& surface,
 		const std::vector<float>&	  source_verts,
 		const std::vector<int32_t>&	  faces,
 		const std::vector<float>&	  source_pbr,
+		const std::vector<float>*	  source_normals,
 		const std::vector<float>&	  query_points,
 		std::vector<float>&			  out_pbr,
+		std::vector<float>*			  out_normals,
 		std::string&				  err )
 	{
 		const size_t nq = query_points.size() / 3;
 		out_pbr.resize( nq * 6 );
+		if( out_normals )
+			out_normals->resize( nq * 3 );
 
 		std::atomic<bool> overflowed { false };
 
@@ -700,6 +714,19 @@ namespace
 			 for( int ch = 0; ch < 6; ++ch ) {
 				 out_pbr[6 * qi + ( size_t )ch] =
 					 ( float )( wa * source_pbr[6 * ( size_t )ids[0] + ( size_t )ch] + wb * source_pbr[6 * ( size_t )ids[1] + ( size_t )ch] + wc * source_pbr[6 * ( size_t )ids[2] + ( size_t )ch] );
+			 }
+			 if( source_normals ) {
+				 const std::vector<float>& sn = *source_normals;
+				 double					   n[3];
+				 for( int ch = 0; ch < 3; ++ch )
+					 n[ch] = wa * sn[3 * ( size_t )ids[0] + ( size_t )ch] + wb * sn[3 * ( size_t )ids[1] + ( size_t )ch] + wc * sn[3 * ( size_t )ids[2] + ( size_t )ch];
+				 // A barycentric blend of unit vectors is not one, and on a
+				 // crease the three can cancel outright. (0,0,0) then says
+				 // "no direction here" instead of inventing one.
+				 const double len = std::sqrt( n[0] * n[0] + n[1] * n[1] + n[2] * n[2] );
+				 float*		  dst = out_normals->data() + 3 * qi;
+				 for( int ch = 0; ch < 3; ++ch )
+					 dst[ch] = len > 1e-12 ? ( float )( n[ch] / len ) : 0.0f;
 			 }
 		};
 
@@ -746,14 +773,78 @@ namespace
 		if( failed.load() ) {
 			err = failure.empty() ? "PBR projection failed" : std::string( "PBR projection failed: " ) + failure;
 			out_pbr.clear();
+			if( out_normals )
+				out_normals->clear();
 			return false;
 		}
 		if( overflowed.load() ) {
 			err = "PBR projection exceeded the BVH traversal stack";
 			out_pbr.clear();
+			if( out_normals )
+				out_normals->clear();
 			return false;
 		}
 		return true;
+	}
+
+	// One dispatch for all three public entry points, so the backend choice,
+	// the input validation and the error handling exist once.
+	bool project_dispatch( const char* backend,
+		const std::vector<float>&	   source_verts,
+		const std::vector<int32_t>&	   source_tris,
+		const std::vector<float>&	   source_pbr,
+		const std::vector<float>*	   source_normals,
+		const std::vector<float>&	   query_points,
+		std::vector<float>&			   out_pbr,
+		std::vector<float>*			   out_normals,
+		std::string&				   err )
+	{
+		out_pbr.clear();
+		if( out_normals )
+			out_normals->clear();
+		if( !backend )
+			backend = projection_backend();
+
+		const bool want_cgal = 0 == std::strcmp( backend, "cgal" );
+		if( !want_cgal && 0 != std::strcmp( backend, "tinybvh" ) ) {
+			err = std::string( "unknown PBR projection backend: " ) + backend;
+			return false;
+		}
+#ifndef TRELLIS2_USE_CGAL
+		if( want_cgal ) {
+			err = "the CGAL PBR projection backend is unavailable (rebuild with CGAL >= 5.5)";
+			return false;
+		}
+#endif
+
+		std::vector<int32_t> faces;
+		if( !prepare_faces( source_verts, source_tris, source_pbr, source_normals, query_points, faces, err ) )
+			return false;
+		if( query_points.empty() )
+			return true;
+
+		try {
+#ifdef TRELLIS2_USE_CGAL
+			if( want_cgal ) {
+				CgalSurface surface;
+				if( !surface.build( source_verts, faces, err ) )
+					return false;
+				return project_with( surface, source_verts, faces, source_pbr, source_normals, query_points, out_pbr, out_normals, err );
+			}
+#endif
+			TinyBvhSurface surface;
+			if( !surface.build( source_verts, faces, err ) )
+				return false;
+			return project_with( surface, source_verts, faces, source_pbr, source_normals, query_points, out_pbr, out_normals, err );
+		} catch( const std::exception& ex ) {
+			err = std::string( "PBR projection failed: " ) + ex.what();
+		} catch( ... ) {
+			err = "PBR projection failed";
+		}
+		out_pbr.clear();
+		if( out_normals )
+			out_normals->clear();
+		return false;
 	}
 
 } // namespace
@@ -766,50 +857,7 @@ bool project_pbr_backend( const char* backend,
 	std::vector<float>&				  out_pbr,
 	std::string&					  err )
 {
-	out_pbr.clear();
-	if( !backend )
-		backend = projection_backend();
-
-	const bool want_cgal = 0 == std::strcmp( backend, "cgal" );
-	if( !want_cgal && 0 != std::strcmp( backend, "tinybvh" ) ) {
-		err = std::string( "unknown PBR projection backend: " ) + backend;
-		return false;
-	}
-#ifndef TRELLIS2_USE_CGAL
-	if( want_cgal ) {
-		err = "the CGAL PBR projection backend is unavailable (rebuild with CGAL >= 5.5)";
-		return false;
-	}
-#endif
-
-	std::vector<int32_t> faces;
-	if( !prepare_faces( source_verts, source_tris, source_pbr, query_points, faces, err ) )
-		return false;
-	if( query_points.empty() )
-		return true;
-
-	try {
-#ifdef TRELLIS2_USE_CGAL
-		if( want_cgal ) {
-			CgalSurface surface;
-			if( !surface.build( source_verts, faces, err ) )
-				return false;
-			return project_with( surface, source_verts, faces, source_pbr, query_points, out_pbr, err );
-		}
-#endif
-		TinyBvhSurface surface;
-		if( !surface.build( source_verts, faces, err ) )
-			return false;
-		return project_with( surface, source_verts, faces, source_pbr, query_points, out_pbr, err );
-	} catch( const std::exception& ex ) {
-		err = std::string( "PBR projection failed: " ) + ex.what();
-		out_pbr.clear();
-		return false;
-	} catch( ... ) {
-		err = "PBR projection failed";
-		out_pbr.clear();
-		return false;
-	}
+	return project_dispatch( backend, source_verts, source_tris, source_pbr, nullptr, query_points, out_pbr, nullptr, err );
 }
 
 bool project_pbr( const std::vector<float>& source_verts,
@@ -820,6 +868,19 @@ bool project_pbr( const std::vector<float>& source_verts,
 	std::string&							err )
 {
 	return project_pbr_backend( projection_backend(), source_verts, source_tris, source_pbr, query_points, out_pbr, err );
+}
+
+bool project_pbr_and_normals( const char* backend,
+	const std::vector<float>&			  source_verts,
+	const std::vector<int32_t>&			  source_tris,
+	const std::vector<float>&			  source_pbr,
+	const std::vector<float>&			  source_normals,
+	const std::vector<float>&			  query_points,
+	std::vector<float>&					  out_pbr,
+	std::vector<float>&					  out_normals,
+	std::string&						  err )
+{
+	return project_dispatch( backend, source_verts, source_tris, source_pbr, &source_normals, query_points, out_pbr, &out_normals, err );
 }
 
 } // namespace t2print

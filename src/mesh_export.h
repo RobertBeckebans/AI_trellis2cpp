@@ -34,6 +34,13 @@ struct MeshExportOptions {
 	int				padding		 = 2;	 // xatlas chart padding (texels; T2GLB_XATLAS)
 	int				dilate		 = 6;	 // gutter dilation passes (kills UV seams)
 	ComponentFilter components	 = ComponentFilter::RemoveTiny;
+	// Bake a tangent-space normal map and export the MikkTSpace-compatible
+	// TANGENT attribute it was baked against. Honoured only by
+	// mesh_to_projected_glb: there the geometry was replaced, so the source's
+	// surface detail is exactly what is otherwise lost. The plain mesh_to_glb
+	// atlas bake ignores it, since target and source are the same mesh there and
+	// the map would be flat by construction. Disable with T2GLB_NO_NORMALMAP.
+	bool			normal_map = true;
 };
 
 // Sub-stage durations of the last bake, in seconds. The bake is the single
@@ -48,6 +55,14 @@ struct BakeTimings {
 	double		texel_fill		   = 0.0; // writing samples into the atlas
 	double		encode			   = 0.0; // gutter inpaint + PNG + glTF assembly
 	const char* projection_backend = "";
+	// Normal map bake quality, not a duration. A closest-point search is not a
+	// bake cage: on thin geometry the nearest surface is happily the far side of
+	// a wall, which would invert the whole shading lobe. Those texels are left
+	// flat instead, and counted here so the loss is reportable rather than
+	// invisible. normal_texels is the covered-texel total they are a fraction of;
+	// both stay 0 when no normal map was baked.
+	int			normal_texels	= 0;
+	int			normal_rejected = 0;
 };
 
 TRELLIS2_API BakeTimings last_bake_timings();

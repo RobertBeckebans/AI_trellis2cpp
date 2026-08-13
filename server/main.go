@@ -192,6 +192,9 @@ type job struct {
 	exportMesh   *meshData  // cached component-cleanup/print-wrap preview
 	exportKey    string     // component mode + optional Alpha Wrap / quad parameters
 	quadStats    *QuadStats // quality of the last quad remesh, nil when unused
+	// How much of the last normal map bake the closest-surface search had to
+	// leave flat. nil when no normal map was baked.
+	normalMapStats *NormalMapStats
 	glb          []byte     // cached last GLB bake
 	glbKey       string     // "tex-components" the cached GLB was baked with
 	exportMu     sync.Mutex // serializes large export preparation/bakes per job
@@ -818,6 +821,7 @@ type exportOptions struct {
 	quadRemesh      bool
 	targetQuads     int
 	quadAdaptivity  float32
+	normalMap       bool
 }
 
 func parseExportOptions(r *http.Request) exportOptions {
@@ -828,6 +832,7 @@ func parseExportOptions(r *http.Request) exportOptions {
 		offsetRatio:     0.005 / 30, // shell standoff ~alpha/30 (CGAL guideline)
 		targetQuads:     20000,      // density hint for the quad remesher, not a face count
 		quadAdaptivity:  1,          // curvature-adaptive density
+		normalMap:       true,       // transfer the dense mesh's detail, not just its material
 	}
 	if n := int(formUint(r, "tex", uint64(o.textureSize))); n >= 256 && n <= 4096 {
 		o.textureSize = n
@@ -840,6 +845,11 @@ func parseExportOptions(r *http.Request) exportOptions {
 	}
 	o.printWrap = r.FormValue("print") == "1" || r.FormValue("print") == "true"
 	o.quadRemesh = r.FormValue("quad") == "1" || r.FormValue("quad") == "true"
+	// Default-on, so an absent parameter keeps the detail transfer. Only an
+	// explicit "0"/"false" switches it off.
+	if v := r.FormValue("normalmap"); v != "" {
+		o.normalMap = v != "0" && v != "false"
+	}
 	if n := int(formFloat(r, "quads", float32(o.targetQuads))); n >= 100 && n <= 500000 {
 		o.targetQuads = n
 	}
@@ -866,8 +876,15 @@ func (o exportOptions) prepareKey() string {
 	return key
 }
 
+// The normal map changes the GLB but not the prepared geometry, so it belongs
+// here and not in prepareKey. It is only reachable on the projected path, so
+// toggling it in dense mode must not invalidate a cached bake.
 func (o exportOptions) glbKey() string {
-	return fmt.Sprintf("%d-%s", o.textureSize, o.prepareKey())
+	key := fmt.Sprintf("%d-%s", o.textureSize, o.prepareKey())
+	if (o.printWrap || o.quadRemesh) && !o.normalMap {
+		key += "-nonormalmap"
+	}
+	return key
 }
 
 func (s *server) preparedExportMesh(j *job, o exportOptions, sl *stageLog) (*meshData, error) {
@@ -1044,6 +1061,11 @@ func (s *server) handleGLB(w http.ResponseWriter, r *http.Request) {
 			return glb, nil
 		}
 		started := time.Now()
+		// Kept next to the cached GLB rather than written straight to the job:
+		// the cache key encodes whether a normal map was baked, so the stats and
+		// the bytes they describe have to be published together or a later bake
+		// under a different key would leave stale numbers behind.
+		var bakedNormalMap *NormalMapStats
 		// Either replacement path produces new vertices, so the source material
 		// has to be reprojected onto them. This used to check printWrap only,
 		// which silently gave a quad export vertex colours instead of the atlas.
@@ -1056,11 +1078,24 @@ func (s *server) handleGLB(w http.ResponseWriter, r *http.Request) {
 				return nil, fmt.Errorf("load projection source: %w", sourceErr)
 			}
 			if len(source.PBR) == 6*source.NVerts {
-				log.Printf("  projected GLB bake (%d px atlas) on %d tris ...", o.textureSize, mesh.NTris)
-				err = sl.trackLive("projected GLB bake (unwrap + per-texel PBR)", "baking", func() (e error) {
-					glb, e = s.eng.BakeProjectedGLB(mesh, source, o.textureSize, o.componentFilter)
+				detail := ""
+				if o.normalMap {
+					detail = " + tangent-space normal map"
+				}
+				log.Printf("  projected GLB bake (%d px atlas%s) on %d tris ...", o.textureSize, detail, mesh.NTris)
+				err = sl.trackLive("projected GLB bake (unwrap + per-texel PBR"+detail+")", "baking", func() (e error) {
+					glb, e = s.eng.BakeProjectedGLB(mesh, source, o.textureSize, o.componentFilter, o.normalMap)
 					return
 				})
+				if err == nil && o.normalMap {
+					ns := s.eng.LastNormalMapStats()
+					bakedNormalMap = &ns
+					if ns.CoveredTexels > 0 {
+						log.Printf("  normal map: %d of %d covered texels left flat (%.1f%%)",
+							ns.RejectedTexels, ns.CoveredTexels,
+							100*float64(ns.RejectedTexels)/float64(ns.CoveredTexels))
+					}
+				}
 			} else {
 				err = sl.track("GLB bake (vertex colours)", func() (e error) {
 					glb, e = s.eng.BakeGLB(mesh, o.textureSize, 2 /*already prepared*/)
@@ -1088,7 +1123,7 @@ func (s *server) handleGLB(w http.ResponseWriter, r *http.Request) {
 		sl.add("- texel fill", time.Duration(float64(bt.TexelFill)*float64(time.Second)))
 		sl.add("- inpaint + PNG + glTF", time.Duration(float64(bt.Encode)*float64(time.Second)))
 		j.mu.Lock()
-		j.glb, j.glbKey = glb, key
+		j.glb, j.glbKey, j.normalMapStats = glb, key, bakedNormalMap
 		j.mu.Unlock()
 		log.Printf("job %s baked %.1f MiB GLB in %.1fs (%s)", j.ID,
 			float64(len(glb))/(1<<20), time.Since(started).Seconds(), key)
@@ -1111,6 +1146,17 @@ func (s *server) handleGLB(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "model/gltf-binary")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"trellis2-%s.glb\"", j.ID))
 	w.Header().Set("ETag", fmt.Sprintf("\"%s-%s\"", j.ID, key))
+	// Normal map quality travels as headers, like the quad statistics: the body
+	// is the binary asset, and the viewer cannot show the map itself, so these
+	// numbers are the only feedback on how much detail actually transferred.
+	j.mu.Lock()
+	nms := j.normalMapStats
+	j.mu.Unlock()
+	if nms != nil {
+		w.Header().Set("X-Normal-Map", "1")
+		w.Header().Set("X-Normal-Map-Texels", strconv.Itoa(int(nms.CoveredTexels)))
+		w.Header().Set("X-Normal-Map-Rejected", strconv.Itoa(int(nms.RejectedTexels)))
+	}
 	// ServeContent supplies Content-Length plus byte-range support. Browsers can
 	// stream these 100+ MiB assets directly to disk and resume an interrupted
 	// transfer instead of JavaScript copying the whole response into a Blob.

@@ -79,6 +79,54 @@ void make_grid( int n, std::vector<float>& verts, std::vector<int32_t>& tris, st
 	}
 }
 
+// A UV sphere, whose exact normal at every vertex is the unit position. That
+// makes the projected shading normal checkable against a closed form instead of
+// against another approximation. The poles emit degenerate triangles on purpose
+// — prepare_faces has to filter them, exactly as it does for the dense meshes.
+void make_sphere( int nu, int nv, std::vector<float>& verts, std::vector<int32_t>& tris, std::vector<float>& pbr, std::vector<float>& normals )
+{
+	verts.clear();
+	tris.clear();
+	pbr.clear();
+	normals.clear();
+	const double pi = 3.14159265358979323846;
+	for( int j = 0; j <= nv; ++j ) {
+		const double theta = pi * ( double )j / ( double )nv;
+		for( int i = 0; i <= nu; ++i ) {
+			const double phi = 2.0 * pi * ( double )i / ( double )nu;
+			const float	 x	 = ( float )( std::sin( theta ) * std::cos( phi ) );
+			const float	 y	 = ( float )std::cos( theta );
+			const float	 z	 = ( float )( std::sin( theta ) * std::sin( phi ) );
+			verts.push_back( x );
+			verts.push_back( y );
+			verts.push_back( z );
+			normals.push_back( x );
+			normals.push_back( y );
+			normals.push_back( z );
+			pbr.push_back( 0.5f * x + 0.5f );
+			pbr.push_back( 0.5f * y + 0.5f );
+			pbr.push_back( 0.5f * z + 0.5f );
+			pbr.push_back( 0.25f );
+			pbr.push_back( 0.75f );
+			pbr.push_back( 1.0f );
+		}
+	}
+	for( int j = 0; j < nv; ++j ) {
+		for( int i = 0; i < nu; ++i ) {
+			const int32_t a = j * ( nu + 1 ) + i;
+			const int32_t b = a + 1;
+			const int32_t c = a + ( nu + 1 );
+			const int32_t d = c + 1;
+			tris.push_back( a );
+			tris.push_back( c );
+			tris.push_back( d );
+			tris.push_back( a );
+			tris.push_back( d );
+			tris.push_back( b );
+		}
+	}
+}
+
 } // namespace
 
 int main()
@@ -211,11 +259,16 @@ int main()
 				}
 			}
 			// Both search the same filtered triangle set and interpolate with the
-			// same code, so the only legitimate difference is which triangle wins
-			// a near-tie at a shared edge. With a continuous source field that
-			// costs far less than this bound; a larger deviation means the two
-			// searches disagree about the nearest surface, which is a bug and not
-			// a tolerance to widen.
+			// same code, so the legitimate difference is in where each lands on
+			// the winning triangle: CGAL constructs the closest point with exact
+			// predicates in double, tinybvh works in float, and the barycentric
+			// weights inherit that. It is a small everywhere-present rounding
+			// difference rather than the occasional shared-edge tie this comment
+			// used to claim — the normal section below counts the affected
+			// samples and finds roughly half of them. A deviation past this
+			// bound is a different matter: it means the two searches disagree
+			// about the nearest surface, which is a bug and not a tolerance to
+			// widen.
 			const double tolerance = 1e-4;
 			std::printf( "backend agreement: max |tinybvh - cgal| = %.3g over %zu samples\n", worst, tiny.size() );
 			if( worst > tolerance ) {
@@ -224,6 +277,139 @@ int main()
 			}
 		} else {
 			std::printf( "backend comparison skipped: %s\n", err.c_str() );
+		}
+	}
+
+	// ---------------------------------------------------------------------
+	// Shading normals off the same hit. This is what a tangent-space normal map
+	// bake reads, so it is checked against a closed form (the unit sphere) and
+	// not against another approximation.
+	// ---------------------------------------------------------------------
+	{
+		std::vector<float>	 sv, sp, sn;
+		std::vector<int32_t> st;
+		make_sphere( 96, 48, sv, st, sp, sn );
+
+		// Queries on a shell outside the sphere: the closest surface point is
+		// essentially radial, so the exact normal there is the query direction.
+		std::vector<float> q, dir;
+		for( uint32_t i = 0; i < 4096; ++i ) {
+			const float x = unit( i * 7 + 1 ) * 2.0f - 1.0f;
+			const float y = unit( i * 7 + 3 ) * 2.0f - 1.0f;
+			const float z = unit( i * 7 + 5 ) * 2.0f - 1.0f;
+			const float l = std::sqrt( x * x + y * y + z * z );
+			if( l < 1e-3f )
+				continue; // no direction to speak of
+			dir.push_back( x / l );
+			dir.push_back( y / l );
+			dir.push_back( z / l );
+			q.push_back( 1.3f * x / l );
+			q.push_back( 1.3f * y / l );
+			q.push_back( 1.3f * z / l );
+		}
+
+		std::vector<float> pbr_ref;
+		if( !t2print::project_pbr( sv, st, sp, q, pbr_ref, err ) ) {
+			std::fprintf( stderr, "project_pbr on the sphere failed: %s\n", err.c_str() );
+			return 1;
+		}
+		std::vector<float> pbr_with_n, nrm;
+		if( !t2print::project_pbr_and_normals( nullptr, sv, st, sp, sn, q, pbr_with_n, nrm, err ) ) {
+			std::fprintf( stderr, "project_pbr_and_normals failed: %s\n", err.c_str() );
+			return 1;
+		}
+		if( nrm.size() != q.size() || pbr_with_n.size() != pbr_ref.size() ) {
+			std::fprintf( stderr, "project_pbr_and_normals returned %zu normals / %zu pbr for %zu queries\n", nrm.size() / 3, pbr_with_n.size() / 6, q.size() / 3 );
+			return 1;
+		}
+		// Asking for normals must not move the material by a single bit — the
+		// colour bake and the normal bake read the very same hit.
+		if( pbr_with_n != pbr_ref ) {
+			std::fprintf( stderr, "requesting normals perturbed the PBR channels\n" );
+			return 1;
+		}
+
+		// Judge normals by angle, not by raw component: for a unit vector the
+		// angle is the quantity with a meaning, and it is what the bake reads.
+		// The tessellation bound below is the closed-form budget — a 96x48
+		// sphere has ~3.75 deg facets and the interpolated normal stays inside
+		// that cone, so anything past a fraction of it means the wrong triangle
+		// won the search or the weights are not the ones the material uses.
+		const double pi_deg		 = 180.0 / 3.14159265358979323846;
+		auto		 vs_analytic = [&]( const std::vector<float>& n, double& worst_deg, double& worst_len ) {
+			worst_deg = 0.0;
+			worst_len = 0.0;
+			for( size_t i = 0; i < n.size() / 3; ++i ) {
+				double dot = 0.0, len2 = 0.0;
+				for( int k = 0; k < 3; ++k ) {
+					dot += ( double )n[3 * i + k] * dir[3 * i + k];
+					len2 += ( double )n[3 * i + k] * n[3 * i + k];
+				}
+				worst_len = std::max( worst_len, std::fabs( std::sqrt( len2 ) - 1.0 ) );
+				worst_deg = std::max( worst_deg, std::acos( std::max( -1.0, std::min( 1.0, dot ) ) ) * pi_deg );
+			}
+		};
+		double worst_deg = 0.0, worst_len = 0.0;
+		vs_analytic( nrm, worst_deg, worst_len );
+		std::printf( "sphere normals: worst %.4g deg off analytic, worst |len-1| = %.3g over %zu samples\n", worst_deg, worst_len, nrm.size() / 3 );
+		if( worst_len > 1e-5 ) {
+			std::fprintf( stderr, "projected normals are not unit length (worst |len-1| = %.3g)\n", worst_len );
+			return 1;
+		}
+		if( worst_deg > 1.0 ) {
+			std::fprintf( stderr, "projected normal deviates from the analytic sphere normal by %.4g deg\n", worst_deg );
+			return 1;
+		}
+
+		// Cross-backend. Measured rather than assumed: the two disagree on
+		// roughly half the samples, but by ~0.02 deg at worst. That is not the
+		// shared-edge tie one might expect — it is everywhere-present, because
+		// CGAL constructs the closest point with exact predicates in double
+		// while tinybvh works in float, so the barycentric weights differ by
+		// rounding across the whole field. (The material comparison further up
+		// sees the same effect; it only ever looked at the maximum, which is
+		// why it reads as a tie there.)
+		//
+		// So the count carries no signal and is reported, not asserted. What is
+		// asserted is that *both* backends hit the analytic normal within the
+		// same budget — a wrong-surface pick on a sphere would miss it by
+		// degrees, which no rounding argument can absorb.
+		std::vector<float> cgal_pbr, cgal_nrm;
+		if( t2print::project_pbr_and_normals( "cgal", sv, st, sp, sn, q, cgal_pbr, cgal_nrm, err ) ) {
+			double cgal_deg = 0.0, cgal_len = 0.0;
+			vs_analytic( cgal_nrm, cgal_deg, cgal_len );
+			const size_t samples	 = nrm.size() / 3;
+			double		 worst_pair	 = 0.0;
+			size_t		 disagreeing = 0;
+			for( size_t i = 0; i < samples; ++i ) {
+				double dot = 0.0;
+				for( int k = 0; k < 3; ++k )
+					dot += ( double )nrm[3 * i + k] * cgal_nrm[3 * i + k];
+				const double deg = std::acos( std::max( -1.0, std::min( 1.0, dot ) ) ) * pi_deg;
+				worst_pair		 = std::max( worst_pair, deg );
+				if( deg > 1e-3 )
+					++disagreeing;
+			}
+			std::printf( "backend normals: cgal %.4g deg off analytic; tinybvh vs cgal worst %.4g deg, %zu of %zu samples differ at all\n", cgal_deg, worst_pair, disagreeing, samples );
+			if( cgal_len > 1e-5 || cgal_deg > 1.0 ) {
+				std::fprintf( stderr, "the cgal backend's normals miss the analytic sphere by %.4g deg (|len-1| = %.3g)\n", cgal_deg, cgal_len );
+				return 1;
+			}
+			if( worst_pair > 0.05 ) {
+				std::fprintf( stderr, "backends disagree on the shading normal by %.4g deg, past a rounding difference\n", worst_pair );
+				return 1;
+			}
+		} else {
+			std::printf( "normal backend comparison skipped: %s\n", err.c_str() );
+		}
+
+		// A normal array that does not cover every source vertex is a caller bug
+		// and must be refused, not silently indexed past the end.
+		std::vector<float> short_normals( sn.begin(), sn.end() - 3 );
+		std::vector<float> unused_pbr, unused_nrm;
+		if( t2print::project_pbr_and_normals( nullptr, sv, st, sp, short_normals, q, unused_pbr, unused_nrm, err ) ) {
+			std::fprintf( stderr, "a truncated source normal array was accepted\n" );
+			return 1;
 		}
 	}
 

@@ -68,4 +68,26 @@ TRELLIS2_API bool		 project_pbr( const std::vector<float>& source_verts,
 		   std::vector<float>&									out_pbr,
 		   std::string&											err );
 
+// Same closest-surface search as project_pbr, but additionally returns the
+// source's shading normal at each hit.  The hit already carries a triangle and
+// barycentric weights, so this interpolates three more channels rather than
+// running a second traversal — which is what makes a normal map bake cheap.
+//
+// source_normals is 3*source_nv unit vectors (as t2glb::PreparedMesh::normals
+// supplies them); out_normals receives three floats per query.  The result is
+// renormalized, because a barycentric blend of unit vectors is not one.  A hit
+// whose interpolated normal has no usable length yields (0,0,0), which callers
+// must treat as "no sample" rather than as a direction.
+//
+// Pass nullptr for `backend` to use the build-time default.
+TRELLIS2_API bool		 project_pbr_and_normals( const char* backend,
+		   const std::vector<float>&						  source_verts,
+		   const std::vector<int32_t>&						  source_tris,
+		   const std::vector<float>&						  source_pbr,
+		   const std::vector<float>&						  source_normals,
+		   const std::vector<float>&						  query_points,
+		   std::vector<float>&								  out_pbr,
+		   std::vector<float>&								  out_normals,
+		   std::string&										  err );
+
 } // namespace t2print

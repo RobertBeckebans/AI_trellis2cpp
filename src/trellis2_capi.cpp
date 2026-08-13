@@ -1335,6 +1335,7 @@ uint8_t* t2_bake_projected_glb( const float* target_verts,
 	const float*							 source_pbr,
 	int										 texture_size,
 	int										 source_component_filter,
+	int										 normal_map,
 	int*									 out_len,
 	char*									 err,
 	int										 err_len )
@@ -1353,6 +1354,7 @@ uint8_t* t2_bake_projected_glb( const float* target_verts,
 	if( texture_size > 0 )
 		opt.texture_size = texture_size;
 	opt.components = ( t2glb::ComponentFilter )source_component_filter;
+	opt.normal_map = normal_map != 0;
 	std::vector<uint8_t> glb;
 	std::string			 e;
 	if( !t2glb::mesh_to_projected_glb(
@@ -1369,6 +1371,15 @@ uint8_t* t2_bake_projected_glb( const float* target_verts,
 	if( out_len )
 		*out_len = ( int )glb.size();
 	return buf;
+}
+
+void t2_last_normal_map_stats( int* out_covered_texels, int* out_rejected_texels )
+{
+	const t2glb::BakeTimings t = t2glb::last_bake_timings();
+	if( out_covered_texels )
+		*out_covered_texels = t.normal_texels;
+	if( out_rejected_texels )
+		*out_rejected_texels = t.normal_rejected;
 }
 
 void t2_free_buffer( uint8_t* buf )

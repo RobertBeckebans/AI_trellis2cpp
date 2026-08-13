@@ -257,6 +257,12 @@
         <input id="quadremesh" type="checkbox" disabled>
         <span>quad retopology (mid-poly)</span>
       </label>
+      <label class="idle-option" for="normalmap" id="normalmaplabel"
+             title="bake the dense mesh's surface detail into a tangent-space normal map, with the MikkTSpace-compatible TANGENT attribute it was baked against. Applies to the downloaded GLB only - this viewer does not render normal maps. Costs a third texture in the file.">
+        <input id="normalmap" type="checkbox" checked>
+        <span>bake normal map (download only)</span>
+      </label>
+      <div id="normalmapstats" style="flex:1 1 100%;opacity:.65;font-size:.85em"></div>
       <div class="row" id="quadremeshsettings" hidden>
         <div style="flex:1 1 100%">
           <label for="quaddensity" title="density hint, not an exact face count: it feeds a voxel size and the adaptivity setting moves the result away from it">target quads <output id="quaddensityval" style="opacity:.7"></output></label>
@@ -883,6 +889,10 @@ function exportQuery() {
     q.set("offset", (a / 30).toFixed(4));   // offset tracks detail (CGAL ~alpha/30)
     q.set("tex", $("wraptex").value);
   }
+  // Default-on server side, so only the "off" case has to be transmitted. The
+  // map is baked from the dense source onto replacement geometry, so it is
+  // meaningless without one of the two replacement stages above.
+  if (!$("normalmap").checked) q.set("normalmap", "0");
   return q;
 }
 
@@ -901,7 +911,38 @@ function updateDetailLabel() {
 }
 updateDetailLabel();
 
+// The normal map is a transfer from the dense source onto *replacement*
+// geometry, so it only means anything when one of the two replacement stages is
+// on. Disable it otherwise rather than letting it look like a no-op setting.
+function updateNormalMapAvailability() {
+  const usable = $("printwrap").checked || $("quadremesh").checked;
+  $("normalmap").disabled = !usable;
+  $("normalmaplabel").style.opacity = usable ? "" : ".45";
+  $("normalmaplabel").title = usable
+    ? "bake the dense mesh's surface detail into a tangent-space normal map, with the MikkTSpace-compatible TANGENT attribute it was baked against. Applies to the downloaded GLB only - this viewer does not render normal maps. Costs a third texture in the file."
+    : "needs the print wrap or quad retopology: without replacement geometry there is nothing to transfer detail onto";
+  if (!usable) $("normalmapstats").textContent = "";
+}
+
+// Filled from the X-Normal-Map-* headers of the GLB preflight. A closest-point
+// transfer is not a bake cage, so on thin geometry part of the map is
+// deliberately left flat; showing the share is the only way a user finds out.
+function showNormalMapStats(headers) {
+  if (!headers || headers.get("X-Normal-Map") !== "1") {
+    $("normalmapstats").textContent = "";
+    return;
+  }
+  const covered = +headers.get("X-Normal-Map-Texels") || 0;
+  const rejected = +headers.get("X-Normal-Map-Rejected") || 0;
+  if (!covered) { $("normalmapstats").textContent = ""; return; }
+  const pct = (100 * rejected / covered).toFixed(1);
+  $("normalmapstats").textContent = rejected
+    ? `normal map: ${pct}% of ${covered.toLocaleString()} texels left flat — the nearest source surface faced away there (thin geometry)`
+    : `normal map: all ${covered.toLocaleString()} covered texels carry detail`;
+}
+
 function exportSettingsChanged() {
+  updateNormalMapAvailability();
   if (previewingExport) showOriginalExport();
   if (!glbJobId) return;
   if ($("printwrap").checked && $("quadremesh").checked) {
@@ -953,6 +994,12 @@ $("printwrap").addEventListener("change", () => {
   $("printwrapsettings").hidden = !$("printwrap").checked;
   exportSettingsChanged();
 });
+$("normalmap").addEventListener("change", () => {
+  // The figures describe the previous bake, which the toggle just invalidated.
+  $("normalmapstats").textContent = "";
+  exportSettingsChanged();
+});
+updateNormalMapAvailability();
 $("wrapdetail").addEventListener("input", updateDetailLabel);   // live readout while dragging
 $("wrapdetail").addEventListener("change", exportSettingsChanged);
 $("wraptex").addEventListener("change", exportSettingsChanged);
@@ -1086,6 +1133,7 @@ $("dglb").addEventListener("click", async () => {
     const r = await fetch(url, { method: "HEAD" });
     if (!r.ok) throw new Error(r.headers.get("x-trellis-error") || `server returned HTTP ${r.status}`);
     const bytes = Number(r.headers.get("content-length")) || 0;
+    showNormalMapStats(r.headers);
     const a = document.createElement("a");
     a.href = url;
     a.download = `trellis2-${glbJobId}.glb`;

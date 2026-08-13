@@ -60,6 +60,8 @@ add_library(trellis2
     third_party/meshoptimizer/allocator.cpp
     third_party/meshoptimizer/indexgenerator.cpp
     third_party/meshoptimizer/simplifier.cpp
+    # mesh_export.cpp: MikkTSpace-compatible tangents for the normal map bake.
+    third_party/meshoptimizer/tangentspace.cpp
     third_party/meshoptimizer/vfetchoptimizer.cpp)
 # The library headers live in src/; consumers include them unqualified
 # ("trellis2.h"), so the directory itself is what is published, not the repo root.
