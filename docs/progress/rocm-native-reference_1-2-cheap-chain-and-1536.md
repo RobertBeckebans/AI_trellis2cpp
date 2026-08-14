@@ -183,6 +183,40 @@ its own terms; the env switch is a diagnostic, not a shipping answer.
 **`dino` is untouched by both.** Identical numbers with graphs disabled and
 exact softmax (`embd` 4.618e-04, `cond` 1.623e-04). It stands alone.
 
+### Follow-up fix: attention is size-gated again
+
+The root cause is in ggml, not in the port: the CUDA/HIP flash kernels
+accumulate in F16 and **ignore `ggml_flash_attn_ext_set_prec()` entirely** —
+`ggml_flash_attn_ext_get_prec` has no caller under `ggml-cuda`, and the only
+readers of `GGML_PREC_F32` there are `ggml_cuda_mul_mat_cublas` and `mmvf.cu`.
+`sdpa_auto()` has been requesting F32 all along; nothing listens. There is also
+no F32 flash kernel to route to (`fattn-mma-f16`, `fattn-tile`, `fattn-vec`), so
+a real fix is upstream kernel work.
+
+The f16 question was worth checking, since the shipped GGUFs are f16 — but the
+weight format does not mask it. The forward measures 5.198e-02 under flash for
+**both** f16 and f32 weights, while f16 + exact is 5.463e-04, inside the 2e-3
+gate. Flash outweighs the weight quantisation by ~95×.
+
+So `sdpa_auto()` now uses exact while the score matrix stays under a cap
+(default 1 GiB — the gate that existed before flash became unconditional) and
+flash above it. SS-flow (~0.8 GiB) and 512-SLAT (~0.4 GiB) get exact; both HR
+tiers (~7.7 GB at 1024, >100 GB at 1536) keep flash, where exact was never an
+option. A free-VRAM check on top can only *lower* exact usage, so a smaller card
+degrades to the previous behaviour instead of hitting the `alloc_graph` failure
+that motivated making flash unconditional — it prints a note when it fires,
+because it makes the numerics depend on machine state.
+`TRELLIS2_SDPA_EXACT` / `TRELLIS2_SDPA_FLASH` pin one path;
+`TRELLIS2_SDPA_EXACT_MAX_MB` moves the cap (`0` = always flash).
+
+Full suite after the change: **13 passed, 2 skipped, 3 failed** (from 5).
+`ss_flow_forward` and `ss_sample` are green, `cascade` unaffected.
+
+This also revises a documented belief: `VERIFICATION.md` attributed the GPU
+sampler's ~0.1 rel-L2 to chaotic amplification of per-step fp differences. With
+exact attention the GPU sampler reproduces the CPU one (99.9 % sign agreement
+against the documented 99.85 %), so that drift was the flash kernel, not chaos.
+
 ### Follow-up fix: the graph workaround moved into the library
 
 The workaround already existed — in `server/main.go` alone. That is why the demo
@@ -351,20 +385,21 @@ measurement.
 
 Ranked by what they block:
 
-1. **ggml's ROCm flash-attention kernel costs ~5 % relative error per flow
-   forward**, and flash is the default for every one of them. This degrades real
-   output on this card, not just tests. Cannot be fixed by switching the default
-   back: the exact path cannot hold the cascade's HR attention.
-2. **ggml's HIP graph capture crashes the sampler** (`0xC00000FD`), reproducible
-   from `examples/ss_sample.exe`. `GGML_CUDA_DISABLE_GRAPHS=1` avoids it.
-3. **`chunked_decode` fails for every non-default block size**, including a
+1. **`chunked_decode` fails for every non-default block size**, including a
    voxel-count mismatch. Closest to the immediately preceding encoder-chunking
-   commit, and this fork's own feature.
-4. **The `dino` patch embedding is ~f16 accurate**, independent of backend,
+   commit, and this fork's own feature. Now the largest open failure.
+2. **The `dino` patch embedding is ~f16 accurate**, independent of backend,
    graphs and attention path.
-5. **`tests/test_ss_dec.cpp` should load the decoder on CPU**, as
+3. **`tests/test_ss_dec.cpp` should load the decoder on CPU**, as
    `trellis2_capi.cpp` already does. One argument; turns a crash into the
-   6.172e-07 pass it already achieves.
+   6.172e-07 pass it already achieves. Deliberately not done here — it would
+   also hide that the stage has no working GPU path, which is a judgement call
+   for the reviewer.
+4. **The HR cascade still runs on flash**, so its ~5e-02 stands wherever the
+   exact matrix cannot fit. Only an F32-accumulating flash kernel fixes that,
+   which is upstream ggml work.
+5. **ggml ignores `ggml_flash_attn_ext_set_prec()`** on CUDA/HIP. Worth raising
+   upstream regardless of what this fork does.
 6. **The reduction branch is still unreferenced.** Forcing it needs a second dump
    with a lower `--max-num-tokens` plus test wiring to consume it; outside this
    plan's phase 2.

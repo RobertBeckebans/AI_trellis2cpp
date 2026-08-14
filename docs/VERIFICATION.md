@@ -64,28 +64,49 @@ ctest --test-dir build                  # full parity (needs ggufs/ + dumps/)
 
 Notes:
 - **Platform caveat — the table above is a CUDA/Linux measurement.** The first
-  full run on Windows/HIP (Radeon AI PRO R9700, 2026-08-14) does **not**
-  reproduce all of it. `ss_dec` cannot run on the HIP backend at all (`CONV_3D`
-  unsupported → `GGML_ASSERT`), `ss_sample` stack-overflows there, and
-  `ss_flow_forward` measures rel-L2 5.2e-02 on HIP against 2.4e-04 on CPU —
-  where the CPU number reproduces this table exactly. `dino` misses its ≤ 7e-07
-  row on both backends (`embd` 4.6e-04, `cond` 1.6e-04), and `chunked_decode`
-  fails for every non-default block size. Details and the CPU/HIP split per test
-  in `docs/progress/rocm-native-reference_1-2-cheap-chain-and-1536.md`. Treat a
-  row here as validated on the backend it was taken on, not as a platform
-  guarantee.
-- **Flash attention (default for every flow forward).** `sdpa_auto()` uses
-  `ggml_flash_attn_ext` for both flow DiTs at all token counts;
-  `TRELLIS2_SDPA_EXACT` restores the old materialized `[L_k, L_q, heads]`
-  softmax. Flash is bit-faithful to full softmax on CPU (SS-flow 2.4e-4, SLAT
-  2.9e-4 — identical to exact, so the tap parity above is unaffected) but incurs
-  ~3e-3 rel-L2 on the CUDA F16-MMA kernel. It was already required for the HR
-  cascade (49,152-token attention fits on 16 GB vs a 108 GiB exact matrix); it
-  is now the default because on the GPU it is also ~30 % faster per forward and
-  O(L) memory — the exact path's 805 MB SS-flow score matrix `alloc_graph`-fails
-  when the resident pipeline leaves little free VRAM. Was previously gated to
-  score matrices >1 GiB (i.e. only the HR stage). See docs/PLAN.md for the
-  per-stage runtime profile.
+  full run on Windows/HIP (Radeon AI PRO R9700, 2026-08-14) did not reproduce
+  all of it; three of the five failures have since been addressed. Still open
+  there: `ss_dec` cannot run on the HIP backend at all (`CONV_3D` unsupported →
+  `GGML_ASSERT`; the pipeline already pins that stage to the CPU, only the test
+  does not), `dino` misses its ≤ 7e-07 row on both backends (`embd` 4.6e-04,
+  `cond` 1.6e-04), and `chunked_decode` fails for every non-default block size.
+  Fixed: the HIP graph crash (`ss_sample`) and the flash-attention divergence
+  (`ss_flow_forward`, `ss_sample`) — see the notes below. Details and the
+  CPU/HIP split per test in
+  `docs/progress/rocm-native-reference_1-2-cheap-chain-and-1536.md`. Treat a row
+  here as validated on the backend it was taken on, not as a platform guarantee.
+- **Flash attention (size-gated, not unconditional).** `sdpa_auto()` uses the
+  exact materialized `[L_k, L_q, heads]` softmax while that matrix stays under
+  1 GiB, and `ggml_flash_attn_ext` above it. In practice: SS-flow (~0.8 GiB) and
+  512-SLAT (~0.4 GiB) are exact; both HR cascade tiers (~7.7 GB at 1024,
+  >100 GB at 1536) are flash, where exact is not an option at all.
+  `TRELLIS2_SDPA_EXACT` / `TRELLIS2_SDPA_FLASH` pin one path,
+  `TRELLIS2_SDPA_EXACT_MAX_MB` moves the gate (`0` = always flash). A free-VRAM
+  check can only *lower* exact usage, so a card that cannot afford the matrix
+  degrades to flash rather than failing to allocate; it prints a note when it
+  does, because it makes the numerics depend on machine state.
+
+  Flash is not free on GPU: ggml's CUDA/HIP kernels accumulate in F16 and ignore
+  `ggml_flash_attn_ext_set_prec()` outright — nothing under `ggml-cuda` reads
+  `GGML_PREC_F32` for this op, so the port's request goes nowhere. On CPU it is
+  bit-faithful, so the choice only matters on GPU. Measured on ROCm/gfx1201,
+  identical for f16 and f32 weights (i.e. the weight format does not mask it):
+
+  | | flash | exact |
+  |---|---|---|
+  | SS-flow forward | 5.198e-02 | 3.050e-06 |
+  | 12-step sampler | 2.847e-01 | 2.135e-03 |
+  | latent sign agreement | 89.8 % | 99.9 % |
+
+  About one latent voxel in ten changes sign under flash, which is the coarse
+  occupancy structure rather than a rounding digit — hence the gate. Note this
+  also revises the "sampler drift" note below: with exact attention the GPU
+  reproduces the CPU sampler (99.9 % against the documented 99.85 %), so the
+  ~0.1 rel-L2 previously attributed to chaotic amplification was the flash
+  kernel. It was flash-unconditional for one release, on the grounds of ~30 %
+  speed and the exact path's `alloc_graph` failures under VRAM pressure; the
+  VRAM check now covers that case without costing accuracy elsewhere. See
+  docs/PLAN.md for the per-stage runtime profile.
 - **TF32 matters.** PyTorch's default CUDA matmul/attention uses TF32 (≈10-bit
   mantissa) and reduced-precision flash SDPA, which shows up as ~1e-3 relative
   error versus true fp32. `scripts/ref_common.py` disables it so the golden

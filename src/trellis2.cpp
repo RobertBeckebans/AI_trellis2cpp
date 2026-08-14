@@ -476,21 +476,66 @@ namespace
 // Scaled dot-product attention via ggml_flash_attn_ext (tiled online softmax,
 // O(L) memory). q3/k3/v3 are [head_dim, n_head, L]; returns [n_head*head_dim, L_q].
 //
-// Flash is the default for both flow DiTs: it is bit-faithful to full softmax on
-// CPU with F32 accumulation (validated to ~1e-4 rel-L2, identical to the exact
-// materialized path) but avoids the [L_k, L_q, heads] score matrix — which is
-// both the memory wall (the HR cascade's ~49k voxels would need >100 GB) and,
-// on GPU, ~30% of the forward's wall time (the softmax + the permute/cont copies
-// around it). On the CUDA F16-MMA kernel flash costs ~3e-3 rel-L2 per forward,
-// immaterial to the final mesh. Set TRELLIS2_SDPA_EXACT to force the old
-// materialized path (e.g. to reproduce the tightest GPU numbers).
+// Flash avoids the [L_k, L_q, heads] score matrix, which is both the memory wall
+// (the HR cascade's ~49k voxels would need >100 GB) and, on GPU, ~30% of the
+// forward's wall time. On CPU it is bit-faithful to full softmax with F32
+// accumulation, so the choice only matters on GPU.
+//
+// It is NOT free there. ggml's CUDA/HIP flash kernels accumulate in F16 and
+// ignore ggml_flash_attn_ext_set_prec() entirely — nothing under ggml-cuda reads
+// GGML_PREC_F32 for this op — so the F32 request below is a hint that currently
+// goes nowhere. Measured on ROCm/gfx1201 against the fp32 reference (SS-flow,
+// f16 and f32 weights alike, 2026-08-14):
+//
+//     forward   flash 5.198e-02   exact 3.050e-06
+//     sampler   flash 2.847e-01   exact 2.135e-03
+//     sign      flash 89.8 %      exact 99.9 %   (the decoder thresholds z_s at 0)
+//
+// Roughly one latent voxel in ten changes sign, i.e. the coarse occupancy
+// structure rather than a rounding digit. So exact is used wherever its score
+// matrix is affordable and flash only where it is not, which restores the gating
+// that was in place before flash became unconditional.
+//
+// The cap is deterministic (default 1 GiB, TRELLIS2_SDPA_EXACT_MAX_MB overrides,
+// 0 disables exact entirely). The free-VRAM check on top of it only ever
+// *reduces* exact usage, so a smaller card degrades to today's behaviour instead
+// of failing to allocate — the failure mode that made flash unconditional. That
+// check makes the choice depend on machine state, so it says so when it fires;
+// TRELLIS2_SDPA_EXACT / TRELLIS2_SDPA_FLASH pin one path for reproducibility.
 ggml_tensor* sdpa_auto( ggml_context* ctx, ggml_tensor* q3, ggml_tensor* k3, ggml_tensor* v3, int C, float scale )
 {
-	ggml_tensor*	  qp = ggml_cont( ctx, ggml_permute( ctx, q3, 0, 2, 1, 3 ) ); // [hd, Lq, H]
-	ggml_tensor*	  kp = ggml_cont( ctx, ggml_permute( ctx, k3, 0, 2, 1, 3 ) ); // [hd, Lk, H]
-	ggml_tensor*	  vp = ggml_cont( ctx, ggml_permute( ctx, v3, 0, 2, 1, 3 ) ); // [hd, Lk, H]
+	ggml_tensor*		qp = ggml_cont( ctx, ggml_permute( ctx, q3, 0, 2, 1, 3 ) ); // [hd, Lq, H]
+	ggml_tensor*		kp = ggml_cont( ctx, ggml_permute( ctx, k3, 0, 2, 1, 3 ) ); // [hd, Lk, H]
+	ggml_tensor*		vp = ggml_cont( ctx, ggml_permute( ctx, v3, 0, 2, 1, 3 ) ); // [hd, Lk, H]
 
-	static const bool exact = std::getenv( "TRELLIS2_SDPA_EXACT" ) != nullptr;
+	static const bool	force_exact = std::getenv( "TRELLIS2_SDPA_EXACT" ) != nullptr;
+	static const bool	force_flash = std::getenv( "TRELLIS2_SDPA_FLASH" ) != nullptr;
+	static const size_t exact_cap	= []() -> size_t {
+		  if( const char* env = std::getenv( "TRELLIS2_SDPA_EXACT_MAX_MB" ) )
+			  return ( size_t )std::strtoull( env, nullptr, 10 ) * 1024u * 1024u;
+		  return ( size_t )1024u * 1024u * 1024u; // 1 GiB, the pre-flash gate
+	}();
+
+	// [L_k, L_q, heads] f32, plus the softmax result the graph holds alongside it.
+	const size_t score_bytes = ( size_t )kp->ne[1] * ( size_t )qp->ne[1] * ( size_t )qp->ne[2] * sizeof( float );
+
+	bool		 exact = force_exact;
+	if( !force_exact && !force_flash && score_bytes <= exact_cap ) {
+		exact				   = true;
+		const size_t needed	   = 2u * score_bytes + ( size_t )64u * 1024u * 1024u; // score + softmax + slack
+		const size_t free_vram = trellis2_gpu_free_vram();						   // 0 on a CPU-only host
+		if( free_vram && needed > free_vram ) {
+			exact			 = false;
+			static bool said = false;
+			if( !said ) {
+				said = true;
+				std::fprintf( stderr,
+					"[sdpa] exact attention needs %zu MB but only %zu MB VRAM is free; using flash (faster, ~5e-2 rel-L2 on ROCm). Set TRELLIS2_SDPA_FLASH to pin this.\n",
+					needed / ( 1024u * 1024u ),
+					free_vram / ( 1024u * 1024u ) );
+			}
+		}
+	}
 	if( !exact ) {
 		ggml_tensor* o = ggml_flash_attn_ext( ctx, qp, kp, vp, nullptr, scale, 0.0f, 0.0f );
 		ggml_flash_attn_ext_set_prec( o, GGML_PREC_F32 );
