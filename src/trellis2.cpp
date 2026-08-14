@@ -2956,6 +2956,272 @@ static bool shape_dec_final_level_chunked( trellis2_shape_dec_model* m,
 	return ok;
 }
 
+// An intermediate decoder level — ConvNeXt blocks plus an up-block — evaluated
+// in voxel blocks, so no single graph ever sees more columns than the backend
+// can write.
+//
+// shape_dec_final_level_chunked only covers the finest level, which is one conv
+// wrapped in per-row ops. A level with chained ConvNeXt blocks cannot be split
+// the same way: block b+1 reads the NEIGHBOURS of block b's output, which a
+// per-block graph does not have. The way out is not a halo — with a dozen
+// blocks that would cost more than the level — but the same move the finest
+// level already makes, keeping the input resident over all L and gathering from
+// it, applied once per STAGE instead of once per level:
+//
+//   stage A     y = conv2( silu( LN_free( hch ) ) )        [C, L]
+//   host        h = y + repeat_interleave( xch )
+//   stage B_b   h = convnext_b( h )                        [C, L], per block b
+//   stage C1    subdiv = to_subdiv( h )                    [8, L]
+//   stage C2    h1     = conv1( silu( LN( h ) ) )          [C_next*8, L]
+//               x      = h                                 (no work)
+//
+// Every stage reads a full-length resident input and writes a full-length
+// output, so no neighbour is ever missing and the result is identical to the
+// single-graph path — every op involved is either per-row or a gather. What it
+// costs is one full-length round trip per stage, which is why this runs only
+// past the ceiling.
+//
+// The skip add is done on the host on purpose: repeat_interleave + add is a
+// channel repeat, so doing it here keeps the per-block graphs to a single
+// input tensor instead of threading a second one through every stage.
+static bool shape_dec_level_chunked( trellis2_shape_dec_model* m,
+	const trellis2_shape_dec_hparams&							 hp,
+	int															 lvl,
+	int															 C,
+	int															 prev_C,
+	int															 C_next,
+	int															 L,
+	bool														 want_subdiv,
+	const std::vector<std::vector<int32_t>>&					 nidx,
+	const std::vector<float>&									 in_hch,
+	const std::vector<float>&									 in_xch,
+	int64_t														 chunk,
+	std::vector<float>&											 out_h1,
+	std::vector<float>&											 out_x,
+	std::vector<float>&											 out_subdiv,
+	std::string*												 error )
+{
+	const size_t	  es	   = sizeof( float );
+	const float		  eps	   = hp.norm_eps;
+	const int		  xC	   = prev_C / 8;
+	const int		  rep	   = C / xC; // repeat_interleave factor
+	const std::string up_prev  = "blocks." + std::to_string( lvl - 1 ) + "." + std::to_string( hp.num_blocks[lvl - 1] );
+	const std::string up_this  = "blocks." + std::to_string( lvl ) + "." + std::to_string( hp.num_blocks[lvl] );
+	std::string		  missing;
+
+	auto			  W = [&]( const std::string& n ) -> ggml_tensor* {
+		 auto it = m->tensors.find( n );
+		 if( it == m->tensors.end() ) {
+			 if( missing.empty() )
+				 missing = n;
+			 return nullptr;
+		 }
+		 return it->second;
+	};
+
+	// Run one stage over all L voxels in blocks. `in` [Cin, L] goes resident on
+	// the backend because the neighbour gather reads arbitrary rows; `build`
+	// appends this stage's body and returns its [Cout, n] output.
+	// `needs_nbr` must say whether `build` convolves. The neighbour leaves are
+	// graph inputs, so ggml_gallocr only gives them a buffer when they actually
+	// appear in the graph — creating them for a stage that does not convolve
+	// (the subdiv head) and then uploading into them asserts on a null buffer.
+	auto run_stage = [&]( int Cin, int Cout, bool needs_nbr, const std::vector<float>& in, std::vector<float>& out, auto build ) -> bool {
+		ggml_init_params pip { ggml_tensor_overhead() * 4, nullptr, true };
+		ggml_context*	 pctx = ggml_init( pip );
+		if( !pctx ) {
+			set_error( error, "ggml_init failed (chunked level " + std::to_string( lvl ) + ")" );
+			return false;
+		}
+		ggml_tensor*		  res  = ggml_new_tensor_2d( pctx, GGML_TYPE_F32, Cin, L );
+		ggml_backend_buffer_t pbuf = ggml_backend_alloc_ctx_tensors( pctx, m->backend );
+		if( !pbuf ) {
+			set_error( error, "failed to allocate the chunked level input (" + std::to_string( ( size_t )Cin * L * es >> 20 ) + " MiB, level " + std::to_string( lvl ) + ")" );
+			ggml_free( pctx );
+			return false;
+		}
+		ggml_backend_tensor_set( res, in.data(), 0, in.size() * es );
+
+		out.resize( ( size_t )Cout * L );
+		bool				 ok = true;
+		std::vector<int32_t> clamped;
+		std::vector<float>	 mask;
+
+		for( int64_t v0 = 0; v0 < L && ok; v0 += chunk ) {
+			const int				  n		= ( int )std::min<int64_t>( chunk, ( int64_t )L - v0 );
+			const size_t			  gsize = 2048;
+			ggml_init_params		  ip { ggml_tensor_overhead() * gsize + ggml_graph_overhead_custom( gsize, false ), nullptr, true };
+			ggml_context*			  ctx = ggml_init( ip );
+			ggml_cgraph*			  gf  = ggml_new_graph_custom( ctx, gsize, false );
+
+			std::vector<ggml_tensor*> idx_t( 27, nullptr ), mask_t( 27, nullptr );
+			if( needs_nbr ) {
+				for( int k = 0; k < 27; ++k ) {
+					idx_t[k]  = ggml_new_tensor_1d( ctx, GGML_TYPE_I32, n );
+					mask_t[k] = ggml_new_tensor_2d( ctx, GGML_TYPE_F32, 1, n ); // [1, n]
+					ggml_set_input( idx_t[k] );
+					ggml_set_input( mask_t[k] );
+				}
+			}
+
+			ggml_tensor* o = build( ctx, res, idx_t, mask_t, n, v0 );
+			if( !o || !missing.empty() ) {
+				set_error( error, "missing tensor: " + ( missing.empty() ? std::string( "?" ) : missing ) + " (chunked level " + std::to_string( lvl ) + ")" );
+				ggml_free( ctx );
+				ok = false;
+				break;
+			}
+			o = ggml_cont( ctx, o );
+			ggml_set_output( o );
+			ggml_build_forward_expand( gf, o );
+
+			ggml_gallocr_t alloc = ggml_gallocr_new( ggml_backend_get_default_buffer_type( m->backend ) );
+			if( !ggml_gallocr_alloc_graph( alloc, gf ) ) {
+				set_error( error, "ggml_gallocr_alloc_graph failed (chunked level " + std::to_string( lvl ) + ", voxels from " + std::to_string( v0 ) + ")" );
+				ok = false;
+			} else {
+				clamped.resize( ( size_t )n );
+				mask.resize( ( size_t )n );
+				for( int k = 0; needs_nbr && k < 27; ++k ) {
+					const std::vector<int32_t>& ik = nidx[k];
+					for( int i = 0; i < n; ++i ) {
+						const int32_t nb	 = ik[( size_t )( v0 + i )];
+						const bool	  miss	 = nb >= L;
+						clamped[( size_t )i] = miss ? 0 : nb;
+						mask[( size_t )i]	 = miss ? 0.0f : 1.0f;
+					}
+					ggml_backend_tensor_set( idx_t[k], clamped.data(), 0, ( size_t )n * sizeof( int32_t ) );
+					ggml_backend_tensor_set( mask_t[k], mask.data(), 0, ( size_t )n * sizeof( float ) );
+				}
+				if( ggml_backend_graph_compute( m->backend, gf ) != GGML_STATUS_SUCCESS ) {
+					set_error( error, "graph compute failed (chunked level " + std::to_string( lvl ) + ", voxels from " + std::to_string( v0 ) + ")" );
+					ok = false;
+				} else {
+					ggml_backend_tensor_get( o, out.data() + ( size_t )v0 * Cout, 0, ( size_t )Cout * n * es );
+				}
+			}
+			ggml_gallocr_free( alloc );
+			ggml_free( ctx );
+		}
+
+		ggml_backend_buffer_free( pbuf );
+		ggml_free( pctx );
+		return ok;
+	};
+
+	// Graph fragments, in the same shapes the single-graph path builds.
+	// `pre` is applied to each gathered [Ci, n] slab before the mask multiply.
+	// The single-graph path applies those ops to the whole [Ci, L] tensor and
+	// convolves the result; doing them here instead is what keeps every op
+	// block-sized. Legal because the only ops that ever sit there are norm,
+	// silu and an affine LN — all strictly per-row, so they commute with the
+	// gather. Applying them to the resident tensor instead would rebuild a
+	// full-length intermediate and defeat the split entirely.
+	auto conv_blk = [&]( ggml_context* ctx, ggml_tensor* x, const std::string& pfx, std::vector<ggml_tensor*>& idx_t, std::vector<ggml_tensor*>& mask_t, auto pre ) -> ggml_tensor* {
+		ggml_tensor* w = W( pfx + ".weight" ); // [Ci, 27, Co]
+		ggml_tensor* b = W( pfx + ".bias" );
+		if( !w || !b )
+			return nullptr;
+		const int64_t Ci = w->ne[0], Co = w->ne[2];
+		ggml_tensor*  acc = nullptr;
+		for( int k = 0; k < 27; ++k ) {
+			ggml_tensor* wk = ggml_cont( ctx, ggml_view_3d( ctx, w, Ci, 1, Co, w->nb[1], w->nb[2], ( size_t )k * w->nb[1] ) );
+			wk				= ggml_reshape_2d( ctx, wk, Ci, Co );
+			ggml_tensor* g	= ggml_get_rows( ctx, x, idx_t[k] ); // [Ci, n]
+			g				= pre( ctx, g );
+			if( !g )
+				return nullptr;
+			g			   = ggml_mul( ctx, g, mask_t[k] );
+			ggml_tensor* y = ggml_mul_mat( ctx, wk, g );
+			acc			   = acc ? ggml_add( ctx, acc, y ) : y;
+		}
+		return ggml_add( ctx, acc, b );
+	};
+	auto no_pre = []( ggml_context*, ggml_tensor* g ) { return g; };
+	auto lin_blk = [&]( ggml_context* ctx, ggml_tensor* in, const std::string& pfx ) -> ggml_tensor* {
+		ggml_tensor* w = W( pfx + ".weight" );
+		if( !w )
+			return nullptr;
+		ggml_tensor* y = ggml_mul_mat( ctx, w, in );
+		ggml_tensor* b = W( pfx + ".bias" );
+		if( b )
+			y = ggml_add( ctx, y, b );
+		return y;
+	};
+	auto ln_affine_blk = [&]( ggml_context* ctx, ggml_tensor* h, const std::string& pfx ) -> ggml_tensor* {
+		ggml_tensor* w = W( pfx + ".weight" );
+		ggml_tensor* b = W( pfx + ".bias" );
+		if( !w || !b )
+			return nullptr;
+		ggml_tensor* y = ggml_norm( ctx, h, eps );
+		y			   = ggml_mul( ctx, y, w );
+		return ggml_add( ctx, y, b );
+	};
+
+	// ── stage A: the previous level's up-block tail, conv2 half ──────────────
+	std::vector<float> cur;
+	if( !run_stage( C, C, /*needs_nbr*/ true, in_hch, cur, [&]( ggml_context* ctx, ggml_tensor* res, std::vector<ggml_tensor*>& idx_t, std::vector<ggml_tensor*>& mask_t, int /*n*/, int64_t /*v0*/ ) -> ggml_tensor* {
+			// norm2 is affine-free and silu is elementwise, so both ride behind
+			// the gather (see conv_blk).
+			return conv_blk( ctx, res, up_prev + ".conv2", idx_t, mask_t, [&]( ggml_context* c, ggml_tensor* g ) { return ggml_silu( c, ggml_norm( c, g, eps ) ); } );
+		} ) )
+		return false;
+
+	// host: + repeat_interleave(xch). Channel repeat, so a plain strided add.
+	for( int64_t v = 0; v < L; ++v ) {
+		float*		 dst = cur.data() + ( size_t )v * C;
+		const float* src = in_xch.data() + ( size_t )v * xC;
+		for( int c = 0; c < xC; ++c )
+			for( int t = 0; t < rep; ++t )
+				dst[( size_t )c * rep + t] += src[c];
+	}
+
+	// ── stages B: the ConvNeXt chain ─────────────────────────────────────────
+	for( int b = 0; b < hp.num_blocks[lvl]; ++b ) {
+		const std::string  pfx = "blocks." + std::to_string( lvl ) + "." + std::to_string( b );
+		std::vector<float> nxt;
+		if( !run_stage( C, C, /*needs_nbr*/ true, cur, nxt, [&]( ggml_context* ctx, ggml_tensor* res, std::vector<ggml_tensor*>& idx_t, std::vector<ggml_tensor*>& mask_t, int n, int64_t v0 ) -> ggml_tensor* {
+				ggml_tensor* h = conv_blk( ctx, res, pfx + ".conv", idx_t, mask_t, no_pre );
+				if( !h )
+					return nullptr;
+				h = ln_affine_blk( ctx, h, pfx + ".norm" );
+				h = lin_blk( ctx, h, pfx + ".mlp.0" );
+				if( !h )
+					return nullptr;
+				h = ggml_silu( ctx, h );
+				h = lin_blk( ctx, h, pfx + ".mlp.2" );
+				if( !h )
+					return nullptr;
+				// residual: this block's own rows of the resident input
+				ggml_tensor* x0 = ggml_cont( ctx, ggml_view_2d( ctx, res, C, n, res->nb[1], ( size_t )v0 * res->nb[1] ) );
+				return ggml_add( ctx, h, x0 );
+			} ) )
+			return false;
+		cur.swap( nxt );
+	}
+
+	// ── stages C: the up-block heads ─────────────────────────────────────────
+	if( want_subdiv ) {
+		if( !run_stage( C, 8, /*needs_nbr*/ false, cur, out_subdiv, [&]( ggml_context* ctx, ggml_tensor* res, std::vector<ggml_tensor*>&, std::vector<ggml_tensor*>&, int n, int64_t v0 ) -> ggml_tensor* {
+				ggml_tensor* x0 = ggml_cont( ctx, ggml_view_2d( ctx, res, C, n, res->nb[1], ( size_t )v0 * res->nb[1] ) );
+				return lin_blk( ctx, x0, up_this + ".to_subdiv" );
+			} ) )
+			return false;
+	}
+	if( !run_stage( C, C_next * 8, /*needs_nbr*/ true, cur, out_h1, [&]( ggml_context* ctx, ggml_tensor* res, std::vector<ggml_tensor*>& idx_t, std::vector<ggml_tensor*>& mask_t, int /*n*/, int64_t /*v0*/ ) -> ggml_tensor* {
+			// norm1 is an affine LN and silu is elementwise — per-row either
+			// way, so they ride behind the gather like norm2 above.
+			return conv_blk( ctx, res, up_this + ".conv1", idx_t, mask_t, [&]( ggml_context* c, ggml_tensor* g ) {
+				ggml_tensor* y = ln_affine_blk( c, g, up_this + ".norm1" );
+				return y ? ggml_silu( c, y ) : nullptr;
+			} );
+		} ) )
+		return false;
+
+	out_x.swap( cur ); // "x" is the level's features, unchanged
+	return true;
+}
+
 // Shared driver for the shape decoder. upsample_times < 0 runs the full decode
 // (all levels + output layer; fills out_feats and out_coords) — the validated
 // behavior. upsample_times in [1, n_levels-1] runs only that many subdivision
@@ -3055,6 +3321,62 @@ static bool shape_dec_run( trellis2_shape_dec_model* m,
 			ms_nbr += ms_since( t0 );
 		}
 
+		// ── shared tail of a level with an up-block ─────────────────────────
+		// Pick the surviving children from the subdivision, hand them to the
+		// caller's gather, and advance the level state. Both the single-graph
+		// path and the chunked one end here, and they must end here identically
+		// — the child selection is what fixes the next level's voxel order, so
+		// two copies of it would be a divergence nobody finds later.
+		//
+		// The gather itself stays with the caller rather than moving in here:
+		// the graph path reads its conv output in place where the backend
+		// allows it, instead of duplicating the full [C_next*8, L] (~8 GB at
+		// 1024^3), and the chunked path already holds host vectors. Only the
+		// index set is shared.
+		std::vector<int32_t> child_coords, cidx;
+		auto				 advance_up_level = [&]( auto gather ) -> bool {
+			// Child slot o + 8*parent, in [0, 8L). Shape decoder: expand from
+			// the predicted subdivision logits. Texture decoder: replay the
+			// encoder's recorded subdivision (`guide`), which also reproduces
+			// the encoder's exact input voxel order.
+			child_coords.clear();
+			cidx.clear();
+			if( guide ) {
+				const trellis2_subdiv_level& g = ( *guide )[lvl];
+				child_coords				   = g.fine_coords;
+				cidx						   = g.cidx;
+			} else {
+				child_coords.reserve( ( size_t )L * 3 );
+				cidx.reserve( ( size_t )L );
+				for( int v = 0; v < L; ++v ) {
+					for( int o = 0; o < 8; ++o ) {
+						if( up_subdiv[( size_t )v * 8 + o] > 0.0f ) {
+							cidx.push_back( o + 8 * v );
+							child_coords.push_back( 2 * coords[( size_t )v * 3] + ( o & 1 ) );
+							child_coords.push_back( 2 * coords[( size_t )v * 3 + 1] + ( ( o >> 1 ) & 1 ) );
+							child_coords.push_back( 2 * coords[( size_t )v * 3 + 2] + ( ( o >> 2 ) & 1 ) );
+						}
+					}
+				}
+			}
+			if( predicted_subs ) {
+				trellis2_subdiv_level& sub = ( *predicted_subs )[( size_t )lvl];
+				sub.fine_coords			   = child_coords;
+				sub.cidx				   = cidx;
+			}
+			const int L_child = ( int )cidx.size();
+			if( L_child == 0 ) {
+				set_error( error, "no children at level " + std::to_string( lvl ) );
+				return false;
+			}
+			gather( cidx, L_child );
+			prev_C = C;
+			prev_L = L;
+			coords = std::move( child_coords );
+			L	   = L_child;
+			return true;
+		};
+
 		// ── too many voxels for one graph? ──────────────────────────────────
 		// Only the finest level splits (see shape_dec_final_level_chunked); any
 		// other level would need its predecessor materialised over all L. A
@@ -3068,6 +3390,14 @@ static bool shape_dec_run( trellis2_shape_dec_model* m,
 			const int64_t	  max_rows = wit == m->tensors.end() ? mul_mat_max_rows( GGML_TYPE_F32 ) : mul_mat_max_rows( wit->second->type );
 			const int64_t	  block	   = std::min( chunk_rows_limit(), max_rows );
 
+			// Per-level voxel counts. The cascade's token budget bounds the HR
+			// flow's INPUT; nothing bounds the decoder's OUTPUT, and it is the
+			// output that meets the mul_mat ceiling (plan D4 predicted exactly
+			// this). Logging the counts is what lets the ratio between the two
+			// be calibrated from real runs instead of assumed.
+			if( t2_timing )
+				std::fprintf( stderr, "[shape_dec] level %d: L=%d, mul_mat column cap %lld, split block %lld%s\n", lvl, L, ( long long )max_rows, ( long long )block, ( int64_t )L > max_rows ? "  <-- PAST THE CAP" : "" );
+
 			if( ( int64_t )L > block ) {
 				const bool splittable = !has_up && lvl > 0 && hp.num_blocks[lvl] == 0 && !taps;
 				if( splittable ) {
@@ -3079,11 +3409,45 @@ static bool shape_dec_run( trellis2_shape_dec_model* m,
 						std::fprintf( stderr, "[shape_dec] nbr=%.0f graph=%.0f gather=%.0f ms\n", ms_nbr, ms_graph, ms_gather );
 					return true;
 				}
+				// An intermediate level: a ConvNeXt chain plus an up-block. Split
+				// per STAGE rather than per level (shape_dec_level_chunked), so
+				// the chained blocks never need a halo. Taps are excluded — they
+				// want the full-length intermediates this path never forms.
+				if( has_up && lvl > 0 && !taps ) {
+					std::vector<float> ch_h1, ch_x;
+					auto			   t_c = t_now();
+					if( !shape_dec_level_chunked( m, hp, lvl, C, prev_C, C_next, L, /*want_subdiv*/ !guide, nidx, up_hch, up_xch, block, ch_h1, ch_x, up_subdiv, error ) )
+						return false;
+					if( t2_timing )
+						ms_graph += ms_since( t_c );
+					if( !advance_up_level( [&]( const std::vector<int32_t>& ci, int L_child ) {
+							auto t_gh		= t_now();
+							auto vec_gather = [&]( const std::vector<float>& src, int chans, std::vector<float>& out ) {
+								out.resize( ( size_t )chans * L_child );
+								for( int j = 0; j < L_child; ++j )
+									std::memcpy( out.data() + ( size_t )j * chans, src.data() + ( size_t )ci[( size_t )j] * chans, ( size_t )chans * es );
+							};
+							vec_gather( ch_h1, C_next, up_hch ); // [C_next, L_child]
+							vec_gather( ch_x, C / 8, up_xch );	 // [C/8,     L_child]
+							if( t2_timing )
+								ms_gather += ms_since( t_gh );
+						} ) )
+						return false;
+					// Same early-out the single-graph path takes at the bottom
+					// of the loop: `coords` now holds this level's child set.
+					if( upsample_times >= 0 && lvl == upsample_times - 1 ) {
+						out_coords = coords;
+						if( t2_timing )
+							std::fprintf( stderr, "[shape_dec] nbr=%.0f graph=%.0f gather=%.0f ms\n", ms_nbr, ms_graph, ms_gather );
+						return true;
+					}
+					continue;
+				}
+
 				if( ( int64_t )L > max_rows ) {
 					set_error( error,
 						"level " + std::to_string( lvl ) + " has " + std::to_string( L ) + " voxels, past this backend's mul_mat column limit (" + std::to_string( max_rows ) +
-							"), and only the finest level "
-							"can be split" );
+							"), and cannot be split (level 0, or taps requested)" );
 					return false;
 				}
 				// Under the ceiling: a single graph is still correct here.
@@ -3308,70 +3672,35 @@ static bool shape_dec_run( trellis2_shape_dec_model* m,
 					cap( "lvl" + std::to_string( lvl ) + ".subdiv", up_subdiv.data(), up_subdiv.size() );
 			}
 
-			// The surviving children + their gather index (child slot o + 8*parent,
-			// in [0, 8L)). Shape decoder: expand from predicted subdivision logits.
-			// Texture decoder: replay the encoder's recorded subdivision (`guide`),
-			// which also reproduces the encoder's exact input voxel order.
-			std::vector<int32_t> child_coords, cidx;
-			if( guide ) {
-				const trellis2_subdiv_level& g = ( *guide )[lvl];
-				child_coords				   = g.fine_coords;
-				cidx						   = g.cidx;
-			} else {
-				child_coords.reserve( ( size_t )L * 3 );
-				cidx.reserve( ( size_t )L );
-				for( int v = 0; v < L; ++v ) {
-					for( int o = 0; o < 8; ++o ) {
-						if( up_subdiv[( size_t )v * 8 + o] > 0.0f ) {
-							cidx.push_back( o + 8 * v );
-							child_coords.push_back( 2 * coords[( size_t )v * 3] + ( o & 1 ) );
-							child_coords.push_back( 2 * coords[( size_t )v * 3 + 1] + ( ( o >> 1 ) & 1 ) );
-							child_coords.push_back( 2 * coords[( size_t )v * 3 + 2] + ( ( o >> 2 ) & 1 ) );
-						}
-					}
-				}
-			}
-			if( predicted_subs ) {
-				trellis2_subdiv_level& sub = ( *predicted_subs )[( size_t )lvl];
-				sub.fine_coords			   = child_coords;
-				sub.cidx				   = cidx;
-			}
-			const int L_child = ( int )cidx.size();
-			if( L_child == 0 ) {
-				set_error( error, "no children at level " + std::to_string( lvl ) );
-				ggml_gallocr_free( alloc );
-				ggml_free( ctx );
-				return false;
-			}
-
 			// Gather the surviving children of h1 [C_next*8, L] (viewed as
 			// [C_next, 8L]) and x [C, L] (viewed as [C/8, 8L]) — byte-identical
 			// to get_rows(cidx) on the reshaped tensors. On the CPU backend the
 			// conv output is already in host memory, so we read it in place
 			// instead of duplicating the full [C_next*8, L] (~8 GB at 1024^3).
-			auto host_gather = [&]( ggml_tensor* t, int chans, std::vector<float>& out ) {
-				out.resize( ( size_t )chans * L_child );
-				if( t->buffer && ggml_backend_buffer_is_host( t->buffer ) ) {
-					const float* d = ( const float* )t->data;
-					for( int j = 0; j < L_child; ++j )
-						std::memcpy( out.data() + ( size_t )j * chans, d + ( size_t )cidx[( size_t )j] * chans, ( size_t )chans * es );
-				} else {
-					std::vector<float> full( ( size_t )ggml_nelements( t ) );
-					ggml_backend_tensor_get( t, full.data(), 0, full.size() * es );
-					for( int j = 0; j < L_child; ++j )
-						std::memcpy( out.data() + ( size_t )j * chans, full.data() + ( size_t )cidx[( size_t )j] * chans, ( size_t )chans * es );
-				}
-			};
-			auto t_gh = t_now();
-			host_gather( h1_o, C_next, up_hch ); // [C_next, L_child]
-			host_gather( x_o, C / 8, up_xch );	 // [C/8,     L_child]
-			if( t2_timing )
-				ms_gather += ms_since( t_gh );
-
-			prev_C = C;
-			prev_L = L;
-			coords = std::move( child_coords );
-			L	   = L_child;
+			if( !advance_up_level( [&]( const std::vector<int32_t>& ci, int L_child ) {
+					auto host_gather = [&]( ggml_tensor* t, int chans, std::vector<float>& out ) {
+						out.resize( ( size_t )chans * L_child );
+						if( t->buffer && ggml_backend_buffer_is_host( t->buffer ) ) {
+							const float* d = ( const float* )t->data;
+							for( int j = 0; j < L_child; ++j )
+								std::memcpy( out.data() + ( size_t )j * chans, d + ( size_t )ci[( size_t )j] * chans, ( size_t )chans * es );
+						} else {
+							std::vector<float> full( ( size_t )ggml_nelements( t ) );
+							ggml_backend_tensor_get( t, full.data(), 0, full.size() * es );
+							for( int j = 0; j < L_child; ++j )
+								std::memcpy( out.data() + ( size_t )j * chans, full.data() + ( size_t )ci[( size_t )j] * chans, ( size_t )chans * es );
+						}
+					};
+					auto t_gh = t_now();
+					host_gather( h1_o, C_next, up_hch ); // [C_next, L_child]
+					host_gather( x_o, C / 8, up_xch );	 // [C/8,     L_child]
+					if( t2_timing )
+						ms_gather += ms_since( t_gh );
+				} ) ) {
+				ggml_gallocr_free( alloc );
+				ggml_free( ctx );
+				return false;
+			}
 		} else {
 			out_feats.resize( ( size_t )hp.out_channels * L );
 			for( auto& o : outs ) {
@@ -3609,6 +3938,283 @@ const trellis2_shape_enc_hparams& trellis2_shape_enc_hparams_of( const trellis2_
 	return m->hp;
 }
 
+// The shape encoder's first level, evaluated in voxel blocks.
+//
+// It is the only encoder level that can grow large — Lc falls ~4x per level —
+// and it is also the only one with no ConvNeXt blocks, so it needs no per-stage
+// ping-pong the way shape_dec_level_chunked does. What it does need is two
+// voxel spaces: the convs and the child gather live in fine space (L), the
+// down-sampled result in coarse space (Lc).
+//
+// Why blocks at all: a GPU dispatch is sized in WORKITEMS in 32 bits, and this
+// level launches several kernels whose grid scales with the voxel count — the
+// skip reduction over C_out*Lc rows, and the S2C gather over Lc*8 index rows.
+// Both cross 2^32 somewhere around Lc = 2^20..2^21, which a 1536 cascade
+// reaches on a dense object. Chasing them one kernel at a time does not
+// converge; bounding every launch at once does.
+// See docs/progress/1536-cascade_backend-limits.md.
+//
+//   P0  h    = input_layer(in)                       [C_in, L]     per-row
+//   P1  h1   = conv1(silu(LN(h)))                    [C_out/8, L]  27 fine nbrs
+//   P2  h1c  = s2c(h1)                               [C_out, Lc]   8 children
+//   P3  skip = mean_gsz(s2c(h))                      [C_out, Lc]   8 children
+//   P4  out  = conv2(silu(LN_free(h1c))) + skip      [C_out, Lc]   27 coarse nbrs
+//
+// Every pass reads a full-length resident input and gathers from it, so no
+// neighbour or child is ever absent and the result matches the single-graph
+// path exactly — every op is per-row or a gather.
+static bool shape_enc_level0_chunked( trellis2_shape_enc_model* m,
+	const trellis2_shape_enc_hparams&							 hp,
+	int															 C_in,
+	int															 C_out,
+	int															 L,
+	int															 Lc,
+	const std::vector<float>&									 in_shift,
+	const std::vector<std::vector<int32_t>>&					 nfine,
+	const std::vector<std::vector<int32_t>>&					 ncoarse,
+	const std::vector<int32_t>&									 childidx,
+	int64_t														 chunk,
+	std::vector<float>&											 out_feats,
+	std::string*												 error )
+{
+	const size_t	  es	= sizeof( float );
+	const float		  eps	= hp.norm_eps;
+	const int		  in_dim = hp.in_channels;
+	const int		  h1C	= C_out / 8;
+	const int		  gsz	= ( C_in * 8 ) / C_out;
+	const std::string down	= "blocks.0." + std::to_string( hp.num_blocks[0] );
+	std::string		  missing;
+
+	auto			  W = [&]( const std::string& n ) -> ggml_tensor* {
+		 auto it = m->tensors.find( n );
+		 if( it == m->tensors.end() ) {
+			 if( missing.empty() )
+				 missing = n;
+			 return nullptr;
+		 }
+		 return it->second;
+	};
+
+	// `build` appends one block's body and returns its [Cout, n] output;
+	// `upload` fills whatever per-block inputs `build` created, after the graph
+	// is allocated. They are two callbacks rather than one because ggml_gallocr
+	// only gives an input tensor a buffer once it is part of the graph.
+	auto run_stage = [&]( int Cin, int Lin, int Cout, int Lout, const std::vector<float>& in, std::vector<float>& out, auto build, auto upload ) -> bool {
+		ggml_init_params pip { ggml_tensor_overhead() * 4, nullptr, true };
+		ggml_context*	 pctx = ggml_init( pip );
+		if( !pctx ) {
+			set_error( error, "ggml_init failed (chunked shape_enc level 0)" );
+			return false;
+		}
+		ggml_tensor*		  res  = ggml_new_tensor_2d( pctx, GGML_TYPE_F32, Cin, Lin );
+		ggml_backend_buffer_t pbuf = ggml_backend_alloc_ctx_tensors( pctx, m->backend );
+		if( !pbuf ) {
+			set_error( error, "failed to allocate the chunked shape_enc input (" + std::to_string( ( size_t )Cin * Lin * es >> 20 ) + " MiB)" );
+			ggml_free( pctx );
+			return false;
+		}
+		ggml_backend_tensor_set( res, in.data(), 0, in.size() * es );
+
+		out.resize( ( size_t )Cout * Lout );
+		bool ok = true;
+		for( int64_t v0 = 0; v0 < Lout && ok; v0 += chunk ) {
+			const int		 n		= ( int )std::min<int64_t>( chunk, ( int64_t )Lout - v0 );
+			const size_t	 gsize	= 2048;
+			ggml_init_params ip { ggml_tensor_overhead() * gsize + ggml_graph_overhead_custom( gsize, false ), nullptr, true };
+			ggml_context*	 ctx = ggml_init( ip );
+			ggml_cgraph*	 gf	 = ggml_new_graph_custom( ctx, gsize, false );
+
+			ggml_tensor*	 o = build( ctx, res, n, v0 );
+			if( !o || !missing.empty() ) {
+				set_error( error, "missing tensor: " + ( missing.empty() ? std::string( "?" ) : missing ) + " (chunked shape_enc level 0)" );
+				ggml_free( ctx );
+				return false;
+			}
+			o = ggml_cont( ctx, o );
+			ggml_set_output( o );
+			ggml_build_forward_expand( gf, o );
+
+			ggml_gallocr_t alloc = ggml_gallocr_new( ggml_backend_get_default_buffer_type( m->backend ) );
+			if( !ggml_gallocr_alloc_graph( alloc, gf ) ) {
+				set_error( error, "ggml_gallocr_alloc_graph failed (chunked shape_enc level 0, voxels from " + std::to_string( v0 ) + ")" );
+				ok = false;
+			} else {
+				upload( n, v0 );
+				if( ggml_backend_graph_compute( m->backend, gf ) != GGML_STATUS_SUCCESS ) {
+					set_error( error, "graph compute failed (chunked shape_enc level 0, voxels from " + std::to_string( v0 ) + ")" );
+					ok = false;
+				} else {
+					ggml_backend_tensor_get( o, out.data() + ( size_t )v0 * Cout, 0, ( size_t )Cout * n * es );
+				}
+			}
+			ggml_gallocr_free( alloc );
+			ggml_free( ctx );
+		}
+		ggml_backend_buffer_free( pbuf );
+		ggml_free( pctx );
+		return ok;
+	};
+
+	// Per-block leaves, declared here so `build` can create them and `upload`
+	// can fill them.
+	std::vector<ggml_tensor*> idx_t( 27, nullptr ), mask_t( 27, nullptr );
+	ggml_tensor *			  cidx_t = nullptr, *cmask_t = nullptr, *skip_t = nullptr;
+
+	auto					  make_nbr_leaves = [&]( ggml_context* ctx, int n ) {
+		 for( int k = 0; k < 27; ++k ) {
+			 idx_t[k]  = ggml_new_tensor_1d( ctx, GGML_TYPE_I32, n );
+			 mask_t[k] = ggml_new_tensor_2d( ctx, GGML_TYPE_F32, 1, n );
+			 ggml_set_input( idx_t[k] );
+			 ggml_set_input( mask_t[k] );
+		 }
+	};
+	auto upload_nbr_leaves = [&]( const std::vector<std::vector<int32_t>>& nb, int Ln, int n, int64_t v0 ) {
+		std::vector<int32_t> cl( ( size_t )n );
+		std::vector<float>	 mk( ( size_t )n );
+		for( int k = 0; k < 27; ++k ) {
+			for( int i = 0; i < n; ++i ) {
+				const int32_t r	 = nb[k][( size_t )( v0 + i )];
+				const bool	  ms = r >= Ln;
+				cl[( size_t )i]	 = ms ? 0 : r;
+				mk[( size_t )i]	 = ms ? 0.0f : 1.0f;
+			}
+			ggml_backend_tensor_set( idx_t[k], cl.data(), 0, ( size_t )n * sizeof( int32_t ) );
+			ggml_backend_tensor_set( mask_t[k], mk.data(), 0, ( size_t )n * sizeof( float ) );
+		}
+	};
+	// Submanifold conv over a block, with the per-row ops riding behind the
+	// gather so every launch stays block-sized (same argument as the decoder).
+	auto conv_blk = [&]( ggml_context* ctx, ggml_tensor* x, const std::string& pfx, auto pre ) -> ggml_tensor* {
+		ggml_tensor* w = W( pfx + ".weight" );
+		ggml_tensor* b = W( pfx + ".bias" );
+		if( !w || !b )
+			return nullptr;
+		const int64_t Ci = w->ne[0], Co = w->ne[2];
+		ggml_tensor*  acc = nullptr;
+		for( int k = 0; k < 27; ++k ) {
+			ggml_tensor* wk = ggml_cont( ctx, ggml_view_3d( ctx, w, Ci, 1, Co, w->nb[1], w->nb[2], ( size_t )k * w->nb[1] ) );
+			wk				= ggml_reshape_2d( ctx, wk, Ci, Co );
+			ggml_tensor* g	= ggml_get_rows( ctx, x, idx_t[k] );
+			g				= pre( ctx, g );
+			if( !g )
+				return nullptr;
+			g			   = ggml_mul( ctx, g, mask_t[k] );
+			ggml_tensor* y = ggml_mul_mat( ctx, wk, g );
+			acc			   = acc ? ggml_add( ctx, acc, y ) : y;
+		}
+		return ggml_add( ctx, acc, b );
+	};
+	// S2C: gather each coarse voxel's 8 children and stack them channel-wise.
+	auto s2c_blk = [&]( ggml_context* ctx, ggml_tensor* src, int ch, int n ) -> ggml_tensor* {
+		ggml_tensor* g = ggml_get_rows( ctx, src, cidx_t ); // [ch, n*8]
+		g			   = ggml_mul( ctx, g, cmask_t );
+		return ggml_reshape_2d( ctx, ggml_cont( ctx, g ), ( int64_t )ch * 8, n );
+	};
+	auto make_child_leaves = [&]( ggml_context* ctx, int n ) {
+		cidx_t	= ggml_new_tensor_1d( ctx, GGML_TYPE_I32, ( int64_t )n * 8 );
+		cmask_t = ggml_new_tensor_2d( ctx, GGML_TYPE_F32, 1, ( int64_t )n * 8 );
+		ggml_set_input( cidx_t );
+		ggml_set_input( cmask_t );
+	};
+	auto upload_child_leaves = [&]( int n, int64_t v0 ) {
+		std::vector<int32_t> cl( ( size_t )n * 8 );
+		std::vector<float>	 mk( ( size_t )n * 8 );
+		for( size_t i = 0; i < cl.size(); ++i ) {
+			const int32_t c = childidx[( size_t )v0 * 8 + i];
+			cl[i]			= c < 0 ? 0 : c;
+			mk[i]			= c < 0 ? 0.0f : 1.0f;
+		}
+		ggml_backend_tensor_set( cidx_t, cl.data(), 0, cl.size() * sizeof( int32_t ) );
+		ggml_backend_tensor_set( cmask_t, mk.data(), 0, mk.size() * sizeof( float ) );
+	};
+
+	// ── P0: input_layer, per-row ─────────────────────────────────────────────
+	std::vector<float> h;
+	if( !run_stage(
+			in_dim, L, C_in, L, in_shift, h,
+			[&]( ggml_context* ctx, ggml_tensor* res, int n, int64_t v0 ) -> ggml_tensor* {
+				ggml_tensor* x = ggml_cont( ctx, ggml_view_2d( ctx, res, in_dim, n, res->nb[1], ( size_t )v0 * res->nb[1] ) );
+				ggml_tensor* w = W( "input_layer.weight" );
+				if( !w )
+					return nullptr;
+				ggml_tensor* y = ggml_mul_mat( ctx, w, x );
+				ggml_tensor* b = W( "input_layer.bias" );
+				return b ? ggml_add( ctx, y, b ) : y;
+			},
+			[]( int, int64_t ) {} ) )
+		return false;
+
+	// ── P1: conv1 over the fine voxels ───────────────────────────────────────
+	std::vector<float> h1;
+	if( !run_stage(
+			C_in, L, h1C, L, h, h1,
+			[&]( ggml_context* ctx, ggml_tensor* res, int n, int64_t ) -> ggml_tensor* {
+				make_nbr_leaves( ctx, n );
+				// norm1 is an affine LN and silu is elementwise — per-row, so
+				// both commute with the gather.
+				return conv_blk( ctx, res, down + ".conv1", [&]( ggml_context* c, ggml_tensor* g ) -> ggml_tensor* {
+					ggml_tensor* nw = W( down + ".norm1.weight" );
+					ggml_tensor* nb = W( down + ".norm1.bias" );
+					if( !nw || !nb )
+						return nullptr;
+					ggml_tensor* y = ggml_norm( c, g, eps );
+					y			   = ggml_mul( c, y, nw );
+					y			   = ggml_add( c, y, nb );
+					return ggml_silu( c, y );
+				} );
+			},
+			[&]( int n, int64_t v0 ) { upload_nbr_leaves( nfine, L, n, v0 ); } ) )
+		return false;
+
+	// ── P2: S2C of conv1's output -> coarse space ────────────────────────────
+	std::vector<float> h1c;
+	if( !run_stage(
+			h1C, L, C_out, Lc, h1, h1c,
+			[&]( ggml_context* ctx, ggml_tensor* res, int n, int64_t ) -> ggml_tensor* {
+				make_child_leaves( ctx, n );
+				return s2c_blk( ctx, res, h1C, n );
+			},
+			[&]( int n, int64_t v0 ) { upload_child_leaves( n, v0 ); } ) )
+		return false;
+
+	// ── P3: the down-sample skip, mean over each gsz-wide channel group ──────
+	std::vector<float> skip;
+	if( !run_stage(
+			C_in, L, C_out, Lc, h, skip,
+			[&]( ggml_context* ctx, ggml_tensor* res, int n, int64_t ) -> ggml_tensor* {
+				make_child_leaves( ctx, n );
+				ggml_tensor* xc = s2c_blk( ctx, res, C_in, n ); // [C_in*8, n]
+				ggml_tensor* g3 = ggml_reshape_3d( ctx, xc, gsz, C_out, n );
+				ggml_tensor* acc = nullptr;
+				for( int j = 0; j < gsz; ++j ) {
+					ggml_tensor* s = ggml_cont( ctx, ggml_view_3d( ctx, g3, 1, C_out, n, g3->nb[1], g3->nb[2], ( size_t )j * g3->nb[0] ) );
+					acc			   = acc ? ggml_add( ctx, acc, s ) : s;
+				}
+				return ggml_scale( ctx, ggml_reshape_2d( ctx, acc, C_out, n ), 1.0f / ( float )gsz );
+			},
+			[&]( int n, int64_t v0 ) { upload_child_leaves( n, v0 ); } ) )
+		return false;
+
+	// ── P4: conv2 over the coarse voxels, plus the skip ──────────────────────
+	if( !run_stage(
+			C_out, Lc, C_out, Lc, h1c, out_feats,
+			[&]( ggml_context* ctx, ggml_tensor* res, int n, int64_t ) -> ggml_tensor* {
+				make_nbr_leaves( ctx, n );
+				skip_t = ggml_new_tensor_2d( ctx, GGML_TYPE_F32, C_out, n );
+				ggml_set_input( skip_t );
+				// norm2 is affine-free; silu elementwise. Both per-row.
+				ggml_tensor* h2 = conv_blk( ctx, res, down + ".conv2", [&]( ggml_context* c, ggml_tensor* g ) { return ggml_silu( c, ggml_norm( c, g, eps ) ); } );
+				return h2 ? ggml_add( ctx, h2, skip_t ) : nullptr;
+			},
+			[&]( int n, int64_t v0 ) {
+				upload_nbr_leaves( ncoarse, Lc, n, v0 );
+				ggml_backend_tensor_set( skip_t, skip.data() + ( size_t )v0 * C_out, 0, ( size_t )C_out * n * es );
+			} ) )
+		return false;
+
+	return true;
+}
+
 bool trellis2_shape_enc_encode( trellis2_shape_enc_model* m,
 	const float*										  in6,
 	int													  n_voxels,
@@ -3628,10 +4234,11 @@ bool trellis2_shape_enc_encode( trellis2_shape_enc_model* m,
 		return false;
 	}
 
-	const trellis2_shape_enc_hparams& hp	   = m->hp;
-	const int						  n_levels = hp.n_levels;
-	const float						  eps	   = hp.norm_eps;
-	const size_t					  es	   = sizeof( float );
+	const trellis2_shape_enc_hparams& hp		= m->hp;
+	const int						  n_levels	= hp.n_levels;
+	const float						  eps		= hp.norm_eps;
+	const size_t					  es		= sizeof( float );
+	const bool						  t2_timing = std::getenv( "TRELLIS2_TIMING" ) != nullptr;
 	std::string						  missing;
 
 	// host-side level state
@@ -3715,6 +4322,109 @@ bool trellis2_shape_enc_encode( trellis2_shape_enc_model* m,
 				cidx[( size_t )v] = 8 * coarse_map[voxel_key( px, py, pz )] + o;
 			}
 			build_neighbor_indices( coarse_coords, Lc, ncoarse );
+		}
+
+		// ── voxel-count diagnostics ─────────────────────────────────────────
+		// The shape decoder guards its levels against the backend's mul_mat
+		// column ceiling (mul_mat_max_rows) and splits the finest one
+		// (shape_dec_final_level_chunked). The encoder does neither: every
+		// level is one graph over all L voxels, and its levels chain several
+		// ConvNeXt blocks, so the decoder's split — which relies on the finest
+		// level being a single conv — does not transfer.
+		//
+		// That makes a dense mesh's texture stage the place where a run dies,
+		// which is what happens on ROCm today (see the progress note). Report the
+		// counts BEFORE the graph runs, so the last line before an abort names
+		// the level and its voxel count instead of leaving only a kernel error.
+		{
+			// The binding limit here is not the mul_mat column cap (measured for
+			// a [64,64] weight; the encoder's convs are [64,128] and two runs
+			// past 2^21 came out correct). It is that a GPU dispatch is sized in
+			// WORKITEMS, in 32 bits, and this level launches several kernels
+			// whose grid scales with the voxel count:
+			//
+			//   the S2C gather, get_rows over Lc*8 indices    -> Lc*8 * ~256
+			//   the skip slices, one copy per channel group   -> C_out*Lc * ...
+			//
+			// The skip was the first to break and is fixed (strided slices in
+			// place of ggml_mean); the gather is the next one. Fixing them one
+			// at a time is a losing game — the level needs evaluating in
+			// coarse-voxel blocks, the way shape_dec_level_chunked does it, and
+			// blocks=0 here means it qualifies. Until then this reports the
+			// counts rather than claiming to know which kernel goes first.
+			// See docs/progress/1536-cascade_backend-limits.md.
+			const bool	  will_chunk = lvl == 0 && has_down && hp.num_blocks[0] == 0 && !taps && ( int64_t )L > chunk_rows_limit();
+			// This level's own mul_mat column ceiling. mul_mat_max_rows was
+			// measured for a [64, 64] weight and the bug note says so; the
+			// encoder's convs are wider, so treat it as the best estimate
+			// available rather than a fact, and report where each level sits.
+			const std::string cw	 = "blocks." + std::to_string( lvl ) + "." + std::to_string( hp.num_blocks[lvl] ) + ".conv1.weight";
+			auto			  cwit	 = m->tensors.find( cw );
+			const int64_t	  cap	 = cwit == m->tensors.end() ? mul_mat_max_rows( GGML_TYPE_F32 ) : mul_mat_max_rows( cwit->second->type );
+			if( t2_timing )
+				std::fprintf( stderr,
+					"[shape_enc] level %d/%d: L=%d Lc=%d C_in=%d C_out=%d blocks=%d, S2C gather over %lld rows, mul_mat cap %lld%s%s\n",
+					lvl,
+					n_levels,
+					L,
+					Lc,
+					C_in,
+					C_out,
+					hp.num_blocks[lvl],
+					( long long )Lc * 8,
+					( long long )cap,
+					( int64_t )L > cap ? "  <-- PAST THE CAP" : "",
+					will_chunk ? "  (chunked)" : "" );
+			// Past the cap AND not split: the columns beyond it are never
+			// written, so this level's latents are partly undefined. It does not
+			// abort, which is the dangerous part — the corruption reaches the
+			// texture flow, whose attention then spreads it across every token.
+			// ...and only on a GPU. mul_mat_max_rows describes a ROCm/HIP kernel
+			// ceiling; on the CPU backend there is none, and warning there sent
+			// one investigation down the wrong path already.
+			const bool on_cpu = m->backend_name.find( "CPU" ) != std::string::npos || m->backend_name.find( "cpu" ) != std::string::npos;
+			if( !will_chunk && !on_cpu && ( int64_t )L > cap )
+				std::fprintf( stderr,
+					"[shape_enc] WARNING: level %d has %d voxels against a mul_mat column cap of %lld,"
+					" and this level is not split (it has %d ConvNeXt blocks). Expect silently wrong"
+					" latents past column %lld. See docs/progress/1536-cascade_backend-limits.md.\n",
+					lvl,
+					L,
+					( long long )cap,
+					hp.num_blocks[lvl],
+					( long long )cap );
+			// Only warn about what is actually still exposed. A warning that
+			// keeps naming a condition already handled is worse than none — it
+			// stops the next search at the wrong place, which this one did once.
+			if( has_down && !will_chunk && ( int64_t )Lc > ( ( int64_t )1 << 21 ) )
+				std::fprintf( stderr,
+					"[shape_enc] WARNING: level %d has %d parent voxels, so its S2C gather spans %lld rows."
+					" Past ~2^21 parents the per-row grids stop fitting a 32-bit dispatch and the launch is"
+					" rejected. This level is not eligible for the block-wise path (level > 0, ConvNeXt"
+					" blocks, or taps requested); expect an abort.\n",
+					lvl,
+					Lc,
+					( long long )Lc * 8 );
+		}
+
+		// ── level 0 past the block size: evaluate it in voxel blocks ────────
+		// Only level 0 ever gets large (Lc falls ~4x per level) and only level
+		// 0 qualifies without a per-stage ping-pong, because it carries no
+		// ConvNeXt blocks. Taps are excluded: they want the full-length
+		// intermediates this path never forms.
+		if( lvl == 0 && has_down && hp.num_blocks[0] == 0 && !taps && ( int64_t )L > chunk_rows_limit() ) {
+			std::vector<float> lvl_out;
+			if( !shape_enc_level0_chunked( m, hp, C_in, C_out, L, Lc, in_shift, nfine, ncoarse, childidx, chunk_rows_limit(), lvl_out, error ) )
+				return false;
+			feats = std::move( lvl_out );
+			// Same bookkeeping the single-graph path does at the end of a level
+			// with a down-block: the decoder replays this in reverse order.
+			trellis2_subdiv_level& sl = out_subs[( size_t )( n_levels - 2 - lvl )];
+			sl.fine_coords			  = coords;
+			sl.cidx					  = std::move( cidx );
+			coords					  = std::move( coarse_coords );
+			L						  = Lc;
+			continue;
 		}
 
 		// ── graph ───────────────────────────────────────────────────────────
@@ -3821,10 +4531,26 @@ bool trellis2_shape_enc_encode( trellis2_shape_enc_model* m,
 			ggml_tensor* xc	 = s2c( h, C_in );								 // [C_in*8, Lc]
 			ggml_tensor* hn2 = ggml_silu( ctx, ggml_norm( ctx, h1c, eps ) ); // norm2 affine-free
 			ggml_tensor* h2	 = conv( hn2, down + ".conv2", idx_c, mask_c );	 // [C_out, Lc]
-			// skip: mean over the (C_in*8 / C_out) group of xc
+			// skip: mean over the (C_in*8 / C_out) group of xc, summed as gsz
+			// strided slices rather than with ggml_mean.
+			//
+			// Same value; the reason is the launch. ggml_mean puts one
+			// workgroup on each of its C_out*Lc rows with 32 threads apiece,
+			// and a GPU dispatch is sized in workitems in 32 bits — so past
+			// C_out*Lc*32 = 2^32 it is rejected outright and takes the process
+			// down (measured: abort at Lc = 1,245,145, clean run at
+			// Lc ~ 969,000; see the progress note). The slices below are plain copies
+			// and adds over [C_out, Lc], which are flat-indexed and carry no
+			// such ceiling, so the encoder keeps running on the GPU on meshes
+			// where the mean cannot be launched at all.
 			const int	 gsz  = ( C_in * 8 ) / C_out;
-			ggml_tensor* skip = ggml_reshape_3d( ctx, xc, gsz, C_out, Lc );
-			skip			  = ggml_reshape_2d( ctx, ggml_cont( ctx, ggml_mean( ctx, skip ) ), C_out, Lc );
+			ggml_tensor* g3	  = ggml_reshape_3d( ctx, xc, gsz, C_out, Lc );
+			ggml_tensor* skip = nullptr;
+			for( int j = 0; j < gsz; ++j ) {
+				ggml_tensor* s = ggml_cont( ctx, ggml_view_3d( ctx, g3, 1, C_out, Lc, g3->nb[1], g3->nb[2], ( size_t )j * g3->nb[0] ) );
+				skip		   = skip ? ggml_add( ctx, skip, s ) : s;
+			}
+			skip = ggml_scale( ctx, ggml_reshape_2d( ctx, skip, C_out, Lc ), 1.0f / ( float )gsz );
 			out_h			  = ggml_add( ctx, h2, skip ); // [C_out, Lc]
 		} else {
 			ggml_tensor* hn = ggml_norm( ctx, h, 1e-5f ); // F.layer_norm affine-free

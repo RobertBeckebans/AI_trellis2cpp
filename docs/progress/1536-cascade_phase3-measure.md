@@ -112,6 +112,27 @@ D5 feared. The real consumer is downstream: the CGAL alpha wrap ingests all
 once. That path completed without trouble here, but its high-water mark is what
 should be sampled if D5 is ever closed properly.
 
+## The character run did not actually test the tier
+
+Worth stating plainly, because it was used as evidence twice and should not
+have been:
+
+| run | vertices |
+|---|---|
+| character at **1536** | 3,321,101 |
+| jester at **1024** | 3,440,673 |
+| jester at **1536** | 9,715,171 |
+
+The character's 1536 mesh is *smaller* than the jester's 1024 mesh. A sparse,
+smooth subject at 1536 lands in the same size regime a dense one reaches at
+1024 — so that run never entered the territory where the tier behaves
+differently. Its good result says the pipeline is correct at ~3M voxels, which
+1024 already showed.
+
+**Every run that actually reached the 1536 regime came out worse than the same
+object at 1024.** That is one object, so it is not a rate — but it is the only
+evidence about the regime the tier exists for, and it is negative.
+
 ## What this changes
 
 **The decode is not the problem.** D4 budgeted the 1536³ decode as the risk
@@ -121,11 +142,24 @@ inside the card** — only ~1.6× the ~12.5 s that `docs/PLAN.md` records for
 ~4.8× that on a dense object)** and the **texture stage (117.7 s)**, neither
 of which the plan flagged. Together they are 76 % of run 1.
 
-**`max_num_tokens` should not move.** The plan asked whether the 49,152 budget
-should rise on a 32 GB card. Run 2 shows what a scaffold near the ceiling
-already costs: ~10 minutes in the HR flow. Raising the budget would raise that
-ceiling with no VRAM benefit to collect — the constraint is time, not memory.
-Recommendation: leave it. `T2_MAX_NUM_TOKENS` remains for experiments.
+**`max_num_tokens` must not rise, and may have to fall.** The plan asked
+whether the 49,152 budget should rise on a 32 GB card. Two findings say no, and
+the second was not anticipated:
+
+- *Time.* A scaffold near the ceiling already spends ~8 minutes in the HR flow.
+  Raising the budget raises that with no VRAM benefit to collect.
+- *Correctness.* A third object (a jester figure, run 3) failed the HR decode
+  outright: decoder level 3 reached 2,151,017 voxels against this backend's
+  2,097,152 mul_mat column cap — 2.6 % over. The budget bounds the HR flow's
+  **input**; nothing bounds the decoder's **output**, and it is the output that
+  meets the ceiling. Plan D4 predicted this in one sentence and it was not
+  taken seriously enough: "the surface-scaling assumption ignores that the loop
+  caps the input token count but not the decoder's output voxel count."
+
+So the budget is not only a time knob, it is implicitly a decode-size knob, and
+49,152 is too generous for this backend's decoder. The safe value depends on
+the ratio between scaffold tokens and level-3 voxels, which no run has recorded
+— that is what the instrumentation added alongside this entry now reports.
 
 **`T2_PIPE_AUTO` staying at 1024 is vindicated.** A 5-minute best case and a
 ~14-minute dense case is not a default.

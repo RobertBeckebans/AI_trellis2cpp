@@ -69,6 +69,23 @@ rem GGML_CUDA_DISABLE_GRAPHS is deliberately not set here: the server sets it
 rem itself (see the comment in server/main.go), because on Windows it has to go
 rem through the CRT's own environment copy to reach the library's getenv().
 
+rem TRELLIS2_TIMING, by contrast, belongs exactly here. A variable that is
+rem already in the process environment when the exe starts is part of the
+rem environment block the DLL's CRT snapshots at load, so it reaches the
+rem library's getenv() without the setNativeEnv detour that os.Setenv needs.
+rem
+rem It makes the library report per-stage timings plus the two things that
+rem decide whether a cascade run can finish at all: the scaffold token count the
+rem budget settled on ([cascade]), and the shape decoder's per-level voxel
+rem counts against this backend's mul_mat column cap ([shape_dec] / [shape_enc]).
+rem See docs/bugs/rocm-texture-stage-invalid-configuration.md.
+rem
+rem To turn it off, delete the variable rather than setting it to 0 - the
+rem library tests for presence, so TRELLIS2_TIMING=0 still enables it:
+rem   set TRELLIS2_TIMING=
+set TRELLIS2_TIMING=1
+::set TRELLIS2_SHAPE_ENC_CPU=1
+
 rem Explicit .\ — cmd does not necessarily resolve executables from the current
 rem directory (NoDefaultCurrentDirectoryInExePath), which fails with exit 9009.
 echo.

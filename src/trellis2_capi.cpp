@@ -375,7 +375,13 @@ bool run_texture_stage( t2_pipeline* p,
 
 	if( progress )
 		progress( user, T2_STAGE_TEXTURE, 0, texture_steps > 0 ? texture_steps : 12 );
-	trellis2_shape_enc_model* enc = trellis2_shape_enc_load( p->shapeenc_path.c_str(), true, &e );
+
+	// TRELLIS2_SHAPE_ENC_CPU forces the encoder onto the CPU. Not needed for the
+	// dispatch-limit crash any more — that is fixed inside the encoder, where
+	// the skip mean is now summed as strided slices instead of one workgroup
+	// per row — but kept as an escape hatch, mirroring TRELLIS2_SHAPE_DEC_CPU.
+	const char*				  enc_device = std::getenv( "TRELLIS2_SHAPE_ENC_CPU" ) ? "cpu" : nullptr;
+	trellis2_shape_enc_model* enc		 = trellis2_shape_enc_load( p->shapeenc_path.c_str(), true, &e, enc_device );
 	if( !enc ) {
 		e = "shape_enc load: " + e;
 		return false;
@@ -1062,6 +1068,12 @@ t2_mesh_result* t2_generate( t2_pipeline* p,
 		// coarser mesh than asked for — upstream prints a notice here.
 		if( progress )
 			progress( user, T2_STAGE_UPSAMPLE, sel.resolution, req_res );
+		// The scaffold size is the one number that predicts the rest of the
+		// run: the HR flow's cost is linear in it, and the decoder's per-level
+		// voxel counts grow out of it. It is known here, minutes before either
+		// can fail, so it is worth reporting rather than reconstructing later.
+		if( std::getenv( "TRELLIS2_TIMING" ) )
+			std::fprintf( stderr, "[cascade] requested %d, achieved %d (grid %d), %d scaffold tokens, %d reduction(s), budget %d\n", req_res, sel.resolution, hr_grid, Lhr, sel.reductions, cascade_max_tokens() );
 
 		// Sharper HR-scaffold checkpoint (the cascade's refined structure).
 		emit_voxels( preview, preview_user, T2_STAGE_UPSAMPLE, 0, 0, hr_grid, hr_coords );
@@ -1139,7 +1151,58 @@ t2_mesh_result* t2_generate( t2_pipeline* p,
 	// boundary holes extract() left. Both only edit triangles (no new vertices),
 	// so the generated material volume can still be sampled at every vertex.
 	fdg::drop_small_components( mesh );
-	fdg::fill_holes( mesh );
+	// fill_holes' loop limit counts boundary EDGES, so it is not normalised
+	// against the grid: the same physical opening has proportionally more edges
+	// at a finer grid, and stops being filled somewhere between tiers. That is
+	// the mechanism behind holes appearing at 1024 and 1536 that 512 did not
+	// have, on the same object and seed. Scaling the limit with the grid keeps
+	// the threshold at a fixed physical size, which is what it was meant to be.
+	// (drop_small_components above is already relative, so it needs nothing.)
+	//
+	// The cap exists because a loop is fan-triangulated from its first vertex,
+	// which degrades on large non-planar boundaries — so this raises the size
+	// of opening that gets a rough fill, it does not make filling free.
+	fdg::fill_holes( mesh, std::max( 64, 64 * grid / 512 ) );
+
+	// What fill_holes could not close, as a number rather than an impression.
+	// A boundary edge belongs to exactly one triangle; on a closed surface there
+	// are none. Reporting the count and the largest loop separates "the limit is
+	// still too low" from "the extractor left genuine openings" — the two need
+	// opposite fixes, and a wireframe screenshot at 3M triangles cannot tell them
+	// apart.
+	if( std::getenv( "TRELLIS2_TIMING" ) ) {
+		std::unordered_map<uint64_t, int> edge_use;
+		edge_use.reserve( mesh.tris.size() );
+		auto ekey = []( int a, int b ) {
+			const uint32_t lo = a < b ? a : b, hi = a < b ? b : a;
+			return ( ( uint64_t )lo << 32 ) | hi;
+		};
+		for( size_t t = 0; t + 2 < mesh.tris.size(); t += 3 ) {
+			edge_use[ekey( mesh.tris[t], mesh.tris[t + 1] )]++;
+			edge_use[ekey( mesh.tris[t + 1], mesh.tris[t + 2] )]++;
+			edge_use[ekey( mesh.tris[t + 2], mesh.tris[t] )]++;
+		}
+		size_t				 boundary = 0, nonmanifold = 0;
+		std::vector<int32_t> bverts;
+		for( const auto& e : edge_use ) {
+			if( e.second == 1 ) {
+				++boundary;
+				bverts.push_back( ( int32_t )( e.first >> 32 ) );
+				bverts.push_back( ( int32_t )( e.first & 0xffffffffu ) );
+			} else if( e.second > 2 )
+				++nonmanifold;
+		}
+		std::fprintf( stderr,
+			"[mesh] grid %d: %zu verts, %zu tris, %zu boundary edges (%.4f%% of %zu), %zu non-manifold edges, fill limit %d\n",
+			grid,
+			mesh.verts.size() / 3,
+			mesh.tris.size() / 3,
+			boundary,
+			edge_use.empty() ? 0.0 : 100.0 * ( double )boundary / ( double )edge_use.size(),
+			edge_use.size(),
+			nonmanifold,
+			std::max( 64, 64 * grid / 512 ) );
+	}
 	r->normals = fdg::vertex_normals( mesh );
 	// The dual grid is unoriented. Our viewer shades around that, but glTF
 	// consumers and the wrap/remesh stages read the winding, so settle it here —

@@ -128,7 +128,12 @@ set_tests_properties(quad_remesh PROPERTIES SKIP_RETURN_CODE 77)
 add_test(NAME large_rows COMMAND test_large_rows)
 set_tests_properties(large_rows PROPERTIES SKIP_RETURN_CODE 77 LABELS "gpu;slow")
 
-add_test(NAME chunked_decode COMMAND test_chunked_decode "${T2_GGUFS}/tex_dec_f16.gguf")
+# Three models, because each covers a chunked path the others do not reach:
+# the texture decoder replays a recorded subdivision, the shape decoder PREDICTS
+# one (the subdiv head), and the shape encoder's level 0 spans two voxel spaces.
+add_test(NAME chunked_decode COMMAND test_chunked_decode
+         "${T2_GGUFS}/tex_dec_f16.gguf" 2
+         "${T2_GGUFS}/shape_dec_f16.gguf" "${T2_GGUFS}/shape_enc_f16.gguf")
 set_tests_properties(chunked_decode PROPERTIES SKIP_RETURN_CODE 77 LABELS "model")
 
 add_test(NAME preprocess COMMAND test_preprocess

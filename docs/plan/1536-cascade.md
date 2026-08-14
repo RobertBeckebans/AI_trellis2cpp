@@ -243,6 +243,14 @@ been measured for this tier.
 - **The extrapolated 15 GB** (D4) may be wrong in either direction;
   the surface-scaling assumption ignores that the loop caps the input
   token count but not the decoder's output voxel count.
+  *This second sentence turned out to be the important one, and not for
+  VRAM. A jester figure at 1536 drove decoder level 3 to 2,151,017
+  voxels against this backend's 2,097,152 mul_mat column cap and failed
+  the decode outright, after 407 s of HR flow. The same object completes
+  at 1024, because the coarser 64³ quantization merges more voxels and
+  level 3 inherits the smaller scaffold. So `max_num_tokens` is
+  implicitly a decode-size limit and 49,152 is too generous here — see
+  `docs/bugs/rocm-texture-stage-invalid-configuration.md`.*
 - **Host RAM** (D5) is entirely unknown for this tier.
   *Phase 3: the generation half is now bounded — a 3.32M-vertex /
   6.66M-triangle result is ~228 MiB in `t2_mesh_result`, ~0.5 GB

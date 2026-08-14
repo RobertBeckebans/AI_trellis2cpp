@@ -133,7 +133,16 @@ int main( int argc, char** argv )
 
 	// "" restores the production block size, which is the configuration a real
 	// generation runs; "997" is not a divisor, so the last block is ragged.
-	const char* cases[]	 = { "", "997" };
+	//
+	// The smaller sizes reach the INTERMEDIATE levels, not just the finest one.
+	// Those take shape_dec_level_chunked, which splits per stage instead of per
+	// level because their ConvNeXt chains would otherwise need a halo — a
+	// different code path with a different failure mode, and the only one that
+	// can be exercised without a mesh large enough to pass the backend's column
+	// ceiling. The fixture is 8 latent voxels -> 32768 fine over 5 levels, so
+	// 997 already splits level 3 (4096 voxels), 333 also level 2 (512), and 37
+	// leaves every splittable level ragged across many blocks.
+	const char* cases[]	 = { "", "997", "333", "37" };
 	int			failures = 0;
 	for( const char* c : cases ) {
 		std::vector<float>	 got;
@@ -176,5 +185,130 @@ int main( int argc, char** argv )
 			++failures;
 	}
 	trellis2_shape_dec_free( m );
+
+	// ── the same comparison through the SHAPE decoder ────────────────────────
+	// The texture decoder replays a recorded subdivision (`guide`), so the loop
+	// above never reaches the chunked level's subdiv head. The shape decoder
+	// predicts it instead, and that head is the one stage of the level that
+	// does not convolve — which is exactly how it slipped through: its
+	// neighbour leaves never enter the graph, so ggml_gallocr leaves them
+	// without a buffer and uploading into them asserts. Covered here now.
+	const std::string spath = argc > 3 ? argv[3] : "ggufs/shape_dec_f16.gguf";
+	trellis2_shape_dec_model* sm = trellis2_shape_dec_load( spath, true, &err );
+	if( !sm ) {
+		std::printf( "\nshape_dec not loadable (%s): %s -- subdiv head not covered\n", spath.c_str(), err.c_str() );
+		return failures ? 1 : 0;
+	}
+	const trellis2_shape_dec_hparams& shp = trellis2_shape_dec_hparams_of( sm );
+	std::vector<float>				  sslat( ( size_t )L * shp.latent_channels );
+	s = 20260813u;
+	for( auto& v : sslat )
+		v = lcg( s );
+	std::printf( "\nshape decoder: %s (predicts the subdivision)\n", spath.c_str() );
+
+	std::vector<float>	 sref;
+	std::vector<int32_t> src_;
+	set_chunk( "100000000" );
+	if( !trellis2_shape_dec_decode( sm, sslat.data(), L, coords.data(), sref, src_, nullptr, &err ) ) {
+		std::printf( "  unchunked shape decode failed: %s\n", err.c_str() );
+		trellis2_shape_dec_free( sm );
+		return 1;
+	}
+	std::printf( "  unchunked: %zu voxels\n", src_.size() / 3 );
+	for( const char* c : cases ) {
+		std::vector<float>	 got;
+		std::vector<int32_t> gc;
+		set_chunk( c );
+		if( !trellis2_shape_dec_decode( sm, sslat.data(), L, coords.data(), got, gc, nullptr, &err ) ) {
+			std::printf( "  block=%-9s shape decode failed: %s\n", c[0] ? c : "default", err.c_str() );
+			++failures;
+			continue;
+		}
+		// The predicted coordinate set has to match too: the subdivision is what
+		// fixes the next level's voxel order, so a chunked run that produced the
+		// same features on a different coord set would still be wrong.
+		if( gc != src_ || got.size() != sref.size() ) {
+			std::printf( "  block=%-9s COORD/SHAPE MISMATCH %zu vs %zu voxels -> FAIL\n", c[0] ? c : "default", gc.size() / 3, src_.size() / 3 );
+			++failures;
+			continue;
+		}
+		double worst = 0.0;
+		size_t nbad	 = 0;
+		for( size_t i = 0; i < sref.size(); ++i ) {
+			const double d = std::fabs( ( double )got[i] - ( double )sref[i] );
+			if( d > worst )
+				worst = d;
+			if( d > 1e-5 )
+				++nbad;
+		}
+		std::printf( "  block=%-9s %zu values, %zu over 1e-5, max|d| = %.3g -> %s\n", c[0] ? c : "default", sref.size(), nbad, worst, nbad ? "FAIL" : "OK" );
+		if( nbad )
+			++failures;
+	}
+	trellis2_shape_dec_free( sm );
+
+	// ── the same comparison through the SHAPE ENCODER ────────────────────────
+	// The encoder's level 0 is the other place a grid scales with the voxel
+	// count (the S2C gather over Lc*8 rows, the skip reduction over C_out*Lc),
+	// and it is the one that aborts a 1536 texture stage on ROCm. Its chunked
+	// path spans two voxel spaces — convs and child gather in fine space, the
+	// result in coarse — so it is worth its own gate rather than being assumed
+	// to follow from the decoder's.
+	const std::string		  epath = argc > 4 ? argv[4] : "ggufs/shape_enc_f16.gguf";
+	trellis2_shape_enc_model* em	= trellis2_shape_enc_load( epath, true, &err );
+	if( !em ) {
+		std::printf( "\nshape_enc not loadable (%s): %s -- encoder level 0 not covered\n", epath.c_str(), err.c_str() );
+		return failures ? 1 : 0;
+	}
+	const trellis2_shape_enc_hparams& ehp = trellis2_shape_enc_hparams_of( em );
+	// The encoder consumes the FINEST coord set, which is what the decoder
+	// produces — the same voxel counts the real texture stage feeds it.
+	const std::vector<int32_t>&		  ec  = subs.back().fine_coords;
+	const int						  eL  = ( int )( ec.size() / 3 );
+	std::vector<float>				  in6( ( size_t )eL * ehp.in_channels );
+	s = 20260814u;
+	for( auto& v : in6 )
+		v = lcg( s );
+	std::printf( "\nshape encoder: %s (%d fine voxels, level 0 blocks=%d)\n", epath.c_str(), eL, ehp.num_blocks[0] );
+
+	std::vector<float>				   eref;
+	std::vector<int32_t>			   erc;
+	std::vector<trellis2_subdiv_level>  esubs;
+	set_chunk( "100000000" );
+	if( !trellis2_shape_enc_encode( em, in6.data(), eL, ec.data(), eref, erc, esubs, nullptr, &err ) ) {
+		std::printf( "  unchunked encode failed: %s\n", err.c_str() );
+		trellis2_shape_enc_free( em );
+		return 1;
+	}
+	std::printf( "  unchunked: %zu latent voxels\n", erc.size() / 3 );
+	for( const char* c : cases ) {
+		std::vector<float>				   got;
+		std::vector<int32_t>			   gc;
+		std::vector<trellis2_subdiv_level> gs;
+		set_chunk( c );
+		if( !trellis2_shape_enc_encode( em, in6.data(), eL, ec.data(), got, gc, gs, nullptr, &err ) ) {
+			std::printf( "  block=%-9s encode failed: %s\n", c[0] ? c : "default", err.c_str() );
+			++failures;
+			continue;
+		}
+		if( gc != erc || got.size() != eref.size() ) {
+			std::printf( "  block=%-9s COORD/SHAPE MISMATCH %zu vs %zu -> FAIL\n", c[0] ? c : "default", gc.size() / 3, erc.size() / 3 );
+			++failures;
+			continue;
+		}
+		double worst = 0.0;
+		size_t nbad	 = 0;
+		for( size_t i = 0; i < eref.size(); ++i ) {
+			const double d = std::fabs( ( double )got[i] - ( double )eref[i] );
+			if( d > worst )
+				worst = d;
+			if( d > 1e-5 )
+				++nbad;
+		}
+		std::printf( "  block=%-9s %zu values, %zu over 1e-5, max|d| = %.3g -> %s\n", c[0] ? c : "default", eref.size(), nbad, worst, nbad ? "FAIL" : "OK" );
+		if( nbad )
+			++failures;
+	}
+	trellis2_shape_enc_free( em );
 	return failures ? 1 : 0;
 }
