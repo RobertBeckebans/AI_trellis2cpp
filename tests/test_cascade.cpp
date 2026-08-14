@@ -176,7 +176,7 @@ int main( int argc, char** argv )
 
 			// Invariants that hold with or without a 1536 reference in the dump.
 			bool inv = s1536.resolution >= 1024 && s1536.resolution <= 1536 && s1536.resolution % 128 == 0 && s1536.grid == s1536.resolution / 16 &&
-				( s1536.tokens < t2cascade::default_max_num_tokens || s1536.resolution == 1024 ) && s1536.tokens >= s1024.tokens;
+					   ( s1536.tokens < t2cascade::default_max_num_tokens || s1536.resolution == 1024 ) && s1536.tokens >= s1024.tokens;
 			int mx = -1;
 			for( int32_t v : sel_1536 )
 				if( v > mx )

@@ -23,14 +23,14 @@ namespace t2cascade
 {
 
 // TRELLIS.2's default HR token budget, independent of the tier.
-const int default_max_num_tokens = 49152;
+const int		default_max_num_tokens = 49152;
 
 // The floor the loop may fall back to, and the step it falls in.
-const int min_resolution		 = 1024;
-const int resolution_step		 = 128;
+const int		min_resolution	= 1024;
+const int		resolution_step = 128;
 
 // The decoder's fixed scaffold-to-grid factor: resolution / 16 voxels per axis.
-const int grid_divisor			 = 16;
+const int		grid_divisor = 16;
 
 // Pack a coordinate triple into one hash key. Coordinates stay well below 2^20
 // at every tier (96 at 1536), so the three fields never collide.
@@ -88,8 +88,7 @@ inline selection select_scaffold( const std::vector<int32_t>& up_coords, int lr_
 		s.tokens = ( int )( out.size() / 3 );
 		// `<=` on the floor rather than upstream's `==`: identical for the two
 		// shipped tiers, but it also terminates if a caller ever asks below it.
-		if( s.tokens < max_num_tokens || s.resolution <= min_resolution )
-			break;
+		if( s.tokens < max_num_tokens || s.resolution <= min_resolution ) break;
 		s.resolution -= resolution_step;
 		s.reductions++;
 	}

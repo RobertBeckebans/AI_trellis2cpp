@@ -193,8 +193,8 @@ int main( int argc, char** argv )
 	// does not convolve — which is exactly how it slipped through: its
 	// neighbour leaves never enter the graph, so ggml_gallocr leaves them
 	// without a buffer and uploading into them asserts. Covered here now.
-	const std::string spath = argc > 3 ? argv[3] : "ggufs/shape_dec_f16.gguf";
-	trellis2_shape_dec_model* sm = trellis2_shape_dec_load( spath, true, &err );
+	const std::string		  spath = argc > 3 ? argv[3] : "ggufs/shape_dec_f16.gguf";
+	trellis2_shape_dec_model* sm	= trellis2_shape_dec_load( spath, true, &err );
 	if( !sm ) {
 		std::printf( "\nshape_dec not loadable (%s): %s -- subdiv head not covered\n", spath.c_str(), err.c_str() );
 		return failures ? 1 : 0;
@@ -263,8 +263,8 @@ int main( int argc, char** argv )
 	const trellis2_shape_enc_hparams& ehp = trellis2_shape_enc_hparams_of( em );
 	// The encoder consumes the FINEST coord set, which is what the decoder
 	// produces — the same voxel counts the real texture stage feeds it.
-	const std::vector<int32_t>&		  ec  = subs.back().fine_coords;
-	const int						  eL  = ( int )( ec.size() / 3 );
+	const std::vector<int32_t>&		  ec = subs.back().fine_coords;
+	const int						  eL = ( int )( ec.size() / 3 );
 	std::vector<float>				  in6( ( size_t )eL * ehp.in_channels );
 	s = 20260814u;
 	for( auto& v : in6 )
@@ -273,7 +273,7 @@ int main( int argc, char** argv )
 
 	std::vector<float>				   eref;
 	std::vector<int32_t>			   erc;
-	std::vector<trellis2_subdiv_level>  esubs;
+	std::vector<trellis2_subdiv_level> esubs;
 	set_chunk( "100000000" );
 	if( !trellis2_shape_enc_encode( em, in6.data(), eL, ec.data(), eref, erc, esubs, nullptr, &err ) ) {
 		std::printf( "  unchunked encode failed: %s\n", err.c_str() );

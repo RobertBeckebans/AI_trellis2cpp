@@ -21,6 +21,12 @@ docker run --rm -v "$PWD":/work -w /work trellis2-ref bash -c '
 scripts/refgen.sh                                              # dump reference activations
 ```
 
+The container is CUDA-only. On a host whose GPU it cannot use — the AMD
+development machine — the same scripts run natively against the host's torch
+build instead; see [`reference-environment.md`](reference-environment.md) for
+the `uv` setup, and read its D1 warning before trusting a numeric tap produced
+that way.
+
 ## Run
 
 ```sh
@@ -44,7 +50,8 @@ ctest --test-dir build                  # full parity (needs ggufs/ + dumps/)
 | standalone shape encoder → texture flow → texture decoder | `test_texture` | shape latent, flow forward/sampler, guided 6-channel PBR decode | parity-gated; sampler backend drift uses the documented loose gate |
 | sparse PBR surface sampling | `test_pbr_sampling` | dense trilinear interpolation + sparse-boundary normalization | **PASS** |
 | GLB PBR/alpha export | `test_mesh_export` | direct vertex RGBA, retained metallic/roughness, glTF alpha mode | **PASS** |
-| dual-grid mesh extraction | `test_marching_cubes` (invariants) + visual | watertight-manifold, Euler characteristic, winding | **PASS** |
+| marching-cubes preview extraction (`examples/marching_cubes.h`) | `test_marching_cubes` (invariants) | watertight-manifold, Euler characteristic, winding | **PASS** |
+| dual-grid mesh extraction (`examples/flexible_dual_grid.h`) | `test_dual_grid` (invariants) | closed, 2-manifold, Euler characteristic on analytic sphere/torus at two grids; `fill_holes` limit contract | **PASS**, χ = 2 and 0 as expected, 0 boundary and 0 non-manifold edges. Previously credited to `test_marching_cubes`, which exercises a different extractor — this path had no test |
 | **1024 cascade** — decoder upsample(×4) → 512³ coords | `test_cascade` | full coord set + quantized 64³ HR scaffold | **PASS**, set match to 0.0001% (1 voxel of 995k) |
 | **1024 cascade** — HR (1024-model) flow forward | `test_cascade` | full output | **PASS**, rel-L2 ~3e-4 (CPU); ~1e-2 on GPU flash |
 | **1024 cascade** — final 1024³ decode (3.97M voxels) | `test_cascade` | per-level features + subdivision + 7-ch output | **PASS**, rel-L2 ≤ 2e-2, set within 0.0001% |

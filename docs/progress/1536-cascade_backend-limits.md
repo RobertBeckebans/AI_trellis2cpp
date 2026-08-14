@@ -297,6 +297,34 @@ Worth keeping in mind before chasing a rendering artefact: with one vertex per
 voxel the tessellation is always fine, so a faceted appearance is a statement
 about the *shape*, never about triangle budget.
 
+### The extractor is not the cause — now with a test
+
+`tests/test_dual_grid` runs `fdg::extract` on analytic fields: a sphere at two
+grid resolutions and a torus. All come out **closed, 2-manifold, with the right
+Euler characteristic** (χ = 2 and 0), zero boundary and zero non-manifold edges,
+and `drop_small_components` + `fill_holes` leave a closed mesh closed. It also
+pins `fill_holes`' contract on a punctured surface: a generous limit closes the
+loop, a limit below its length leaves it open.
+
+So the 7.47 % non-manifold rate on the torn run is not the extractor
+mishandling a fine grid — given a coherent voxel set it produces a clean
+manifold at any resolution. The tear is in the **input**, which is the same
+conclusion the CPU-decode and chunking experiments reached, now backed by a
+test rather than by elimination.
+
+This also closes a gap in `docs/VERIFICATION.md`, which credited "dual-grid
+mesh extraction" to `test_marching_cubes` — a different extractor. The path
+every generated mesh actually comes out of had no test.
+
+### A warning for the one failure mode
+
+The finest-level expansion ratio is now checked in `shape_dec_run` and warns
+above 4.2 (measured: 4.00–4.04 on the four usable runs, 4.52 on the torn one).
+It only warns — a generation this expensive should not be discarded on a
+five-point heuristic, and the definitive numbers are the boundary and
+non-manifold counts reported after extraction. But the one known way for a run
+to be silently bad now says so while it is still running.
+
 ### Cost is occupancy, not resolution
 
 The sparse-structure stage is a dense 16³ latent and costs the same for

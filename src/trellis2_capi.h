@@ -57,7 +57,7 @@ enum t2_pipeline_type {
 	** 1024 in units of 128 (see T2_STAGE_UPSAMPLE below and
 	** t2_mesh_grid_resolution). Needs a card that can hold the larger decode;
 	** T2_PIPE_AUTO deliberately never selects it. */
-	T2_PIPE_1536   = 4
+	T2_PIPE_1536 = 4
 };
 
 /* Solid-background handling before the alpha-bbox crop. */

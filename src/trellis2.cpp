@@ -2985,28 +2985,28 @@ static bool shape_dec_final_level_chunked( trellis2_shape_dec_model* m,
 // channel repeat, so doing it here keeps the per-block graphs to a single
 // input tensor instead of threading a second one through every stage.
 static bool shape_dec_level_chunked( trellis2_shape_dec_model* m,
-	const trellis2_shape_dec_hparams&							 hp,
-	int															 lvl,
-	int															 C,
-	int															 prev_C,
-	int															 C_next,
-	int															 L,
-	bool														 want_subdiv,
-	const std::vector<std::vector<int32_t>>&					 nidx,
-	const std::vector<float>&									 in_hch,
-	const std::vector<float>&									 in_xch,
-	int64_t														 chunk,
-	std::vector<float>&											 out_h1,
-	std::vector<float>&											 out_x,
-	std::vector<float>&											 out_subdiv,
-	std::string*												 error )
+	const trellis2_shape_dec_hparams&						   hp,
+	int														   lvl,
+	int														   C,
+	int														   prev_C,
+	int														   C_next,
+	int														   L,
+	bool													   want_subdiv,
+	const std::vector<std::vector<int32_t>>&				   nidx,
+	const std::vector<float>&								   in_hch,
+	const std::vector<float>&								   in_xch,
+	int64_t													   chunk,
+	std::vector<float>&										   out_h1,
+	std::vector<float>&										   out_x,
+	std::vector<float>&										   out_subdiv,
+	std::string*											   error )
 {
-	const size_t	  es	   = sizeof( float );
-	const float		  eps	   = hp.norm_eps;
-	const int		  xC	   = prev_C / 8;
-	const int		  rep	   = C / xC; // repeat_interleave factor
-	const std::string up_prev  = "blocks." + std::to_string( lvl - 1 ) + "." + std::to_string( hp.num_blocks[lvl - 1] );
-	const std::string up_this  = "blocks." + std::to_string( lvl ) + "." + std::to_string( hp.num_blocks[lvl] );
+	const size_t	  es	  = sizeof( float );
+	const float		  eps	  = hp.norm_eps;
+	const int		  xC	  = prev_C / 8;
+	const int		  rep	  = C / xC; // repeat_interleave factor
+	const std::string up_prev = "blocks." + std::to_string( lvl - 1 ) + "." + std::to_string( hp.num_blocks[lvl - 1] );
+	const std::string up_this = "blocks." + std::to_string( lvl ) + "." + std::to_string( hp.num_blocks[lvl] );
 	std::string		  missing;
 
 	auto			  W = [&]( const std::string& n ) -> ggml_tensor* {
@@ -3137,7 +3137,7 @@ static bool shape_dec_level_chunked( trellis2_shape_dec_model* m,
 		}
 		return ggml_add( ctx, acc, b );
 	};
-	auto no_pre = []( ggml_context*, ggml_tensor* g ) { return g; };
+	auto no_pre	 = []( ggml_context*, ggml_tensor* g ) { return g; };
 	auto lin_blk = [&]( ggml_context* ctx, ggml_tensor* in, const std::string& pfx ) -> ggml_tensor* {
 		ggml_tensor* w = W( pfx + ".weight" );
 		if( !w )
@@ -3160,11 +3160,16 @@ static bool shape_dec_level_chunked( trellis2_shape_dec_model* m,
 
 	// ── stage A: the previous level's up-block tail, conv2 half ──────────────
 	std::vector<float> cur;
-	if( !run_stage( C, C, /*needs_nbr*/ true, in_hch, cur, [&]( ggml_context* ctx, ggml_tensor* res, std::vector<ggml_tensor*>& idx_t, std::vector<ggml_tensor*>& mask_t, int /*n*/, int64_t /*v0*/ ) -> ggml_tensor* {
-			// norm2 is affine-free and silu is elementwise, so both ride behind
-			// the gather (see conv_blk).
-			return conv_blk( ctx, res, up_prev + ".conv2", idx_t, mask_t, [&]( ggml_context* c, ggml_tensor* g ) { return ggml_silu( c, ggml_norm( c, g, eps ) ); } );
-		} ) )
+	if( !run_stage( C,
+			C,
+			/*needs_nbr*/ true,
+			in_hch,
+			cur,
+			[&]( ggml_context* ctx, ggml_tensor* res, std::vector<ggml_tensor*>& idx_t, std::vector<ggml_tensor*>& mask_t, int /*n*/, int64_t /*v0*/ ) -> ggml_tensor* {
+				// norm2 is affine-free and silu is elementwise, so both ride behind
+				// the gather (see conv_blk).
+				return conv_blk( ctx, res, up_prev + ".conv2", idx_t, mask_t, [&]( ggml_context* c, ggml_tensor* g ) { return ggml_silu( c, ggml_norm( c, g, eps ) ); } );
+			} ) )
 		return false;
 
 	// host: + repeat_interleave(xch). Channel repeat, so a plain strided add.
@@ -3180,42 +3185,49 @@ static bool shape_dec_level_chunked( trellis2_shape_dec_model* m,
 	for( int b = 0; b < hp.num_blocks[lvl]; ++b ) {
 		const std::string  pfx = "blocks." + std::to_string( lvl ) + "." + std::to_string( b );
 		std::vector<float> nxt;
-		if( !run_stage( C, C, /*needs_nbr*/ true, cur, nxt, [&]( ggml_context* ctx, ggml_tensor* res, std::vector<ggml_tensor*>& idx_t, std::vector<ggml_tensor*>& mask_t, int n, int64_t v0 ) -> ggml_tensor* {
-				ggml_tensor* h = conv_blk( ctx, res, pfx + ".conv", idx_t, mask_t, no_pre );
-				if( !h )
-					return nullptr;
-				h = ln_affine_blk( ctx, h, pfx + ".norm" );
-				h = lin_blk( ctx, h, pfx + ".mlp.0" );
-				if( !h )
-					return nullptr;
-				h = ggml_silu( ctx, h );
-				h = lin_blk( ctx, h, pfx + ".mlp.2" );
-				if( !h )
-					return nullptr;
-				// residual: this block's own rows of the resident input
-				ggml_tensor* x0 = ggml_cont( ctx, ggml_view_2d( ctx, res, C, n, res->nb[1], ( size_t )v0 * res->nb[1] ) );
-				return ggml_add( ctx, h, x0 );
-			} ) )
+		if( !run_stage(
+				C, C, /*needs_nbr*/ true, cur, nxt, [&]( ggml_context* ctx, ggml_tensor* res, std::vector<ggml_tensor*>& idx_t, std::vector<ggml_tensor*>& mask_t, int n, int64_t v0 ) -> ggml_tensor* {
+					ggml_tensor* h = conv_blk( ctx, res, pfx + ".conv", idx_t, mask_t, no_pre );
+					if( !h )
+						return nullptr;
+					h = ln_affine_blk( ctx, h, pfx + ".norm" );
+					h = lin_blk( ctx, h, pfx + ".mlp.0" );
+					if( !h )
+						return nullptr;
+					h = ggml_silu( ctx, h );
+					h = lin_blk( ctx, h, pfx + ".mlp.2" );
+					if( !h )
+						return nullptr;
+					// residual: this block's own rows of the resident input
+					ggml_tensor* x0 = ggml_cont( ctx, ggml_view_2d( ctx, res, C, n, res->nb[1], ( size_t )v0 * res->nb[1] ) );
+					return ggml_add( ctx, h, x0 );
+				} ) )
 			return false;
 		cur.swap( nxt );
 	}
 
 	// ── stages C: the up-block heads ─────────────────────────────────────────
 	if( want_subdiv ) {
-		if( !run_stage( C, 8, /*needs_nbr*/ false, cur, out_subdiv, [&]( ggml_context* ctx, ggml_tensor* res, std::vector<ggml_tensor*>&, std::vector<ggml_tensor*>&, int n, int64_t v0 ) -> ggml_tensor* {
-				ggml_tensor* x0 = ggml_cont( ctx, ggml_view_2d( ctx, res, C, n, res->nb[1], ( size_t )v0 * res->nb[1] ) );
-				return lin_blk( ctx, x0, up_this + ".to_subdiv" );
-			} ) )
+		if( !run_stage(
+				C, 8, /*needs_nbr*/ false, cur, out_subdiv, [&]( ggml_context* ctx, ggml_tensor* res, std::vector<ggml_tensor*>&, std::vector<ggml_tensor*>&, int n, int64_t v0 ) -> ggml_tensor* {
+					ggml_tensor* x0 = ggml_cont( ctx, ggml_view_2d( ctx, res, C, n, res->nb[1], ( size_t )v0 * res->nb[1] ) );
+					return lin_blk( ctx, x0, up_this + ".to_subdiv" );
+				} ) )
 			return false;
 	}
-	if( !run_stage( C, C_next * 8, /*needs_nbr*/ true, cur, out_h1, [&]( ggml_context* ctx, ggml_tensor* res, std::vector<ggml_tensor*>& idx_t, std::vector<ggml_tensor*>& mask_t, int /*n*/, int64_t /*v0*/ ) -> ggml_tensor* {
-			// norm1 is an affine LN and silu is elementwise — per-row either
-			// way, so they ride behind the gather like norm2 above.
-			return conv_blk( ctx, res, up_this + ".conv1", idx_t, mask_t, [&]( ggml_context* c, ggml_tensor* g ) {
-				ggml_tensor* y = ln_affine_blk( c, g, up_this + ".norm1" );
-				return y ? ggml_silu( c, y ) : nullptr;
-			} );
-		} ) )
+	if( !run_stage( C,
+			C_next * 8,
+			/*needs_nbr*/ true,
+			cur,
+			out_h1,
+			[&]( ggml_context* ctx, ggml_tensor* res, std::vector<ggml_tensor*>& idx_t, std::vector<ggml_tensor*>& mask_t, int /*n*/, int64_t /*v0*/ ) -> ggml_tensor* {
+				// norm1 is an affine LN and silu is elementwise — per-row either
+				// way, so they ride behind the gather like norm2 above.
+				return conv_blk( ctx, res, up_this + ".conv1", idx_t, mask_t, [&]( ggml_context* c, ggml_tensor* g ) {
+					ggml_tensor* y = ln_affine_blk( c, g, up_this + ".norm1" );
+					return y ? ggml_silu( c, y ) : nullptr;
+				} );
+			} ) )
 		return false;
 
 	out_x.swap( cur ); // "x" is the level's features, unchanged
@@ -3396,7 +3408,41 @@ static bool shape_dec_run( trellis2_shape_dec_model* m,
 			// this). Logging the counts is what lets the ratio between the two
 			// be calibrated from real runs instead of assumed.
 			if( t2_timing )
-				std::fprintf( stderr, "[shape_dec] level %d: L=%d, mul_mat column cap %lld, split block %lld%s\n", lvl, L, ( long long )max_rows, ( long long )block, ( int64_t )L > max_rows ? "  <-- PAST THE CAP" : "" );
+				std::fprintf( stderr,
+					"[shape_dec] level %d: L=%d, mul_mat column cap %lld, split block %lld%s\n",
+					lvl,
+					L,
+					( long long )max_rows,
+					( long long )block,
+					( int64_t )L > max_rows ? "  <-- PAST THE CAP" : "" );
+
+			// Subdivision runaway, checked at the finest level only.
+			//
+			// A surface should roughly quadruple per subdivision. When it grows
+			// faster the decoder is thickening the set instead of following a
+			// surface, and the extracted mesh comes out topologically torn —
+			// which reads as a successful run right up until someone looks at
+			// it. Measured over five generations: the four usable ones sit at
+			// 4.00, 4.01, 4.04 and 4.04 here, and the one torn result (7.5 %
+			// non-manifold edges against 0.36–1.03 % for the others) at 4.52.
+			//
+			// So the threshold is a heuristic drawn from five points, not a
+			// derived constant, and it is deliberately placed with room on both
+			// sides. It only warns; the caller keeps its mesh, because a
+			// generation this expensive should not be thrown away on a rule of
+			// thumb. The definitive numbers are the boundary/non-manifold edge
+			// counts the pipeline reports after extraction.
+			if( !has_up && prev_L > 0 ) {
+				const double ratio = ( double )L / ( double )prev_L;
+				if( t2_timing )
+					std::fprintf( stderr, "[shape_dec] finest-level expansion %.3f (a surface gives ~4)\n", ratio );
+				if( ratio > 4.2 )
+					std::fprintf( stderr,
+						"[shape_dec] WARNING: the finest subdivision expanded %.2fx where a surface gives ~4."
+						" The decoder is adding volume rather than surface, and this mesh is likely to come out"
+						" torn (many non-manifold edges). A different seed, or the next tier down, usually avoids it.\n",
+						ratio );
+			}
 
 			if( ( int64_t )L > block ) {
 				const bool splittable = !has_up && lvl > 0 && hp.num_blocks[lvl] == 0 && !taps;
@@ -3964,26 +4010,26 @@ const trellis2_shape_enc_hparams& trellis2_shape_enc_hparams_of( const trellis2_
 // neighbour or child is ever absent and the result matches the single-graph
 // path exactly — every op is per-row or a gather.
 static bool shape_enc_level_chunked( trellis2_shape_enc_model* m,
-	const trellis2_shape_enc_hparams&							 hp,
-	int															 lvl,
-	int															 C_in,
-	int															 C_out,
-	int															 L,
-	int															 Lc,
-	const std::vector<float>&									 in_shift,
-	const std::vector<std::vector<int32_t>>&					 nfine,
-	const std::vector<std::vector<int32_t>>&					 ncoarse,
-	const std::vector<int32_t>&									 childidx,
-	int64_t														 chunk,
-	std::vector<float>&											 out_feats,
-	std::string*												 error )
+	const trellis2_shape_enc_hparams&						   hp,
+	int														   lvl,
+	int														   C_in,
+	int														   C_out,
+	int														   L,
+	int														   Lc,
+	const std::vector<float>&								   in_shift,
+	const std::vector<std::vector<int32_t>>&				   nfine,
+	const std::vector<std::vector<int32_t>>&				   ncoarse,
+	const std::vector<int32_t>&								   childidx,
+	int64_t													   chunk,
+	std::vector<float>&										   out_feats,
+	std::string*											   error )
 {
-	const size_t	  es	= sizeof( float );
-	const float		  eps	= hp.norm_eps;
+	const size_t	  es	 = sizeof( float );
+	const float		  eps	 = hp.norm_eps;
 	const int		  in_dim = hp.in_channels;
-	const int		  h1C	= C_out / 8;
-	const int		  gsz	= ( C_in * 8 ) / C_out;
-	const std::string down	= "blocks." + std::to_string( lvl ) + "." + std::to_string( hp.num_blocks[lvl] );
+	const int		  h1C	 = C_out / 8;
+	const int		  gsz	 = ( C_in * 8 ) / C_out;
+	const std::string down	 = "blocks." + std::to_string( lvl ) + "." + std::to_string( hp.num_blocks[lvl] );
 	std::string		  missing;
 
 	auto			  W = [&]( const std::string& n ) -> ggml_tensor* {
@@ -4019,8 +4065,8 @@ static bool shape_enc_level_chunked( trellis2_shape_enc_model* m,
 		out.resize( ( size_t )Cout * Lout );
 		bool ok = true;
 		for( int64_t v0 = 0; v0 < Lout && ok; v0 += chunk ) {
-			const int		 n		= ( int )std::min<int64_t>( chunk, ( int64_t )Lout - v0 );
-			const size_t	 gsize	= 2048;
+			const int		 n	   = ( int )std::min<int64_t>( chunk, ( int64_t )Lout - v0 );
+			const size_t	 gsize = 2048;
 			ggml_init_params ip { ggml_tensor_overhead() * gsize + ggml_graph_overhead_custom( gsize, false ), nullptr, true };
 			ggml_context*	 ctx = ggml_init( ip );
 			ggml_cgraph*	 gf	 = ggml_new_graph_custom( ctx, gsize, false );
@@ -4106,14 +4152,14 @@ static bool shape_enc_level_chunked( trellis2_shape_enc_model* m,
 		return ggml_add( ctx, acc, b );
 	};
 	// S2C: gather each coarse voxel's 8 children and stack them channel-wise.
-	auto no_pre	  = []( ggml_context*, ggml_tensor* g ) { return g; };
-	auto lin_blk  = [&]( ggml_context* ctx, ggml_tensor* in, const std::string& pfx ) -> ggml_tensor* {
-		 ggml_tensor* w = W( pfx + ".weight" );
-		 if( !w )
-			 return nullptr;
-		 ggml_tensor* y = ggml_mul_mat( ctx, w, in );
-		 ggml_tensor* b = W( pfx + ".bias" );
-		 return b ? ggml_add( ctx, y, b ) : y;
+	auto no_pre	 = []( ggml_context*, ggml_tensor* g ) { return g; };
+	auto lin_blk = [&]( ggml_context* ctx, ggml_tensor* in, const std::string& pfx ) -> ggml_tensor* {
+		ggml_tensor* w = W( pfx + ".weight" );
+		if( !w )
+			return nullptr;
+		ggml_tensor* y = ggml_mul_mat( ctx, w, in );
+		ggml_tensor* b = W( pfx + ".bias" );
+		return b ? ggml_add( ctx, y, b ) : y;
 	};
 	auto ln_affine_blk = [&]( ggml_context* ctx, ggml_tensor* h, const std::string& pfx ) -> ggml_tensor* {
 		ggml_tensor* w = W( pfx + ".weight" );
@@ -4152,7 +4198,12 @@ static bool shape_enc_level_chunked( trellis2_shape_enc_model* m,
 	std::vector<float> h;
 	if( lvl == 0 ) {
 		if( !run_stage(
-				in_dim, L, C_in, L, in_shift, h,
+				in_dim,
+				L,
+				C_in,
+				L,
+				in_shift,
+				h,
 				[&]( ggml_context* ctx, ggml_tensor* res, int n, int64_t v0 ) -> ggml_tensor* {
 					ggml_tensor* x = ggml_cont( ctx, ggml_view_2d( ctx, res, in_dim, n, res->nb[1], ( size_t )v0 * res->nb[1] ) );
 					ggml_tensor* w = W( "input_layer.weight" );
@@ -4176,7 +4227,12 @@ static bool shape_enc_level_chunked( trellis2_shape_enc_model* m,
 		const std::string  pfx = "blocks." + std::to_string( lvl ) + "." + std::to_string( b );
 		std::vector<float> nxt;
 		if( !run_stage(
-				C_in, L, C_in, L, h, nxt,
+				C_in,
+				L,
+				C_in,
+				L,
+				h,
+				nxt,
 				[&]( ggml_context* ctx, ggml_tensor* res, int n, int64_t v0 ) -> ggml_tensor* {
 					make_nbr_leaves( ctx, n );
 					ggml_tensor* y = conv_blk( ctx, res, pfx + ".conv", no_pre );
@@ -4202,7 +4258,12 @@ static bool shape_enc_level_chunked( trellis2_shape_enc_model* m,
 	// ── P1: conv1 over the fine voxels ───────────────────────────────────────
 	std::vector<float> h1;
 	if( !run_stage(
-			C_in, L, h1C, L, h, h1,
+			C_in,
+			L,
+			h1C,
+			L,
+			h,
+			h1,
 			[&]( ggml_context* ctx, ggml_tensor* res, int n, int64_t ) -> ggml_tensor* {
 				make_nbr_leaves( ctx, n );
 				// norm1 is an affine LN and silu is elementwise — per-row, so
@@ -4224,7 +4285,12 @@ static bool shape_enc_level_chunked( trellis2_shape_enc_model* m,
 	// ── P2: S2C of conv1's output -> coarse space ────────────────────────────
 	std::vector<float> h1c;
 	if( !run_stage(
-			h1C, L, C_out, Lc, h1, h1c,
+			h1C,
+			L,
+			C_out,
+			Lc,
+			h1,
+			h1c,
 			[&]( ggml_context* ctx, ggml_tensor* res, int n, int64_t ) -> ggml_tensor* {
 				make_child_leaves( ctx, n );
 				return s2c_blk( ctx, res, h1C, n );
@@ -4235,11 +4301,16 @@ static bool shape_enc_level_chunked( trellis2_shape_enc_model* m,
 	// ── P3: the down-sample skip, mean over each gsz-wide channel group ──────
 	std::vector<float> skip;
 	if( !run_stage(
-			C_in, L, C_out, Lc, h, skip,
+			C_in,
+			L,
+			C_out,
+			Lc,
+			h,
+			skip,
 			[&]( ggml_context* ctx, ggml_tensor* res, int n, int64_t ) -> ggml_tensor* {
 				make_child_leaves( ctx, n );
-				ggml_tensor* xc = s2c_blk( ctx, res, C_in, n ); // [C_in*8, n]
-				ggml_tensor* g3 = ggml_reshape_3d( ctx, xc, gsz, C_out, n );
+				ggml_tensor* xc	 = s2c_blk( ctx, res, C_in, n ); // [C_in*8, n]
+				ggml_tensor* g3	 = ggml_reshape_3d( ctx, xc, gsz, C_out, n );
 				ggml_tensor* acc = nullptr;
 				for( int j = 0; j < gsz; ++j ) {
 					ggml_tensor* s = ggml_cont( ctx, ggml_view_3d( ctx, g3, 1, C_out, n, g3->nb[1], g3->nb[2], ( size_t )j * g3->nb[0] ) );
@@ -4252,7 +4323,12 @@ static bool shape_enc_level_chunked( trellis2_shape_enc_model* m,
 
 	// ── P4: conv2 over the coarse voxels, plus the skip ──────────────────────
 	if( !run_stage(
-			C_out, Lc, C_out, Lc, h1c, out_feats,
+			C_out,
+			Lc,
+			C_out,
+			Lc,
+			h1c,
+			out_feats,
 			[&]( ggml_context* ctx, ggml_tensor* res, int n, int64_t ) -> ggml_tensor* {
 				make_nbr_leaves( ctx, n );
 				skip_t = ggml_new_tensor_2d( ctx, GGML_TYPE_F32, C_out, n );
@@ -4411,14 +4487,14 @@ bool trellis2_shape_enc_encode( trellis2_shape_enc_model* m,
 			// Must mirror the condition below exactly. It has drifted twice
 			// already, and a warning that describes a case which is in fact
 			// handled sends the next investigation somewhere pointless.
-			const bool	  will_chunk = has_down && !taps && ( int64_t )L > chunk_rows_limit();
+			const bool		  will_chunk = has_down && !taps && ( int64_t )L > chunk_rows_limit();
 			// This level's own mul_mat column ceiling. mul_mat_max_rows was
 			// measured for a [64, 64] weight and the bug note says so; the
 			// encoder's convs are wider, so treat it as the best estimate
 			// available rather than a fact, and report where each level sits.
-			const std::string cw	 = "blocks." + std::to_string( lvl ) + "." + std::to_string( hp.num_blocks[lvl] ) + ".conv1.weight";
-			auto			  cwit	 = m->tensors.find( cw );
-			const int64_t	  cap	 = cwit == m->tensors.end() ? mul_mat_max_rows( GGML_TYPE_F32 ) : mul_mat_max_rows( cwit->second->type );
+			const std::string cw   = "blocks." + std::to_string( lvl ) + "." + std::to_string( hp.num_blocks[lvl] ) + ".conv1.weight";
+			auto			  cwit = m->tensors.find( cw );
+			const int64_t	  cap  = cwit == m->tensors.end() ? mul_mat_max_rows( GGML_TYPE_F32 ) : mul_mat_max_rows( cwit->second->type );
 			if( t2_timing )
 				std::fprintf( stderr,
 					"[shape_enc] level %d/%d: L=%d Lc=%d C_in=%d C_out=%d blocks=%d, S2C gather over %lld rows, mul_mat cap %lld%s%s\n",
@@ -4608,8 +4684,8 @@ bool trellis2_shape_enc_encode( trellis2_shape_enc_model* m,
 				ggml_tensor* s = ggml_cont( ctx, ggml_view_3d( ctx, g3, 1, C_out, Lc, g3->nb[1], g3->nb[2], ( size_t )j * g3->nb[0] ) );
 				skip		   = skip ? ggml_add( ctx, skip, s ) : s;
 			}
-			skip = ggml_scale( ctx, ggml_reshape_2d( ctx, skip, C_out, Lc ), 1.0f / ( float )gsz );
-			out_h			  = ggml_add( ctx, h2, skip ); // [C_out, Lc]
+			skip  = ggml_scale( ctx, ggml_reshape_2d( ctx, skip, C_out, Lc ), 1.0f / ( float )gsz );
+			out_h = ggml_add( ctx, h2, skip ); // [C_out, Lc]
 		} else {
 			ggml_tensor* hn = ggml_norm( ctx, h, 1e-5f ); // F.layer_norm affine-free
 			ggml_tensor* z	= lin( hn, "to_latent" );	  // [2*latent, L]

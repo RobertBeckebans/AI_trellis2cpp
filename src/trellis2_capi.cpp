@@ -125,7 +125,7 @@ struct t2_mesh_result {
 	bool				 has_quad_stats = false;
 	// Grid the geometry was extracted at (t2_mesh_grid_resolution). Set only by
 	// t2_generate; 0 means "not from a generation".
-	int					 grid_res		= 0;
+	int					 grid_res = 0;
 };
 
 namespace
@@ -1053,12 +1053,12 @@ t2_mesh_result* t2_generate( t2_pipeline* p,
 		// HR flow's token budget (t2cascade::select_scaffold). At T2_PIPE_1024
 		// that loop quantizes once at 64^3 and stops on the floor, so this tier
 		// stays exactly what it was.
-		const int					 lr_res = ss_res * dhp2.upscale();		 // 512
-		const int					 req_res = requested_cascade_resolution( pt ); // 1024 or 1536
-		std::vector<int32_t>		 hr_coords;
-		const t2cascade::selection	 sel	 = t2cascade::select_scaffold( up_coords, lr_res, req_res, cascade_max_tokens(), hr_coords );
-		const int					 hr_grid = sel.grid; // 64 at 1024, 96 at 1536
-		const int					 Lhr	 = sel.tokens;
+		const int				   lr_res  = ss_res * dhp2.upscale();			 // 512
+		const int				   req_res = requested_cascade_resolution( pt ); // 1024 or 1536
+		std::vector<int32_t>	   hr_coords;
+		const t2cascade::selection sel	   = t2cascade::select_scaffold( up_coords, lr_res, req_res, cascade_max_tokens(), hr_coords );
+		const int				   hr_grid = sel.grid; // 64 at 1024, 96 at 1536
+		const int				   Lhr	   = sel.tokens;
 		if( Lhr == 0 ) {
 			copy_err( err, err_len, "empty HR scaffold" );
 			delete r;
@@ -1073,7 +1073,14 @@ t2_mesh_result* t2_generate( t2_pipeline* p,
 		// voxel counts grow out of it. It is known here, minutes before either
 		// can fail, so it is worth reporting rather than reconstructing later.
 		if( std::getenv( "TRELLIS2_TIMING" ) )
-			std::fprintf( stderr, "[cascade] requested %d, achieved %d (grid %d), %d scaffold tokens, %d reduction(s), budget %d\n", req_res, sel.resolution, hr_grid, Lhr, sel.reductions, cascade_max_tokens() );
+			std::fprintf( stderr,
+				"[cascade] requested %d, achieved %d (grid %d), %d scaffold tokens, %d reduction(s), budget %d\n",
+				req_res,
+				sel.resolution,
+				hr_grid,
+				Lhr,
+				sel.reductions,
+				cascade_max_tokens() );
 
 		// Sharper HR-scaffold checkpoint (the cascade's refined structure).
 		emit_voxels( preview, preview_user, T2_STAGE_UPSAMPLE, 0, 0, hr_grid, hr_coords );

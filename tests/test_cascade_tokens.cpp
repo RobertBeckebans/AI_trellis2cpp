@@ -24,7 +24,7 @@
 namespace
 {
 
-int n_fail = 0;
+int	 n_fail = 0;
 
 void check( bool ok, const char* what )
 {
@@ -72,12 +72,12 @@ std::vector<int32_t> shell_cloud( int n, float r_min, float r_max )
 	out.reserve( ( size_t )n * 3 );
 	uint32_t s	  = 0x2b1536u;
 	auto	 next = [&]() {
-		 s = s * 1664525u + 1013904223u;
-		 return ( float )( ( s >> 8 ) & 0xffffff ) / ( float )0x1000000; // [0,1)
+		s = s * 1664525u + 1013904223u;
+		return ( float )( ( s >> 8 ) & 0xffffff ) / ( float )0x1000000; // [0,1)
 	};
-	auto	 clamp512 = []( float v ) {
-		 const int c = ( int )v;
-		 return ( int32_t )( c < 0 ? 0 : ( c > 511 ? 511 : c ) );
+	auto clamp512 = []( float v ) {
+		const int c = ( int )v;
+		return ( int32_t )( c < 0 ? 0 : ( c > 511 ? 511 : c ) );
 	};
 	for( int i = 0; i < n; ++i ) {
 		// Uniform-ish direction from two randoms, then a radius in the shell.
@@ -152,8 +152,8 @@ int main()
 	const std::vector<int32_t> cloud = shell_cloud( 120000, 150.0f, 235.0f );
 	std::printf( "\nsynthetic 512^3 shell: %zu candidate coords\n", cloud.size() / 3 );
 
-	const int				   grids[] = { 96, 88, 80, 72, 64 }; // 1536 .. 1024, step 128
-	int						   counts[5];
+	const int grids[] = { 96, 88, 80, 72, 64 }; // 1536 .. 1024, step 128
+	int		  counts[5];
 	for( int i = 0; i < 5; ++i ) {
 		std::vector<int32_t> q;
 		quantize_scaffold( cloud, 512, grids[i], q );
@@ -187,14 +187,8 @@ int main()
 			std::vector<int32_t> out;
 			const selection		 s = select_scaffold( cloud, 512, 1536, budget, out );
 			if( s.resolution != grids[want_idx] * 16 || s.grid != grids[want_idx] || s.tokens != counts[want_idx] || s.reductions != want_idx || ( int )( out.size() / 3 ) != counts[want_idx] ) {
-				std::printf( "  budget %d: got res %d/grid %d/tokens %d/reductions %d, want res %d/tokens %d\n",
-					budget,
-					s.resolution,
-					s.grid,
-					s.tokens,
-					s.reductions,
-					grids[want_idx] * 16,
-					counts[want_idx] );
+				std::printf(
+					"  budget %d: got res %d/grid %d/tokens %d/reductions %d, want res %d/tokens %d\n", budget, s.resolution, s.grid, s.tokens, s.reductions, grids[want_idx] * 16, counts[want_idx] );
 				all_ok = false;
 			}
 		}
@@ -226,7 +220,7 @@ int main()
 	// ── 5. T2_PIPE_1024 is byte-identical to the pre-1536 inline code ────────
 	{
 		std::vector<int32_t> out;
-		const selection		 s	   = select_scaffold( cloud, 512, 1024, default_max_num_tokens, out );
+		const selection		 s		= select_scaffold( cloud, 512, 1024, default_max_num_tokens, out );
 		std::vector<int32_t> legacy = legacy_quantize_64( cloud );
 		check_eq( s.resolution, 1024, "default budget at 1024 stays at 1024" );
 		check( out == legacy, "1024 scaffold matches the legacy inline quantization coord for coord, in order" );

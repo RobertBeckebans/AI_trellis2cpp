@@ -62,6 +62,14 @@ add_executable(test_marching_cubes test_marching_cubes.cpp)
 target_include_directories(test_marching_cubes PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../examples)
 target_compile_features(test_marching_cubes PRIVATE cxx_std_14)
 
+# Topological invariants of the flexible dual grid (examples/flexible_dual_grid.h)
+# on analytic fields: closed, 2-manifold, correct Euler characteristic, and the
+# hole-fill limit's contract. The extractor every generated mesh comes out of
+# had no test; test_marching_cubes covers a different one. No model assets.
+add_executable(test_dual_grid test_dual_grid.cpp)
+target_include_directories(test_dual_grid PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../examples)
+target_compile_features(test_dual_grid PRIVATE cxx_std_14)
+
 # Sparse PBR-volume trilinear sampling used by the integrated texture path.
 add_executable(test_pbr_sampling test_pbr_sampling.cpp)
 target_include_directories(test_pbr_sampling PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
@@ -114,6 +122,7 @@ endif()
 set(T2_TESTS "${CMAKE_CURRENT_SOURCE_DIR}")
 
 add_test(NAME marching_cubes COMMAND test_marching_cubes)
+add_test(NAME dual_grid COMMAND test_dual_grid)
 add_test(NAME pbr_sampling COMMAND test_pbr_sampling)
 add_test(NAME mesh_export COMMAND test_mesh_export)
 add_test(NAME print_remesh COMMAND test_print_remesh)

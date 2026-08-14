@@ -1,0 +1,105 @@
+# Python environment for the PyTorch reference dumps (scripts/dump_*_reference.py,
+# tests/ref_*.py) and the GGUF converters (scripts/convert_*.py).
+#
+# This is the native alternative to docker/Dockerfile.ref, which is CUDA-only and
+# therefore cannot use a Radeon card. The package set below is the Dockerfile's
+# pip set; the backend extras add the matching torch build on top. See
+# docs/reference-environment.md for the workflow.
+#
+#   uv sync --extra rocm            # Windows/Linux, AMD
+#   uv sync --extra cuda            # NVIDIA
+#   uv sync --extra cpu             # no GPU
+#   uv run --extra rocm python scripts/dump_dino_reference.py --image ...
+#
+# Nothing in the C++ build depends on this file; it is developer tooling only.
+[project]
+name = "trellis2-ref"
+version = "0"
+description = "PyTorch reference environment for the trellis2.cpp parity dumps"
+readme = "README.md"
+# AMD publishes the Windows ROCm wheels for CPython 3.12 only.
+requires-python = ">=3.12,<3.13"
+
+# The pip set of docker/Dockerfile.ref. torch is deliberately not here: the
+# container gets it from its base image, and natively it comes from the backend
+# extra below. transformers is pinned as in the Dockerfile — it also has to stay
+# below 5.x on Windows, where AMD's torch is built without distributed support
+# and transformers 5's module-level `torch.distributed.fsdp` import crashes.
+dependencies = [
+    "transformers==4.57.1",
+    "safetensors",
+    "pillow",
+    "numpy",
+    "easydict",
+    "opencv-python-headless",
+    "trimesh",
+    "tqdm",
+    "imageio",
+    "gguf",
+]
+
+[project.optional-dependencies]
+cpu = [
+    "torch",
+    "torchvision",
+]
+cuda = [
+    "torch",
+    "torchvision",
+]
+rocm = [
+    "torch ; sys_platform == 'linux'",
+    "torchvision ; sys_platform == 'linux'",
+    # The Linux ROCm torch wheels hard-depend on it, and it only exists on the
+    # PyTorch ROCm index — without this the resolver cannot solve the Linux split.
+    "triton-rocm ; sys_platform == 'linux'",
+    # Windows ROCm wheels come from AMD's own repository, not from PyPI or the
+    # PyTorch index. rocm_sdk_core / rocm_sdk_libraries_custom ship the runtime
+    # DLLs (hipBLAS, MIOpen, ...) that the torch wheel dlopens.
+    "torch @ https://repo.radeon.com/rocm/windows/rocm-rel-7.2/torch-2.9.1%2Brocmsdk20260116-cp312-cp312-win_amd64.whl ; sys_platform == 'win32'",
+    "torchvision @ https://repo.radeon.com/rocm/windows/rocm-rel-7.2/torchvision-0.24.1%2Brocmsdk20260116-cp312-cp312-win_amd64.whl ; sys_platform == 'win32'",
+    "rocm_sdk_core @ https://repo.radeon.com/rocm/windows/rocm-rel-7.2/rocm_sdk_core-7.2.0.dev0-py3-none-win_amd64.whl ; sys_platform == 'win32'",
+    "rocm_sdk_libraries_custom @ https://repo.radeon.com/rocm/windows/rocm-rel-7.2/rocm_sdk_libraries_custom-7.2.0.dev0-py3-none-win_amd64.whl ; sys_platform == 'win32'",
+    "rocm @ https://repo.radeon.com/rocm/windows/rocm-rel-7.2/rocm-7.2.0.dev0.tar.gz ; sys_platform == 'win32'",
+]
+
+[tool.uv]
+# Virtual project: there is nothing here to build or install, only dependencies.
+package = false
+conflicts = [
+  [
+    { extra = "cpu" },
+    { extra = "cuda" },
+    { extra = "rocm" },
+  ],
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm7.2"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu128", extra = "cuda" },
+    { index = "pytorch-rocm", extra = "rocm", marker = "sys_platform == 'linux'" },
+]
+torchvision = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu128", extra = "cuda" },
+    { index = "pytorch-rocm", extra = "rocm", marker = "sys_platform == 'linux'" },
+]
+triton-rocm = [
+    { index = "pytorch-rocm", extra = "rocm", marker = "sys_platform == 'linux'" },
+]
