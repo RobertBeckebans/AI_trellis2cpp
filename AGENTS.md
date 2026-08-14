@@ -220,16 +220,34 @@ dumps and runs **in the reference container**, not on the host:
 signature changes to the C-ABI must be propagated there.
 
 **Formatting**: `clang-format` **18.1.8**, driven via `format_code.sh`
-(or `format_code.bat` on Windows). Never run `clang-format` directly
-with a different version — that produces project-wide diff noise.
+(or `format_code.bat` on Windows). The repository ships the correct
+binary as `clang-format.exe` in the root, so nothing has to be
+installed.
 
 ```sh
 ./format_code.sh          # headers with .clang-format-header, sources with .clang-format-cpp
 ```
 
-The script temporarily copies the matching config to `.clang-format`
-and deliberately excludes `ggml/`, `third_party/`, `build*/`. Vendored
-code and the ggml submodule are **never** reformatted.
+**Never invoke `clang-format` directly — always go through
+`format_code.sh` / `format_code.bat`.** This is not only about the
+version. The script *creates* the config: it copies
+`.clang-format-header` or `.clang-format-cpp` to `.clang-format` for
+the duration of the run and deletes it afterwards, so between runs
+there is no `.clang-format` in the tree at all. A direct call therefore
+falls back to clang-format's built-in LLVM defaults, which **sort
+includes** (the project sets `SortIncludes: false` and relies on a
+hand-chosen order) and **rewrap comments** at 80 columns instead of the
+project's 200.
+
+Neither is undone by running the proper script afterwards — once the
+includes are sorted they stay sorted. The result is hundreds of lines
+of diff noise in files you never touched, and the only clean way out is
+restoring the file from Git. If a diff shows changes far away from your
+edit, this is what happened.
+
+The script deliberately excludes `ggml/`, `third_party/`, `build*/`,
+`docs/ideas/` and `docs/ref/`. Vendored code, the ggml submodule and
+the reference checkouts are **never** reformatted.
 
 Further helper tools:
 
