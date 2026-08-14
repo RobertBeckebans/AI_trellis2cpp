@@ -30,6 +30,9 @@ type persistedJob struct {
 	Steps        int           `json:"steps"`
 	TextureSteps int           `json:"textureSteps"`
 	Guidance     float32       `json:"guidance"`
+	// Absent in v1 manifests; those restore as 0 (auto), which is what they ran
+	// with before the field existed.
+	Background   int           `json:"background,omitempty"`
 	Frames       []frameMeta   `json:"frames,omitempty"`
 	LivePreview  bool          `json:"livePreview,omitempty"`
 	StageTimings []stageTiming `json:"stageTimings,omitempty"`
@@ -56,8 +59,9 @@ func (s *server) persistJob(j *job) error {
 		Version: persistedJobVersion, ID: j.ID, CreatedAt: j.CreatedAt,
 		StartedAt: j.StartedAt, FinishedAt: j.FinishedAt, DurationMS: j.DurationMS,
 		Quality: j.Quality, Thumbnail: j.Thumbnail,
-		Pipeline: j.pipeline, Seed: j.seed, Steps: j.steps,
-		TextureSteps: j.textureSteps, Guidance: j.guidance,
+		Pipeline: j.pipeline, Seed: j.Seed, Steps: j.Steps,
+		TextureSteps: j.TextureSteps, Guidance: j.Guidance,
+		Background: j.Background,
 		Frames: append([]frameMeta(nil), j.Frames...), LivePreview: j.LivePreview,
 		StageTimings: append([]stageTiming(nil), j.StageTimings...),
 	}
@@ -215,8 +219,9 @@ func loadPersistedJob(dir string) (*job, error) {
 		Quality: m.Quality, Thumbnail: m.Thumbnail,
 		PreviewSeq: len(m.Frames), Frames: m.Frames,
 		LivePreview: m.LivePreview || len(m.Frames) > 0, StageTimings: m.StageTimings,
-		pipeline: m.Pipeline, seed: m.Seed, steps: m.Steps,
-		textureSteps: m.TextureSteps, guidance: m.Guidance,
+		pipeline: m.Pipeline, Seed: m.Seed, Steps: m.Steps,
+		TextureSteps: m.TextureSteps, Guidance: m.Guidance,
+		Background: m.Background,
 		persistDir: dir, meshPath: meshPath, inputPath: inputPath, sourcePath: sourcePath,
 	}, nil
 }

@@ -1285,11 +1285,38 @@ async function removeHistory(id, deleteServer = true) {
   renderHistory();
 }
 
+// Put the controls back to what produced a stored generation, so pressing
+// Generate again reproduces it and a good result stays findable. Every field is
+// applied only if the job actually carries it: pre-existing saved jobs have no
+// seed/guidance in their manifest, and silently rewriting the form to 0 would
+// be worse than leaving the user's current settings alone.
+function restoreSettings(j) {
+  const set = (id, v) => {
+    if (v === undefined || v === null) return;
+    const el = $(id);
+    if (el) el.value = v;
+  };
+  set("seed", j.seed);
+  set("steps", j.shapeSteps);
+  set("texsteps", j.textureSteps);
+  set("guidance", j.guidance);
+  // The quality picker only holds the tiers this build can actually produce, so
+  // a job made on a larger model set must not silently select a missing option.
+  if (j.quality && [...$("quality").options].some(o => o.value === j.quality))
+    $("quality").value = j.quality;
+  // What it came out at, which is not always what was asked for: the 1536
+  // cascade's token budget can step the achieved grid back toward 1024.
+  const note = j.resolution && String(j.resolution) !== j.quality
+    ? ` · came out at ${j.resolution}³` : "";
+  return note;
+}
+
 // Re-view a past generation (its mesh still lives on the server). If the server
 // still holds its recorded stage frames, replay is scrubbable too.
 async function viewGeneration(id) {
   stopShowcase(true);
   setStatus("loading…");
+  let note = "";
   try {
     resetExportState();
     resetTimeline();
@@ -1297,6 +1324,7 @@ async function viewGeneration(id) {
       const jr = await fetch("/api/job/" + id);
       if (jr.ok) {
         const jj = await jr.json();
+        note = restoreSettings(jj);
         const fm = jj.frames || [];
         for (let k = 0; k < (jj.previewSeq || 0); k++) await recordFrame(id, k, fm);
         haveFrames = jj.previewSeq || 0;
@@ -1304,7 +1332,7 @@ async function viewGeneration(id) {
     } catch (e) { /* no recorded frames; mesh-only replay */ }
     await loadMesh(id);
     activeGen = id; renderHistory();
-    setStatus("done");
+    setStatus("settings restored" + note);
   } catch (e) {
     setStatus("that generation is no longer on the server", true);
     removeHistory(id, false);

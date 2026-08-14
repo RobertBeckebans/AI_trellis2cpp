@@ -183,14 +183,19 @@ type job struct {
 	LivePreview  bool          `json:"livePreview"`
 	StageTimings []stageTiming `json:"stageTimings,omitempty"`
 
+	// The sampling parameters, exported so a client can read back exactly what
+	// produced a stored generation and reproduce it. `shapeSteps` rather than
+	// `steps` because `step`/`total` above are the live progress counter, and
+	// two similarly named fields in one object invite the wrong one being read.
+	Seed         uint64  `json:"seed"`
+	Guidance     float32 `json:"guidance"`
+	Steps        int     `json:"shapeSteps"`
+	TextureSteps int     `json:"textureSteps"`
+	Background   int     `json:"background"`
+
 	image        []byte // processed image passed to TRELLIS
 	source       []byte // exact original upload, used for display and future edits
 	pipeline     int
-	background   int
-	seed         uint64
-	steps        int
-	textureSteps int
-	guidance     float32
 	keyframes    int      // intermediate shape-SLAT mesh keyframes to record (0 = off)
 	previews     [][]byte // every preview blob, in order; served by /api/preview?seq=
 	mesh         *meshData
@@ -286,6 +291,18 @@ func (s *server) worker() {
 		j.StartedAt = started.UnixMilli()
 		j.mu.Unlock()
 
+		// Everything that decides what this run produces, on one line before it
+		// starts. Two runs are only comparable if the parameters were the same,
+		// and reconstructing them from the browser afterwards does not scale
+		// past a couple of jobs.
+		quality := j.Quality
+		if quality == "" {
+			quality = "auto"
+		}
+		// Live preview is already on the "finished" line, so it is left out here.
+		log.Printf("job %s: quality %s, seed %d, guidance %.2f, shape steps %d, texture steps %d, background %d",
+			j.ID, quality, j.Seed, j.Guidance, j.Steps, j.TextureSteps, j.Background)
+
 		// The library reads T2_KEYFRAMES for opt-in intermediate mesh keyframes.
 		// A single worker goroutine runs generations serially, so setting the env
 		// per-job here is race-free.
@@ -312,7 +329,7 @@ func (s *server) worker() {
 			}
 		}
 
-		mesh, err := s.eng.Generate(j.image, j.pipeline, j.background, j.seed, j.steps, j.guidance, j.textureSteps,
+		mesh, err := s.eng.Generate(j.image, j.pipeline, j.Background, j.Seed, j.Steps, j.Guidance, j.TextureSteps,
 			func() {
 				setStage("loading models", 0, 0)
 			},
@@ -497,11 +514,11 @@ func (s *server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		image:        img,
 		source:       source,
 		pipeline:     pt,
-		background:   background,
-		seed:         formUint(r, "seed", rand.Uint64()%1_000_000),
-		steps:        int(formUint(r, "steps", 12)),
-		textureSteps: int(formUint(r, "texture_steps", 12)),
-		guidance:     formFloat(r, "guidance", 7.5),
+		Background:   background,
+		Seed:         formUint(r, "seed", rand.Uint64()%1_000_000),
+		Steps:        int(formUint(r, "steps", 12)),
+		TextureSteps: int(formUint(r, "texture_steps", 12)),
+		Guidance:     formFloat(r, "guidance", 7.5),
 		LivePreview:  r.FormValue("preview") == "1", // expensive preview decodes are explicitly opt-in
 		keyframes:    int(formUint(r, "keyframes", 0)),
 	}
@@ -540,14 +557,14 @@ func (s *server) normaliseJob(j *job) {
 		(j.Thumbnail != "" && !strings.HasPrefix(j.Thumbnail, "data:image/jpeg;base64,")) {
 		j.Thumbnail = ""
 	}
-	if j.steps < 1 || j.steps > 50 {
-		j.steps = 12
+	if j.Steps < 1 || j.Steps > 50 {
+		j.Steps = 12
 	}
-	if j.textureSteps < 1 || j.textureSteps > 50 {
-		j.textureSteps = 12
+	if j.TextureSteps < 1 || j.TextureSteps > 50 {
+		j.TextureSteps = 12
 	}
-	if j.guidance < 0 || j.guidance > 20 {
-		j.guidance = 7.5
+	if j.Guidance < 0 || j.Guidance > 20 {
+		j.Guidance = 7.5
 	}
 	if j.keyframes > 8 {
 		j.keyframes = 8
@@ -595,8 +612,8 @@ func (s *server) handleRegenerate(w http.ResponseWriter, r *http.Request) {
 	source := append([]byte(nil), old.source...)
 	inputPath, sourcePath := old.inputPath, old.sourcePath
 	quality, thumbnail := old.Quality, old.Thumbnail
-	seed, steps := old.seed, old.steps
-	textureSteps, guidance := old.textureSteps, old.guidance
+	seed, steps := old.Seed, old.Steps
+	textureSteps, guidance := old.TextureSteps, old.Guidance
 	old.mu.Unlock()
 	if state != "done" {
 		http.Error(w, "generation is not complete", http.StatusConflict)
@@ -633,10 +650,13 @@ func (s *server) handleRegenerate(w http.ResponseWriter, r *http.Request) {
 		ID: fmt.Sprintf("%016x", rand.Uint64()), State: "queued",
 		CreatedAt: time.Now().UnixMilli(), Quality: quality, Thumbnail: thumbnail,
 		image: input, source: source, pipeline: pipelineForQuality(quality),
-		background: backgroundKeep,
-		seed:       formUint(r, "seed", seed), steps: int(formUint(r, "steps", uint64(steps))),
-		textureSteps: int(formUint(r, "texture_steps", uint64(textureSteps))),
-		guidance:     formFloat(r, "guidance", guidance),
+		// The persisted input is already background-processed, so a second
+		// heuristic pass over it would be wrong regardless of what the original
+		// request asked for.
+		Background: backgroundKeep,
+		Seed:       formUint(r, "seed", seed), Steps: int(formUint(r, "steps", uint64(steps))),
+		TextureSteps: int(formUint(r, "texture_steps", uint64(textureSteps))),
+		Guidance:     formFloat(r, "guidance", guidance),
 		LivePreview:  r.FormValue("preview") == "1",
 		keyframes:    int(formUint(r, "keyframes", 0)),
 	}
