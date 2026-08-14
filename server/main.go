@@ -1343,14 +1343,23 @@ func main() {
 		os.Setenv("T2_PREVIEW_STRIDE", "1")
 	}
 
-	// ggml's CUDA-graph capture overflows the stack of the thread purego calls
-	// the library on and takes the whole process down with STATUS_STACK_OVERFLOW
-	// (0xc00000fd) on the very first graph compute. Not workload-dependent: the
-	// coarse 64^3 path dies as readily as the 1024^3 cascade, and the same DLL
-	// driven from a native executable is fine, so it is the small Go-managed
-	// thread stack rather than the graph itself. os.Setenv alone does not reach
-	// the library's getenv() on Windows — see setNativeEnv. Respect an explicit
-	// override so the crash stays reproducible for anyone investigating it.
+	// ggml's CUDA-graph capture overflows the calling thread's stack and takes the
+	// whole process down with STATUS_STACK_OVERFLOW (0xc00000fd). Not
+	// workload-dependent: the coarse 64^3 path dies as readily as the 1024^3
+	// cascade.
+	//
+	// This was originally read as the small Go-managed thread the purego bridge
+	// calls in on, because a native executable seemed fine. That no longer holds
+	// after the ggml 0.19 update: examples/ss_sample.exe crashes the same way,
+	// intermittently — 2 of 5 runs measured on 2026-08-14. So it is the graph
+	// path's stack usage, not Go's thread.
+	//
+	// The library now disables graphs itself in init_best_backend(), which covers
+	// every consumer rather than only this server; this block is kept as a
+	// belt-and-braces for an older libtrellis2 and is a no-op against a current
+	// one. os.Setenv alone does not reach the library's getenv() on Windows — see
+	// setNativeEnv. To put graphs back for investigation, set TRELLIS2_CUDA_GRAPHS=1;
+	// GGML_CUDA_DISABLE_GRAPHS=0 will not do it, as ggml only tests for presence.
 	if os.Getenv("GGML_CUDA_DISABLE_GRAPHS") == "" {
 		os.Setenv("GGML_CUDA_DISABLE_GRAPHS", "1")
 		if err := setNativeEnv("GGML_CUDA_DISABLE_GRAPHS", "1"); err != nil {

@@ -207,6 +207,37 @@ struct trellis2_ss_flow_model {
 namespace
 {
 
+// ggml's CUDA/HIP graph capture overflows the calling thread's stack and takes
+// the process down with STATUS_STACK_OVERFLOW (0xc00000fd) on the first graph
+// compute. It is not workload-dependent — the coarse 64^3 sampler dies as
+// readily as the 1024^3 cascade — and since the ggml 0.19 update it hits plain
+// native executables too, not just the small thread the Go server's purego
+// bridge calls in on (which is where it was first seen, and why server/main.go
+// carried this workaround alone). Every consumer of the library needs it, so it
+// belongs here rather than in one of them.
+//
+// Two ggml details shape this: the flag is read into a function-local `static`
+// on first use, so setting it before any backend exists is early enough; and it
+// tests only for presence, so GGML_CUDA_DISABLE_GRAPHS=0 *also* disables graphs.
+// That is why re-enabling them needs its own opt-in instead of a "0".
+void disable_cuda_graphs_once()
+{
+	static const bool done = []() {
+		const char* optin = std::getenv( "TRELLIS2_CUDA_GRAPHS" );
+		if( optin && optin[0] == '1' )
+			return true; // caller wants ggml's graph path back (to reproduce the crash)
+		if( std::getenv( "GGML_CUDA_DISABLE_GRAPHS" ) )
+			return true; // already set by the host process
+#ifdef _WIN32
+		_putenv_s( "GGML_CUDA_DISABLE_GRAPHS", "1" );
+#else
+		setenv( "GGML_CUDA_DISABLE_GRAPHS", "1", /*overwrite*/ 0 );
+#endif
+		return true;
+	}();
+	( void )done;
+}
+
 // Pick the best available compute backend: the first GPU device exposed by the
 // ggml backend registry (CUDA / Metal / Vulkan / ...), falling back to CPU.
 // Mirrors sam3.cpp's "use a GPU backend automatically if one is available".
@@ -214,6 +245,7 @@ namespace
 // The TRELLIS2_DEVICE env var overrides "auto".
 ggml_backend_t init_best_backend( std::string& name_out, const char* device = nullptr )
 {
+	disable_cuda_graphs_once();
 	std::string want = device ? device : "";
 	if( want.empty() || want == "auto" ) {
 		if( const char* env = std::getenv( "TRELLIS2_DEVICE" ) )

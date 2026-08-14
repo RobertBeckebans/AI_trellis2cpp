@@ -125,12 +125,99 @@ The decisive experiment for each was CPU versus HIP, because the C++ side takes
 
 | test | CPU | GPU (HIP) | reading |
 |---|---|---|---|
-| `ss_dec` | **PASS** rel-L2 6.172e-07, sign 100% | crash | backend gap, port correct |
-| `ss_flow_forward` | **PASS** rel-L2 2.416e-04 | **FAIL** rel-L2 5.198e-02 | backend degrades it ~215× |
-| `ss_sample` | not run (≫1 h on CPU) | crash | — |
+| `ss_dec` | **PASS** rel-L2 6.172e-07, sign 100% | crash | backend gap the pipeline already avoids |
+| `ss_flow_forward` | **PASS** rel-L2 2.416e-04 | **FAIL** rel-L2 5.198e-02 | ROCm flash-attention kernel |
+| `ss_sample` | not run (≫1 h on CPU) | crash, then **FAIL** 2.844e-01 | HIP graph capture + the same kernel |
 | `dino` | **FAIL** 4.618e-04 | **FAIL** 4.618e-04 | backend-independent |
 | `cascade` | **PASS** | **PASS** | — |
 | `chunked_decode` | not run | **FAIL** | f16 chunking, see below |
+
+### Root causes — three of the five collapse into two ggml/ROCm defects
+
+Following up on each failure rather than stopping at "it is red":
+
+**`ss_dec` is a test bug, not a product bug.** `src/trellis2_capi.cpp:549` already
+carries the answer, and it predates this work:
+
+```cpp
+// The SS occupancy decoder uses a genuine dense CONV_3D, for which ggml has
+// no CUDA kernel, so it stays on the CPU (it is only ~3 s / 4 % anyway).
+p->dec = trellis2_ss_dec_load( ss_dec_gguf, true, &e, "cpu" );
+```
+
+The pipeline pins the stage to CPU; `tests/test_ss_dec.cpp:64` loads it with the
+default device and therefore hits a gap the shipped code never reaches. The test
+should pass `"cpu"` the way the pipeline does — on CPU it already measures
+6.172e-07.
+
+**`ss_sample`'s crash is ggml's HIP graph path**, and it is *not* test-only:
+`examples/ss_sample.exe`, an ordinary consumer of the library, crashes the same
+way (`0xC00000FD`, always right after `CUDA graph warmup complete`, at a
+non-deterministic step). With `GGML_CUDA_DISABLE_GRAPHS=1` all 12 steps run and
+produce a sane latent (occupancy 52.36 % against the reference's 51.84 %).
+
+**The numeric divergence is ggml's ROCm flash-attention kernel**, and it is the
+single most consequential finding here. Disabling graphs changes
+`ss_flow_forward` by nothing at all (5.198e-02 either way). Switching the
+attention path with `TRELLIS2_SDPA_EXACT=1` changes everything:
+
+| test | flash (default) | exact softmax |
+|---|---|---|
+| `ss_flow_forward` | 5.198e-02 **FAIL** | **3.050e-06 PASS** |
+| `ss_sample` | 2.844e-01 **FAIL**, sign 89.8 % | **1.494e-05 PASS**, sign 100.000 % |
+
+A factor of ~17,000 on the forward, and both land *better* than the documented
+CPU numbers. `VERIFICATION.md` budgets ~3e-03 for flash on the CUDA F16-MMA
+kernel; the ROCm kernel costs 5e-02, more than an order beyond that.
+
+Because `sdpa_auto()` uses flash for **every** flow forward by default, the
+shipped pipeline on this card runs with roughly 5 % relative error per forward.
+That is an output-quality issue, not merely a test failure.
+
+**This is not simply "turn flash off", though.** `VERIFICATION.md` records why
+flash became the default: the HR cascade's 49,152-token attention fits in 16 GB
+with flash and would need a 108 GiB exact score matrix. So the exact path is not
+available at cascade resolutions. The ROCm kernel needs fixing or avoiding on
+its own terms; the env switch is a diagnostic, not a shipping answer.
+
+**`dino` is untouched by both.** Identical numbers with graphs disabled and
+exact softmax (`embd` 4.618e-04, `cond` 1.623e-04). It stands alone.
+
+### Follow-up fix: the graph workaround moved into the library
+
+The workaround already existed — in `server/main.go` alone. That is why the demo
+pipeline generated meshes while every test and example crashed: the server sets
+`GGML_CUDA_DISABLE_GRAPHS=1` for itself and nothing else does.
+
+Its stated reason no longer holds, though. The comment read "the same DLL driven
+from a native executable is fine, so it is the small Go-managed thread stack
+rather than the graph itself". Measured now, `examples/ss_sample.exe` — native,
+no Go — crashes too, **intermittently**:
+
+| graphs | 5 runs of `examples/ss_sample.exe` |
+|---|---|
+| enabled (`TRELLIS2_CUDA_GRAPHS=1`) | **2 crashes**, 3 clean |
+| disabled (new default) | 0 crashes |
+
+Intermittency is presumably why this read as Go-specific: a native run has a
+better-than-even chance of surviving. It is the graph path's stack usage, not
+Go's thread.
+
+`init_best_backend()` in `src/trellis2.cpp` is the single funnel through which
+every backend is created, so the default now lives there and covers tests,
+examples and any dlopen consumer. Two ggml details shaped it: the flag is read
+into a function-local `static` on first use, so setting it before any backend
+exists is early enough; and ggml tests only for *presence*, so
+`GGML_CUDA_DISABLE_GRAPHS=0` would also disable graphs — hence a separate
+`TRELLIS2_CUDA_GRAPHS=1` opt-in, which is what keeps the crash reproducible.
+
+Verified: `_putenv_s` from `trellis2.dll` does reach `getenv` in `ggml-hip.dll`
+(shared dynamic UCRT) — the one way this could have failed silently.
+
+Effect on the suite: `ss_sample` goes from **SEGFAULT** to a plain `Failed` with
+a measurable rel-L2. The failure count is unchanged at five, but one of them is
+now a number instead of a crash. `server/main.go` keeps its block as
+belt-and-braces against an older library; its comment was corrected.
 
 **This also validates the ROCm-produced references.** `ss_flow_forward` on CPU
 lands at 2.416e-04 against `VERIFICATION.md`'s documented 2.4e-04 — the same
@@ -138,6 +225,44 @@ number to three figures. `ss_dec` agrees at 6.172e-07 while its reference came
 off the *GPU* and the port ran on the *CPU*, i.e. two different backends, which
 is exactly the independence D1 asks for. The native reference path produces
 sound references.
+
+### Which reference implementation these came from
+
+The dumps were produced against `docs/ideas/TRELLIS-2_rocm/`, which is
+byte-identical to `docs/ref/TRELLIS-2_rocm/` and forks Microsoft's TRELLIS.2 at
+`5565d24 Release Training Code`. Upstream's commits after that point are CodeQL
+workflow only, so the fork is not behind on model code.
+
+Diffing the fork against its fork point, the modules behind these references are
+**unmodified from Microsoft's original**:
+
+| module | used for | vs. upstream |
+|---|---|---|
+| `models/sparse_structure_flow.py` | `ss_flow_ref.bin`, `ss_sample_ref.bin` | unchanged |
+| `models/sparse_structure_vae.py` | `ss_dec_ref.bin` | unchanged |
+| `models/structured_latent_flow.py` | cascade LR flow | unchanged |
+| `pipelines/samplers/flow_euler.py` | every sampler run | unchanged |
+| `models/sc_vaes/sparse_unet_vae.py` | cascade `dec.upsample` | **+54/-7** |
+| `models/sc_vaes/fdg_vae.py` | cascade decoder wrapper | **+7/-0** |
+
+Only the cascade's upsample path touches modified code. Going through that diff,
+every change is inert for a fp32 run: `subdiv.feats.float() > 0` before the
+subdivision threshold is a no-op when the tensor is already fp32 (it exists for
+bf16 runs); the MLP chunking above 524,288 rows is row-independent and therefore
+exact; `convert_to_f16`'s switch to bf16 is never reached because we force
+`use_fp16=False`; a `.contiguous()` before `output_layer` changes memory layout,
+not arithmetic, and sits in `forward()` rather than `upsample()`; the NaN/Inf
+escape hatch added to the upsample loop did not trigger. The remainder — and all
+of `fdg_vae.py`'s delta — is debug logging, which is what the hardcoded `/tmp`
+path came from.
+
+Independent of reading the diff: the C++ port reproduced `up_coords` to 0.0002%
+and `hr_coords` exactly. A fork that had bent the upsample arithmetic would not
+produce that agreement.
+
+The DINO finding below is untouched by any of this — `dump_dino_reference.py`
+does not import the reference tree at all; it drives HuggingFace
+`transformers`' `DINOv3ViTModel` directly.
 
 ### `ss_dec` — `CONV_3D` is not implemented on the HIP backend
 
@@ -226,17 +351,20 @@ measurement.
 
 Ranked by what they block:
 
-1. **`ss_dec` cannot run on HIP at all** (`CONV_3D` unsupported). The stage works
-   on CPU, so this is a ggml backend gap, but it means the GPU path of that
-   stage is unverified — and the demo pipeline runs on GPU.
-2. **`ss_flow_forward` is 5.2e-02 on HIP against 2.4e-04 on CPU.** Two orders
-   beyond the documented flash-attention cost. This is the most consequential
-   number here: the SS-flow DiT is on the generation path.
-3. **`ss_sample` stack-overflows on HIP.**
-4. **`chunked_decode` fails for every non-default block size**, including a
+1. **ggml's ROCm flash-attention kernel costs ~5 % relative error per flow
+   forward**, and flash is the default for every one of them. This degrades real
+   output on this card, not just tests. Cannot be fixed by switching the default
+   back: the exact path cannot hold the cascade's HR attention.
+2. **ggml's HIP graph capture crashes the sampler** (`0xC00000FD`), reproducible
+   from `examples/ss_sample.exe`. `GGML_CUDA_DISABLE_GRAPHS=1` avoids it.
+3. **`chunked_decode` fails for every non-default block size**, including a
    voxel-count mismatch. Closest to the immediately preceding encoder-chunking
-   commit.
-5. **The `dino` patch embedding is ~f16 accurate**, backend-independently.
+   commit, and this fork's own feature.
+4. **The `dino` patch embedding is ~f16 accurate**, independent of backend,
+   graphs and attention path.
+5. **`tests/test_ss_dec.cpp` should load the decoder on CPU**, as
+   `trellis2_capi.cpp` already does. One argument; turns a crash into the
+   6.172e-07 pass it already achieves.
 6. **The reduction branch is still unreferenced.** Forcing it needs a second dump
    with a lower `--max-num-tokens` plus test wiring to consume it; outside this
    plan's phase 2.
@@ -248,7 +376,8 @@ Ranked by what they block:
 None of 1-5 was introduced by this work; all five were simply unobservable
 before, which is what the plan set out to change. Whether any is a regression
 against the CUDA/Linux baseline the parity table was written from cannot be
-decided from this machine.
+decided from this machine — but 1 and 2 are ROCm-specific by construction, so
+that baseline would not have caught them.
 
 `test_dual_grid` now builds and passes — it was registered in `tests/CMakeLists.txt`
 but had never been compiled into this build tree.
