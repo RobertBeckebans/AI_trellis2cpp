@@ -85,6 +85,7 @@ rem library tests for presence, so TRELLIS2_TIMING=0 still enables it:
 rem   set TRELLIS2_TIMING=
 set TRELLIS2_TIMING=1
 ::set TRELLIS2_SHAPE_ENC_CPU=1
+::set TRELLIS2_SHAPE_DEC_CPU=1
 
 rem Explicit .\ — cmd does not necessarily resolve executables from the current
 rem directory (NoDefaultCurrentDirectoryInExePath), which fails with exit 9009.

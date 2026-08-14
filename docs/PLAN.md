@@ -189,14 +189,21 @@ generations exercise the free/reload path with no OOM.
   the 1536³ decode is only 20.2 s, ~1.6× the 1024³ one, and VRAM stays under
   16 GB of 32. So the cost is time, not memory, and `max_num_tokens` should
   *not* rise (a near-ceiling scaffold already spends ~10 min in the HR flow).
-  Quality holds up at the scales the RoPE-extrapolation risk threatened (a 96³
-  scaffold feeds the `resolution: 64` HR model coordinates up to 95): a
-  character subject keeps jacket emblem, shoulder spikes, zipper runs and boot
-  soles as distinct geometry — 3.32M vertices / 6.66M triangles, judged
-  noticeably better than the lower tiers. Numbers in
-  `docs/progress/1536-cascade_phase3-measure.md`. **Still open:** a *recorded*
-  same-seed 1024-vs-1536 pair (the quality claim currently rests on inspection),
-  and the export path's host-RAM high-water (plan D5).
+  **Quality holds in most cases, with one measured failure mode.** Across five
+  runs the non-manifold edge fraction is 0.36–1.03 % regardless of tier, and the
+  cleanest mesh of all is a 1536 one (0.357 %, better than every 1024 run). The
+  exception is a 9.7M-voxel 1536 mesh at **7.47 %**, torn enough that the
+  materials follow it down. Its signature is visible before mesh extraction: the
+  finest-level expansion ratio L4/L3 hits 4.52 where every clean run sits at
+  4.00–4.04, i.e. the subdivision thickens instead of following a surface —
+  the RoPE-extrapolation risk landing on the subdivision head. Cost scales with
+  bounding-cube occupancy, not with the tier: a slim subject at 1536 (326 s) is
+  cheaper than a wide one at 1024 (345 s). `T2_PIPE_AUTO` stopping at 1024
+  remains right, because the failure is not predictable from the request alone.
+  Numbers in `docs/progress/1536-cascade_phase3-measure.md` and
+  `docs/progress/1536-cascade_backend-limits.md`. **Still open:** where between
+  3.5M and 9.7M voxels the subdivision starts to run away, and the export path's
+  host-RAM high-water (D5).
 - **Still to do (low VRAM):** the
   `<8 GB` case is now partly covered: the shape decoder auto-frees the flow DiTs
   around a GPU decode (see below), so the pieces of the `T2_LOAD_LOW_VRAM`

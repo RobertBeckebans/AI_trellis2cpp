@@ -3963,8 +3963,9 @@ const trellis2_shape_enc_hparams& trellis2_shape_enc_hparams_of( const trellis2_
 // Every pass reads a full-length resident input and gathers from it, so no
 // neighbour or child is ever absent and the result matches the single-graph
 // path exactly — every op is per-row or a gather.
-static bool shape_enc_level0_chunked( trellis2_shape_enc_model* m,
+static bool shape_enc_level_chunked( trellis2_shape_enc_model* m,
 	const trellis2_shape_enc_hparams&							 hp,
+	int															 lvl,
 	int															 C_in,
 	int															 C_out,
 	int															 L,
@@ -3982,7 +3983,7 @@ static bool shape_enc_level0_chunked( trellis2_shape_enc_model* m,
 	const int		  in_dim = hp.in_channels;
 	const int		  h1C	= C_out / 8;
 	const int		  gsz	= ( C_in * 8 ) / C_out;
-	const std::string down	= "blocks.0." + std::to_string( hp.num_blocks[0] );
+	const std::string down	= "blocks." + std::to_string( lvl ) + "." + std::to_string( hp.num_blocks[lvl] );
 	std::string		  missing;
 
 	auto			  W = [&]( const std::string& n ) -> ggml_tensor* {
@@ -4105,6 +4106,24 @@ static bool shape_enc_level0_chunked( trellis2_shape_enc_model* m,
 		return ggml_add( ctx, acc, b );
 	};
 	// S2C: gather each coarse voxel's 8 children and stack them channel-wise.
+	auto no_pre	  = []( ggml_context*, ggml_tensor* g ) { return g; };
+	auto lin_blk  = [&]( ggml_context* ctx, ggml_tensor* in, const std::string& pfx ) -> ggml_tensor* {
+		 ggml_tensor* w = W( pfx + ".weight" );
+		 if( !w )
+			 return nullptr;
+		 ggml_tensor* y = ggml_mul_mat( ctx, w, in );
+		 ggml_tensor* b = W( pfx + ".bias" );
+		 return b ? ggml_add( ctx, y, b ) : y;
+	};
+	auto ln_affine_blk = [&]( ggml_context* ctx, ggml_tensor* h, const std::string& pfx ) -> ggml_tensor* {
+		ggml_tensor* w = W( pfx + ".weight" );
+		ggml_tensor* b = W( pfx + ".bias" );
+		if( !w || !b )
+			return nullptr;
+		ggml_tensor* y = ggml_norm( ctx, h, eps );
+		y			   = ggml_mul( ctx, y, w );
+		return ggml_add( ctx, y, b );
+	};
 	auto s2c_blk = [&]( ggml_context* ctx, ggml_tensor* src, int ch, int n ) -> ggml_tensor* {
 		ggml_tensor* g = ggml_get_rows( ctx, src, cidx_t ); // [ch, n*8]
 		g			   = ggml_mul( ctx, g, cmask_t );
@@ -4128,21 +4147,57 @@ static bool shape_enc_level0_chunked( trellis2_shape_enc_model* m,
 		ggml_backend_tensor_set( cmask_t, mk.data(), 0, mk.size() * sizeof( float ) );
 	};
 
-	// ── P0: input_layer, per-row ─────────────────────────────────────────────
+	// ── P0: input_layer, per-row. Level 0 only — deeper levels take the
+	//        previous level's features unchanged. ──────────────────────────
 	std::vector<float> h;
-	if( !run_stage(
-			in_dim, L, C_in, L, in_shift, h,
-			[&]( ggml_context* ctx, ggml_tensor* res, int n, int64_t v0 ) -> ggml_tensor* {
-				ggml_tensor* x = ggml_cont( ctx, ggml_view_2d( ctx, res, in_dim, n, res->nb[1], ( size_t )v0 * res->nb[1] ) );
-				ggml_tensor* w = W( "input_layer.weight" );
-				if( !w )
-					return nullptr;
-				ggml_tensor* y = ggml_mul_mat( ctx, w, x );
-				ggml_tensor* b = W( "input_layer.bias" );
-				return b ? ggml_add( ctx, y, b ) : y;
-			},
-			[]( int, int64_t ) {} ) )
-		return false;
+	if( lvl == 0 ) {
+		if( !run_stage(
+				in_dim, L, C_in, L, in_shift, h,
+				[&]( ggml_context* ctx, ggml_tensor* res, int n, int64_t v0 ) -> ggml_tensor* {
+					ggml_tensor* x = ggml_cont( ctx, ggml_view_2d( ctx, res, in_dim, n, res->nb[1], ( size_t )v0 * res->nb[1] ) );
+					ggml_tensor* w = W( "input_layer.weight" );
+					if( !w )
+						return nullptr;
+					ggml_tensor* y = ggml_mul_mat( ctx, w, x );
+					ggml_tensor* b = W( "input_layer.bias" );
+					return b ? ggml_add( ctx, y, b ) : y;
+				},
+				[]( int, int64_t ) {} ) )
+			return false;
+	} else {
+		h = in_shift; // already [C_in, L]
+	}
+
+	// ── PB: the ConvNeXt chain, one stage per block ─────────────────────────
+	// Same reason as the decoder: block b+1 reads the NEIGHBOURS of block b's
+	// output, so a per-block graph cannot see them. Each block therefore reads
+	// a full-length resident input and writes a full-length output.
+	for( int b = 0; b < hp.num_blocks[lvl]; ++b ) {
+		const std::string  pfx = "blocks." + std::to_string( lvl ) + "." + std::to_string( b );
+		std::vector<float> nxt;
+		if( !run_stage(
+				C_in, L, C_in, L, h, nxt,
+				[&]( ggml_context* ctx, ggml_tensor* res, int n, int64_t v0 ) -> ggml_tensor* {
+					make_nbr_leaves( ctx, n );
+					ggml_tensor* y = conv_blk( ctx, res, pfx + ".conv", no_pre );
+					if( !y )
+						return nullptr;
+					y = ln_affine_blk( ctx, y, pfx + ".norm" );
+					y = lin_blk( ctx, y, pfx + ".mlp.0" );
+					if( !y )
+						return nullptr;
+					y = ggml_silu( ctx, y );
+					y = lin_blk( ctx, y, pfx + ".mlp.2" );
+					if( !y )
+						return nullptr;
+					// residual: this block's own rows of the resident input
+					ggml_tensor* x0 = ggml_cont( ctx, ggml_view_2d( ctx, res, C_in, n, res->nb[1], ( size_t )v0 * res->nb[1] ) );
+					return ggml_add( ctx, y, x0 );
+				},
+				[&]( int n, int64_t v0 ) { upload_nbr_leaves( nfine, L, n, v0 ); } ) )
+			return false;
+		h.swap( nxt );
+	}
 
 	// ── P1: conv1 over the fine voxels ───────────────────────────────────────
 	std::vector<float> h1;
@@ -4353,7 +4408,10 @@ bool trellis2_shape_enc_encode( trellis2_shape_enc_model* m,
 			// blocks=0 here means it qualifies. Until then this reports the
 			// counts rather than claiming to know which kernel goes first.
 			// See docs/progress/1536-cascade_backend-limits.md.
-			const bool	  will_chunk = lvl == 0 && has_down && hp.num_blocks[0] == 0 && !taps && ( int64_t )L > chunk_rows_limit();
+			// Must mirror the condition below exactly. It has drifted twice
+			// already, and a warning that describes a case which is in fact
+			// handled sends the next investigation somewhere pointless.
+			const bool	  will_chunk = has_down && !taps && ( int64_t )L > chunk_rows_limit();
 			// This level's own mul_mat column ceiling. mul_mat_max_rows was
 			// measured for a [64, 64] weight and the bug note says so; the
 			// encoder's convs are wider, so treat it as the best estimate
@@ -4412,9 +4470,9 @@ bool trellis2_shape_enc_encode( trellis2_shape_enc_model* m,
 		// 0 qualifies without a per-stage ping-pong, because it carries no
 		// ConvNeXt blocks. Taps are excluded: they want the full-length
 		// intermediates this path never forms.
-		if( lvl == 0 && has_down && hp.num_blocks[0] == 0 && !taps && ( int64_t )L > chunk_rows_limit() ) {
+		if( has_down && !taps && ( int64_t )L > chunk_rows_limit() ) {
 			std::vector<float> lvl_out;
-			if( !shape_enc_level0_chunked( m, hp, C_in, C_out, L, Lc, in_shift, nfine, ncoarse, childidx, chunk_rows_limit(), lvl_out, error ) )
+			if( !shape_enc_level_chunked( m, hp, lvl, C_in, C_out, L, Lc, lvl == 0 ? in_shift : feats, nfine, ncoarse, childidx, chunk_rows_limit(), lvl_out, error ) )
 				return false;
 			feats = std::move( lvl_out );
 			// Same bookkeeping the single-graph path does at the end of a level

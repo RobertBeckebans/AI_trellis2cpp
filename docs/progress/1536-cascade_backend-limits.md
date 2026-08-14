@@ -139,6 +139,24 @@ No per-stage ping-pong is needed here: level 0 reports `blocks = 0`. Only level
 0 is eligible and only level 0 needs it — `Lc` falls roughly four-fold per level
 and levels 1-3 carry ConvNeXt blocks.
 
+### Encoder levels 1-3 followed
+
+Level 0 was chunked first because it is the largest and the simplest — no
+ConvNeXt blocks, so no per-stage ping-pong. That left levels 1-3 exposed, and
+at 1536 level 1 does cross the column cap (2,152,267 against 2,097,152) without
+being split.
+
+`shape_enc_level_chunked` now covers any level with a down-block: `lvl` selects
+the block prefix, level 0 keeps its `input_layer` pass, deeper levels take the
+previous level's features unchanged, and the ConvNeXt chain is ping-ponged
+exactly as in the decoder — each block reads a full-length resident input,
+because block *b+1* needs the neighbours of block *b*'s output.
+
+The gating condition dropped to `has_down && !taps && L > chunk_rows_limit()`.
+The diagnostic's `will_chunk` mirrors it, with a comment saying it must: that
+predicate has drifted from reality twice, and a warning describing a case that
+is in fact handled sends the next investigation somewhere pointless.
+
 ## The bug the tests found, then found again
 
 `ggml_gallocr` only gives an input tensor a buffer once it is part of the graph.
@@ -205,6 +223,92 @@ cap does not exist. A diagnostic that names a cause which no longer applies is
 worse than none — it stops the next search at the wrong place, which is exactly
 what it did.
 
+## Settled: the remaining gap is the model, and here is the number
+
+The run that closed it had **every** level chunked — encoder 0, 1 and 2 all
+report `(chunked)`, no warning, pure GPU, no environment overrides. It is the
+first run with no uncapped matmul anywhere. Same object, same seed 42, same
+guidance 7.5:
+
+| | vertices | triangles | boundary edges | **non-manifold edges** |
+|---|---|---|---|---|
+| 1024 | 3,440,673 | 6,897,372 | 0.171 % | **0.42 %** (43,645) |
+| 1536 | 9,715,171 | 22,076,668 | 0.921 % | **7.47 %** (2,369,133) |
+
+**A factor of 17.7 on the non-manifold fraction.** 0.42 % is the floor dual
+contouring over a sparse voxel set produces anyway; 7.47 % is a torn surface.
+The holes, at 0.9 %, turned out to be the smaller half of the problem.
+
+The same chunked code produces the clean 1024 mesh and the broken 1536 one, and
+it is bit-identical to the single-graph path by test. So the difference is the
+**input**, not the evaluation.
+
+Voxel counts say the same thing independently. Pure surface scaling from 1024
+to 1536 would be `(1536/1024)^2 = 2.25`; the measured ratio is
+`9,715,171 / 3,440,673 = 2.82`. **25 % more voxels than a clean single-layer
+surface needs** — and surplus voxels off the surface are exactly what creates
+non-manifold junctions. The decoder is subdividing where it should not at 96³.
+
+That is the plan's RoPE-extrapolation risk, no longer as an impression: a
+96³ scaffold feeds coordinates up to 95 to a checkpoint that declares
+`resolution: 64`, and the subdivision head is what degrades.
+
+**Chunking encoder levels 1-3 was still worth doing.** The texture improved
+visibly with it — the source image's cyan reaches the eyes now, which it did
+not before — so that was a real defect. It was simply not the whole story, and
+the earlier "refuted" verdict on it was wrong for the reason recorded above.
+
+### Corrected once more: the tier is not broken, one run is
+
+Three further runs on a slim subject (a punk figure) put the conclusion above
+in a different light. Full set, all with every backend limit handled:
+
+| subject | tier | seed | voxels | boundary | **non-manifold** | L4/L3 |
+|---|---|---|---|---|---|---|
+| punk | 1024 | 2026 | 1,526,670 | 0.505 % | 1.032 % | 4.041 |
+| punk | 1536 | 2026 | 3,524,635 | 0.466 % | 0.699 % | 4.043 |
+| punk | **1536** | 1517 | 3,343,769 | **0.135 %** | **0.357 %** | 4.014 |
+| jester | 1024 | 42 | 3,440,673 | 0.171 % | 0.422 % | 4.001 |
+| jester | **1536** | 42 | 9,715,171 | 0.921 % | **7.467 %** | **4.517** |
+
+**The cleanest mesh in the set is a 1536 one**, and it beats every 1024 run.
+Four of five runs sit between 0.36 % and 1.03 % with no tier dependence at all.
+So "the tier fails on dense subjects" was wrong — what fails is the single
+9.7M-voxel run, and the entry above should be read with that correction.
+
+**L4/L3 is the early warning, and only that.** Every clean run sits at
+4.00–4.04; the broken one is at 4.52. Above 4 the subdivision is thickening
+rather than following a surface. It flags the catastrophe before mesh
+extraction, but it does not rank the healthy runs — 4.041 gives 1.03 % while
+4.043 gives 0.70 %.
+
+**Where the boundary lies is unknown.** Every clean run is at or below 3.5M
+voxels; the only failure is at 9.7M. Nothing was measured in between.
+
+### The low-poly look is the seed, not the pipeline
+
+A faceted-looking result at seed 2026 turned out to have **more** triangles than
+the smooth one at seed 1517 (7,075,366 against 6,703,620), same tier, same code.
+The SLAT simply came out angular. The metrics agree: the faceted run carries
+twice the non-manifold rate and 3.5× the boundary edges, so "looks low-poly"
+and "messier surface" are the same observation from two directions.
+
+Worth keeping in mind before chasing a rendering artefact: with one vertex per
+voxel the tessellation is always fine, so a faceted appearance is a statement
+about the *shape*, never about triangle budget.
+
+### Cost is occupancy, not resolution
+
+The sparse-structure stage is a dense 16³ latent and costs the same for
+everything (25–29 s in every run). Everything after it scales with how much of
+the bounding cube the object's surface passes through, and that is fixed at the
+32³ occupancy: 1,197 cells for the punk against 2,842 for the jester, a factor
+of 2.37 that propagates unchanged through the HR scaffold (2.3×) and the HR flow
+(39 s against 119 s).
+
+Consequence worth knowing when planning runs: **the punk at 1536 (326 s) is
+cheaper than the jester at 1024 (345 s).** The tier is not the cost driver.
+
 ## What is fixed, and what is not
 
 **Fixed:** the aborts. A dense object completes at 1536 — 946 s, 9,715,171
@@ -217,11 +321,49 @@ three failed:
 | hypothesis | test | outcome |
 |---|---|---|
 | column cap at encoder level 0 | two runs past it | correct materials — refuted |
-| column cap at encoder level 1 | `TRELLIS2_SHAPE_ENC_CPU=1` | no change — refuted |
+| column cap at encoder level 1 | `TRELLIS2_SHAPE_ENC_CPU=1` | no change — **see the correction below** |
 | 2 GB boundary in the resident tensor | `test_large_rows 10000000` | ops exact — refuted |
 
-With every backend limit we know about handled, the gap remains. That points at
-the model, which is the plan's original RoPE-extrapolation risk.
+### The second row was not a clean refutation
+
+Two single-component tests were treated as one two-component answer, and they
+were not. `TRELLIS2_SHAPE_ENC_CPU=1` moved the encoder off the GPU while the
+*decoder* still produced the geometry, and `TRELLIS2_SHAPE_DEC_CPU=1` moved the
+decoder while encoder level 1 was still truncating:
+
+| run | shape decoder | encoder level 1 | result |
+|---|---|---|---|
+| `SHAPE_ENC_CPU` | GPU | CPU, clean | bad |
+| `SHAPE_DEC_CPU` | CPU | GPU, past the cap | slightly better — eyes visibly cleaner |
+
+**Neither run had both clean**, so neither could isolate anything. The second
+one is suggestive rather than conclusive: a decoder change alone moved the
+geometry a little and left the materials largely as they were, which is what
+partly-truncated texture latents would look like.
+
+Rather than spend a third 40-minute run on it, the exposure was removed —
+encoder levels 1-3 are now chunked too (above). The next 1536 run has no known
+uncapped matmul anywhere and is the first that can actually answer the
+question.
+
+### The CPU decode did give one hard number
+
+```text
+[mesh] grid 1536: 9739619 verts, 22111834 tris,
+       286917 boundary edges (0.9% of 31790138), 2341146 non-manifold edges
+```
+
+**2.3M non-manifold edges — 7.4 % of all edges carry more than two triangles.**
+The holes at 0.9 % are the smaller problem by a wide margin: this mesh is
+structurally broken, not merely open. Some non-manifold edges are inherent to
+dual contouring over a sparse voxel set (voxels meeting only at an edge or
+corner), so the number needs the 1024 baseline before it means anything — which
+is one 6-minute run.
+
+Also worth noting: CPU and GPU decodes do not agree exactly. 9,739,619 voxels
+against 9,715,171, about 0.25 % apart. Expected — backend rounding shifts
+marginal subdivision decisions — but it means "same seed" does not imply "same
+mesh" across backends, and comparisons have to allow for it.
 
 **And a correction to this entry's own earlier evidence.** The character run was
 used twice to argue RoPE was not the cause. It should not have been: its 1536
