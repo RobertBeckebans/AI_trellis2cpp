@@ -1,6 +1,6 @@
 # `rocm-native-reference` — produce the PyTorch reference dumps on the R9700
 
-- **Status:** in progress — phase 0 done
+- **Status:** in progress — phases 0-2 done, phase 3 open
 - **GitHub Issue:** none — tracked by plan key (`rocm-native-reference`), so
   progress entries are `docs/progress/rocm-native-reference_<phase>-<name>.md`.
 - **Branch:** `resolution-1536` (current) or a fresh one
@@ -111,15 +111,22 @@ Phase 1 checks it before any numeric tap is trusted.
 - [x] `test_cascade` against that dump: 1024 scaffold at the existing tolerance,
       1536 scaffold and resolution matched to the reference, sections 2 and 3
       reported as "not in the dump" rather than failing. — PASS, exit 0.
-- [ ] `docs/plan/1536-cascade.md` criterion 2 moves from `[~]` to `[x]`, with
-      the backend it was produced on named.
+- [x] `docs/plan/1536-cascade.md` criterion 2 moves from `[~]` to `[x]`, with
+      the backend it was produced on named. — done, named as ROCm/R9700, with
+      the caveat that this fixture stays under the token budget so the
+      *reduction* branch remains unreferenced. Criterion 5 stays `[~]` on
+      purpose: its 1024 coordinate rows were re-measured, its HR flow forward
+      and 1024³ decode were not, because the dump is partial by design.
 - [x] The dependency set needed to run the scripts natively is written down
       where someone can repeat it (a `docs/` note or a uv extra), not just in a
       shell history. — `pyproject.toml` (uv extras `rocm`/`cuda`/`cpu`),
       `.python-version`, `docs/reference-environment.md`, and
       `scripts/ref_env_check.py` as the gate that verifies a host.
-- [ ] `ctest --test-dir build -C Release -LE model` still green. A `SKIP` (77)
-      is not a pass.
+- [x] `ctest --test-dir build -C Release -LE model` still green. A `SKIP` (77)
+      is not a pass. — **10/10, no skips.** `preprocess` used to skip for want
+      of the DINO dump's fixtures and now runs; `dual_grid` had never been built
+      into this tree at all. The full suite (with `model`) is 13 passed,
+      2 skipped, 3 failed — see below.
 
 ## Context / affected files
 
@@ -165,20 +172,76 @@ Phase 1 checks it before any numeric tap is trusted.
       **Done** — `test_cascade` PASS: 1536 scaffold exact at 27,540/27,540,
       sections 2/3 reported as not in the dump. See
       `docs/progress/rocm-native-reference_1-2-cheap-chain-and-1536.md`.
-- [ ] **Phase 3 — f32 GGUFs and the rest of the suite (optional).** Convert
+- [~] **Phase 3 — f32 GGUFs and the rest of the suite (optional).** Convert
       `slat_flow_f32`, `slat_flow_1024_f32`, `shape_dec_f32` (`--ftype 0`), then
       the full cascade dump and `dump_slat_reference.py` /
       `dump_texture_reference.py`. Every row this turns green is a ROCm
       measurement and must be labelled as one. Decide *before* running whether
       that is wanted — see D1.
+      **Half done.** All six f32 GGUFs exist (`dino`, `ss_dec`, `ss_flow`,
+      `shape_dec`, `slat_flow`, `slat_flow_1024`) — they were needed in phase 1
+      to compare against anything at all, and a lossless conversion of a
+      checkpoint is not a measurement, so D1 does not apply to them.
+      Outstanding: `dump_slat_reference.py` and `dump_texture_reference.py`,
+      which are what `slat` and `texture` skip for. Those two *are* D1-affected.
+
+## What running the suite revealed
+
+The plan's stated goal was to stop the suite being dark. It worked, and the
+light showed five failures — none introduced here, all simply unobservable
+before. They are recorded in
+`docs/progress/rocm-native-reference_1-2-cheap-chain-and-1536.md` with the
+CPU/HIP split per test; this is the tracking list.
+
+**Fixed while the plan ran** (each measured before and after):
+
+- [x] **ggml's HIP graph capture crashed the sampler** (`0xC00000FD`,
+      intermittent — 2 of 5 runs of `examples/ss_sample.exe`). The workaround
+      existed in `server/main.go` alone, which is why the demo pipeline survived
+      while every test and example died. Moved into `init_best_backend()` so all
+      consumers get it; `TRELLIS2_CUDA_GRAPHS=1` re-enables for investigation.
+      The underlying stack usage is **not** diagnosed, only avoided.
+- [x] **ggml's ROCm flash-attention kernel cost ~5 % per flow forward.**
+      `sdpa_auto()` requested `GGML_PREC_F32` all along; nothing under
+      `ggml-cuda` reads it for this op. Attention is size-gated again: exact
+      below a 1 GiB score matrix, flash above, with a free-VRAM check that can
+      only lower exact usage. `ss_flow_forward` 5.198e-02 → 3.050e-06 and
+      `ss_sample` 2.847e-01 → 2.135e-03, both green.
+
+**Still open — no plan of their own yet:**
+
+- [ ] **`chunked_decode` fails for every non-default block size**, including a
+      voxel-count mismatch (858 vs 855). The default block size is bit-identical,
+      which is the lever for bisecting it. This fork's own feature and the
+      closest thing to a regression against `e87069e` (encoder levels chunked).
+      Highest-value next step.
+- [ ] **`dino`'s patch embedding is ~f16 accurate** (`embd` 4.618e-04 → `cond`
+      1.623e-04) against a reference verified correct to float64. Identical on
+      CPU and GPU, and unchanged by graphs or attention path, so it is the port
+      rather than a backend. `ggml_conv_2d`'s F16 im2col is the suspect and is
+      **not** verified. Note `ss_dec`'s dense 3D convolutions measure 6.172e-07
+      on the same build, so it is not a blanket "ggml convolutions are f16".
+- [ ] **`test_ss_dec` loads the decoder on the GPU** where `trellis2_capi.cpp`
+      pins it to the CPU, so it hits the `CONV_3D` gap the shipped code never
+      reaches (`docs/PLAN.md` documents that stage as CPU-only by design). One
+      argument fixes the test — but it also hides that the stage has no GPU
+      path, which is a reviewer's call, not an agent's.
+- [ ] **Upstream ggml:** `ggml_flash_attn_ext_set_prec()` is silently ignored by
+      the CUDA/HIP backend, and there is no F32 flash kernel to route to. The HR
+      cascade therefore still carries the ~5e-02, since exact is not an option at
+      its token counts. Worth reporting upstream independently of this fork.
 
 ## Tests / verification
 
 - `test_cascade` with the partial dump: 1024 scaffold within 5e-4, 1536
   scaffold and resolution exact, sections 2/3 skipped with a reason.
-- `ctest -LE model` green throughout (it is 10/10 today).
+  — **PASS**: upsample sym-diff 0.0002 %, 64³ scaffold 0.0000 %, 1536 scaffold
+  27,540 of 27,540 at resolution 1536, sections 2/3 reported as absent.
+- `ctest -LE model` green throughout (it is 10/10 today). — **10/10.**
 - A partial dump and a full dump must both work; the flag changes what is
-  produced, not whether the test runs.
+  produced, not whether the test runs. — the partial path is verified; a full
+  dump has **not** been re-run since `--skip-hr-sampler` was added, so that half
+  of the contract rests on the code shape rather than a measurement.
 
 ## Risks / open questions
 
@@ -204,13 +267,10 @@ Phase 1 checks it before any numeric tap is trusted.
 
 ## State this plan inherits
 
-Uncommitted at the time of writing, waiting on review (see
-`docs/progress/1536-cascade_backend-limits.md` for the full account):
-
-| files | commit |
-|---|---|
-| `src/trellis2.cpp`, `tests/test_dual_grid.cpp`, `tests/CMakeLists.txt`, `start_server.bat`, `docs/PLAN.md`, `docs/VERIFICATION.md`, `docs/progress/1536-cascade_backend-limits.md` | encoder levels 1-3 chunked, subdivision-runaway warning, dual-grid invariant test, corrected findings |
-| `server/main.go`, `server/persistence.go`, `server/persistence_test.go`, `server/web/index.html` | sampling parameters exposed and restored on view |
+The state listed here when the plan was written — encoder chunking, the
+subdivision-runaway warning, the dual-grid invariant test, and the server's
+sampling-parameter round-trip — has since been committed (`e87069e` and
+earlier). See `docs/progress/1536-cascade_backend-limits.md` for that account.
 
 Other 1536 items still open and **not** covered by this plan:
 
