@@ -111,7 +111,7 @@ int main( int argc, char** argv )
 	// the coordinate chain. That is a deliberately partial dump, not a broken one:
 	// section 1 — the part the 1536 tier is gated on — runs either way, and
 	// sections 2 and 3 report the tensors as not present instead of failing.
-	const bool have_hr_chain = ref.load( "hr_noise", hr_noise );
+	const bool			 have_hr_chain = ref.load( "hr_noise", hr_noise );
 	const int			 L32		   = ( int )( coords32f.size() / 4 );
 	const int			 Lhr		   = ( int )( hr_coordsf.size() / 4 );
 	const int			 Lkv512		   = ( int )( cond512.size() / 1024 );
