@@ -13,6 +13,13 @@
 //    at ~40k tokens is impractical on CPU; the shared Euler loop is already
 //    validated by test_slat / test_ss_sample.)
 //
+// Sections 2 and 3 need tensors that a dump written with
+// scripts/dump_cascade_reference.py --skip-hr-sampler does not contain. They
+// then report "not in the dump" and are skipped; sections 1 and 1b, which are
+// what the 1536 tier is gated on, run either way. Reporting a deliberately
+// absent tensor is the correct outcome — the test still gates everything the
+// dump does carry, rather than exiting 77.
+//
 // usage: test_cascade <slat_512_f32> <slat_1024_f32> <shape_dec_f32> <reference_cascade.gguf>
 // exits 77 (ctest SKIP) when inputs are missing.
 
@@ -95,10 +102,16 @@ int main( int argc, char** argv )
 
 	std::vector<float> cond512, cond1024, coords32f, lr_slat, up_coordsf, hr_coordsf, hr_noise;
 	if( !ref.load( "cond_512", cond512 ) || !ref.load( "cond_1024", cond1024 ) || !ref.load( "coords32", coords32f ) || !ref.load( "lr_slat", lr_slat ) || !ref.load( "up_coords", up_coordsf ) ||
-		!ref.load( "hr_coords", hr_coordsf ) || !ref.load( "hr_noise", hr_noise ) ) {
+		!ref.load( "hr_coords", hr_coordsf ) ) {
 		std::fprintf( stderr, "reference missing required tensors\n" );
 		return 1;
 	}
+	// hr_noise, and everything derived from it (hr_flow_t500_out, hr_slat, out7),
+	// is absent from a dump written with --skip-hr-sampler, which captures only
+	// the coordinate chain. That is a deliberately partial dump, not a broken one:
+	// section 1 — the part the 1536 tier is gated on — runs either way, and
+	// sections 2 and 3 report the tensors as not present instead of failing.
+	const bool have_hr_chain = ref.load( "hr_noise", hr_noise );
 	const int			 L32		   = ( int )( coords32f.size() / 4 );
 	const int			 Lhr		   = ( int )( hr_coordsf.size() / 4 );
 	const int			 Lkv512		   = ( int )( cond512.size() / 1024 );
@@ -209,7 +222,11 @@ int main( int argc, char** argv )
 	}
 
 	// ── 2. HR flow forward at t=500 on the reference HR scaffold ──────────────
-	{
+	std::vector<float> want_hr_fwd;
+	const bool		   have_hr_fwd = have_hr_chain && ref.load( "hr_flow_t500_out", want_hr_fwd );
+	if( !have_hr_fwd ) {
+		std::printf( "\n[hr flow t500]    not in the dump (--skip-hr-sampler), section skipped\n" );
+	} else {
 		// Force CPU: at 10k+ HR tokens the attention exceeds the exact-path
 		// threshold and uses flash, and GPU flash (F16-MMA) is ~1e-2 vs the
 		// exact fp32 reference. CPU flash is exact-matching (~3e-4), so it
@@ -222,16 +239,15 @@ int main( int argc, char** argv )
 			return 1;
 		}
 		std::printf( "1024 flow backend: %s\n", trellis2_slat_flow_backend_name( flow ) );
-		std::vector<float> got( ( size_t )Lhr * 32 ), want;
+		std::vector<float> got( ( size_t )Lhr * 32 );
 		if( !trellis2_slat_flow_forward( flow, hr_noise.data(), Lhr, hr_coords.data(), 500.0f, cond1024.data(), Lkv1024, 1024, got.data(), &err ) ) {
 			std::fprintf( stderr, "HR flow forward failed: %s\n", err.c_str() );
 			trellis2_slat_flow_free( flow );
 			trellis2_shape_dec_free( dec );
 			return 1;
 		}
-		ref.load( "hr_flow_t500_out", want );
 		t2_parity::compare_stats st;
-		t2_parity::compare( got, want, "hr_flow_t500_out", 2e-3, 2e-3, &st );
+		t2_parity::compare( got, want_hr_fwd, "hr_flow_t500_out", 2e-3, 2e-3, &st );
 		if( st.rel_l2 > 3e-3 ) {
 			std::printf( "  -> HR forward rel_l2 %.4g > 3e-3, FAIL\n", st.rel_l2 );
 			++n_fail;
@@ -271,9 +287,10 @@ int main( int argc, char** argv )
 	}
 	std::vector<float> hr_slat;
 	if( !ref.load( "hr_slat", hr_slat ) ) {
-		std::fprintf( stderr, "reference missing hr_slat\n" );
+		std::printf( "\n[1024^3 decode]   hr_slat not in the dump (--skip-hr-sampler), section skipped\n" );
 		trellis2_shape_dec_free( dec );
-		return 1;
+		std::printf( "total failures: %d\nRESULT: %s\n", n_fail, n_fail ? "FAIL" : "PASS" );
+		return n_fail ? 1 : 0;
 	}
 	// Compare only the final 7-channel output (taps=nullptr): the per-level
 	// intermediates would hold multiple GB at 1024^3 and the decoder's level

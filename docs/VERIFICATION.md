@@ -56,13 +56,24 @@ ctest --test-dir build                  # full parity (needs ggufs/ + dumps/)
 | **1024 cascade** — HR (1024-model) flow forward | `test_cascade` | full output | **PASS**, rel-L2 ~3e-4 (CPU); ~1e-2 on GPU flash |
 | **1024 cascade** — final 1024³ decode (3.97M voxels) | `test_cascade` | per-level features + subdivision + 7-ch output | **PASS**, rel-L2 ≤ 2e-2, set within 0.0001% |
 | **cascade token budget** — quantize (truncating) + step-down loop + 1024 floor | `test_cascade_tokens` | formula on hand-checked cells; chosen resolution vs. independently derived per-grid counts for every budget; 1024 scaffold vs. an independent re-implementation of the pre-1536 inline code | **PASS**, no assets needed (runs in `-LE model`) |
-| **1536 cascade** — 96³ HR scaffold + selected resolution | `test_cascade` | full coord set + `hr_resolution` | gated against `hr_coords_1536` / `hr_resolution_1536` when the dump carries them; **invariants only** until `scripts/dump_cascade_reference.py` is rerun |
+| **1536 cascade** — 96³ HR scaffold + selected resolution | `test_cascade` | full coord set + `hr_resolution` | **PASS**, exact set match: 27,540 of 27,540 voxels at 96³, resolution 1536 = reference, sym-diff 0.0000%. Reference produced on ROCm (R9700) with `dump_cascade_reference.py --skip-hr-sampler`; per plan D1 that is authoritative here because both sides are the integer quantization `((c+0.5)/lr_res*grid).int()`, which has no precision question. The budget did **not** reduce on this fixture (27,540 < 49,152), so the *reduction* branch is still unreferenced |
 | **1536 cascade** — end-to-end run on the R9700 | manual (`server/`, 2026-08-13) | achieved resolution, stage wall clock, mesh size, VRAM ceiling | **RUNS at full 1536³**, 2 of 2 objects, no budget reduction. 315 s total, 1536³ decode 20.2 s, 6.66M-tri mesh, VRAM ceiling < 16 GB of 32 GB. See `docs/progress/1536-cascade_phase3-measure.md` |
 | **1536 cascade** — mesh topology across tiers and seeds | manual, `[mesh]` line under `TRELLIS2_TIMING` | non-manifold and boundary edge fraction of the extracted mesh | **Usually fine, one measured failure.** 4 of 5 runs land at 0.36–1.03 % non-manifold regardless of tier; the best result of all is a 1536 one (0.357 %, cleaner than every 1024 run). The outlier is a 9.7M-voxel 1536 mesh at **7.47 %**, where the finest subdivision ran away (L4/L3 = 4.52 against ~4.0 everywhere else). See `docs/progress/1536-cascade_backend-limits.md` |
 | **1536 cascade** — early warning for that failure | same | finest-level expansion ratio L4/L3 in the `[shape_dec]` lines | 4.00–4.04 on every clean run, **4.52** on the broken one. Above 4 means the subdivision is thickening rather than following a surface. Flags the catastrophic case before mesh extraction; it is **not** a fine-grained quality score |
 | **1536 cascade** — decode VRAM peak, host RAM high-water | — | — | **NOT INSTRUMENTED.** The < 16 GB ceiling is an external reading, so it bounds but does not pin the decode transient; `decode_vram_peak`'s 1536 entry stays the conservative extrapolation. Host RAM: generation side ~0.5 GB (derived from the mesh size), export side (plan D5) still unmeasured |
 
 Notes:
+- **Platform caveat — the table above is a CUDA/Linux measurement.** The first
+  full run on Windows/HIP (Radeon AI PRO R9700, 2026-08-14) does **not**
+  reproduce all of it. `ss_dec` cannot run on the HIP backend at all (`CONV_3D`
+  unsupported → `GGML_ASSERT`), `ss_sample` stack-overflows there, and
+  `ss_flow_forward` measures rel-L2 5.2e-02 on HIP against 2.4e-04 on CPU —
+  where the CPU number reproduces this table exactly. `dino` misses its ≤ 7e-07
+  row on both backends (`embd` 4.6e-04, `cond` 1.6e-04), and `chunked_decode`
+  fails for every non-default block size. Details and the CPU/HIP split per test
+  in `docs/progress/rocm-native-reference_1-2-cheap-chain-and-1536.md`. Treat a
+  row here as validated on the backend it was taken on, not as a platform
+  guarantee.
 - **Flash attention (default for every flow forward).** `sdpa_auto()` uses
   `ggml_flash_attn_ext` for both flow DiTs at all token counts;
   `TRELLIS2_SDPA_EXACT` restores the old materialized `[L_k, L_q, heads]`

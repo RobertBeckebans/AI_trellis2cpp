@@ -76,14 +76,19 @@ What is hardcoded to 64:
       `docs/progress/`. *(`1536-cascade_phase3-measure.md`. VRAM is
       recorded as a ceiling — under 16 GB — rather than an instrumented
       peak; see that entry.)*
-- [~] The token-reduction loop reproduces upstream exactly, including
+- [x] The token-reduction loop reproduces upstream exactly, including
       the truncating quantization (D2) and the 1024 floor: given the
       same LR SLAT, the selected `hr_resolution` and the resulting
-      coordinate set match the reference. *(Loop and formula gated by
-      `test_cascade_tokens`; the 1024 coordinate set matches the
-      PyTorch reference. The **1536** coordinate set has no reference
-      dump yet — `scripts/dump_cascade_reference.py` captures it, but
-      the dump needs regenerating in the container.)*
+      coordinate set match the reference. *(Closed 2026-08-14 against a
+      reference produced natively on **ROCm** (Radeon AI PRO R9700,
+      `dump_cascade_reference.py --skip-hr-sampler`): `test_cascade`
+      reports resolution 1536 = reference and 27,540 of 27,540 voxels at
+      96³, sym-diff 0.0000%. Valid despite the shared backend because
+      both sides are the integer quantization
+      `((c+0.5)/lr_res*grid).int()` — see `rocm-native-reference` D1.
+      **Caveat:** this fixture stays under the token budget (27,540 <
+      49,152), so the loop took its zero-reduction path; the *reduction*
+      branch itself is still unreferenced.)*
 - [x] The reduction is **visible**, not silent: when the loop drops
       below the requested resolution the achieved resolution reaches the
       caller (progress/stage payload or result field), mirroring
@@ -97,9 +102,13 @@ What is hardcoded to 64:
 - [~] `T2_PIPE_1024` behaviour is bit-identical to today — every
       existing row in `docs/VERIFICATION.md` unchanged. *(Held by
       construction — the loop breaks on its first pass at 1024 — and by
-      `test_cascade_tokens`' independent-oracle check. **`test_cascade`
-      itself has not been rerun**: the dev box has no `dumps/` and only
-      f16 weights.)*
+      `test_cascade_tokens`' independent-oracle check. `test_cascade`
+      **has** now been rerun (2026-08-14, f32 GGUFs + a ROCm-produced
+      dump) and its 1024 coordinate rows pass: upsample sym-diff
+      0.0002%, 64³ scaffold 0.0000%, `[budget 1024]` res 1024 / 10,965
+      tokens / 0 reductions. Still `[~]` because the dump was written
+      with `--skip-hr-sampler`: the 1024 **HR flow forward** and the
+      **1024³ decode** rows were not re-measured.)*
 - [x] `T2_CAPI_ABI_VERSION` bumped and propagated to
       `server/engine.go:20`; verified against the built DLL.
       *(`t2_abi_version()` → 16 from the built DLL.)*

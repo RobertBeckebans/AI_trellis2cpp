@@ -104,12 +104,13 @@ Phase 1 checks it before any numeric tap is trusted.
 
 ## Acceptance criteria
 
-- [ ] `scripts/dump_cascade_reference.py --skip-hr-sampler` produces a dump
+- [x] `scripts/dump_cascade_reference.py --skip-hr-sampler` produces a dump
       containing `up_coords`, `hr_coords`, `hr_coords_1536` and
       `hr_resolution_1536`, and omits `hr_slat` / `hr_flow_t500_out` cleanly.
-- [ ] `test_cascade` against that dump: 1024 scaffold at the existing tolerance,
+      — 9 tensors, 41 MB.
+- [x] `test_cascade` against that dump: 1024 scaffold at the existing tolerance,
       1536 scaffold and resolution matched to the reference, sections 2 and 3
-      reported as "not in the dump" rather than failing.
+      reported as "not in the dump" rather than failing. — PASS, exit 0.
 - [ ] `docs/plan/1536-cascade.md` criterion 2 moves from `[~]` to `[x]`, with
       the backend it was produced on named.
 - [x] The dependency set needed to run the scripts natively is written down
@@ -148,16 +149,22 @@ Phase 1 checks it before any numeric tap is trusted.
       they change no numbers — matmul/SDPA/conv3d sit at 1.1e-06/5.0e-07/3.6e-07
       versus float64 before and after. Precision is settled for this card; D1 is
       not. `ctest -LE model` went from 8 passed + 1 skip to **9/9, no skips**.
-- [ ] **Phase 1 — The cheap chain.** `dump_dino_reference.py`,
+- [x] **Phase 1 — The cheap chain.** `dump_dino_reference.py`,
       `tests/ref_ss_flow.py` (CPU by design — true fp32 golden),
       `tests/ref_ss_sample.py`, `tests/ref_ss_dec.py`. These produce
       `fixture*.dinodata` and `ss_sample_ref.bin`, which
       `dump_cascade_reference.py` needs as input. Note per D1 that the taps
       these enable are ROCm-derived.
-- [ ] **Phase 2 — `--skip-hr-sampler` and the 1536 capture.** Implement D2 and
+      **Done** — all three ran on the R9700; six f32 GGUFs converted alongside.
+      `test_dino` fails against the new reference at 4.6e-04 (the reference was
+      verified correct against float64); see the progress entry.
+- [x] **Phase 2 — `--skip-hr-sampler` and the 1536 capture.** Implement D2 and
       D3, run the cascade dump, point `test_cascade` at it. This is the phase
       that closes criterion 2, and the only one whose result is unaffected by
       D1.
+      **Done** — `test_cascade` PASS: 1536 scaffold exact at 27,540/27,540,
+      sections 2/3 reported as not in the dump. See
+      `docs/progress/rocm-native-reference_1-2-cheap-chain-and-1536.md`.
 - [ ] **Phase 3 — f32 GGUFs and the rest of the suite (optional).** Convert
       `slat_flow_f32`, `slat_flow_1024_f32`, `shape_dec_f32` (`--ftype 0`), then
       the full cascade dump and `dump_slat_reference.py` /

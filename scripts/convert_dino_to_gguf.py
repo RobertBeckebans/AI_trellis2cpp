@@ -89,8 +89,11 @@ def to_bytes(arr_f32: np.ndarray, ggml_type: int) -> bytes:
 
 def main():
     ap = argparse.ArgumentParser(description="Convert DINOv3 ViT-L/16 to GGUF")
-    ap.add_argument("--model", default=os.path.join(os.path.dirname(__file__),
-                    "models", "dinov3-vitl16", "model.safetensors"))
+    # models/ sits at the repository root, one level above scripts/ — resolving
+    # this against __file__'s own directory looked for scripts/models/.
+    ap.add_argument("--model", default=os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "models", "dinov3-vitl16", "model.safetensors"))
     ap.add_argument("--config", default=None, help="config.json (default: alongside model)")
     ap.add_argument("--output", default="dino.gguf")
     ap.add_argument("--ftype", type=int, default=1, choices=[0, 1])

@@ -91,6 +91,14 @@ def main():
                     help="second tier captured for the token-budget reference")
     ap.add_argument("--max-num-tokens", type=int, default=49152,
                     help="HR token budget the reduction loop is run against")
+    ap.add_argument("--skip-hr-sampler", action="store_true",
+                    help="stop after the coordinate captures: no HR flow forward, no HR "
+                         "sampler, no final decode. hr_coords_1536 / hr_resolution_1536 "
+                         "depend only on up_coords, which exists before the HR chain, so "
+                         "this produces the 1536 token-budget reference at a fraction of "
+                         "the cost. The omitted tensors are absent from the dump, and "
+                         "tests/test_cascade.cpp reports them as not present rather than "
+                         "failing.")
     ap.add_argument("--out", default=os.path.join(ref_common.DUMPS, "reference_cascade.gguf"))
     args = ap.parse_args()
 
@@ -200,55 +208,63 @@ def main():
     print(f"1536 budget: {coords_1536.shape[0]} voxels at {hr_res_1536 // 16}^3 "
           f"(resolution {hr_res_1536}, budget {args.max_num_tokens})")
 
-    # ── HR flow: forward @ t=500 + full sampler with 1024 model + cond_1024 ──
-    flow_hr, cfg_hr = load_flow(os.path.join(args.models, "slat_flow_img2shape_dit_1_3B_1024_bf16"), dev)
-    g = torch.Generator().manual_seed(args.hr_seed)
-    hr_noise = torch.randn(Lhr, cfg_hr["in_channels"], generator=g).to(dev)
-    caps["hr_noise"] = hr_noise
-    xh = sp.SparseTensor(feats=hr_noise.clone(), coords=hr_coords.to(dev))
-    with torch.no_grad():
-        out = flow_hr(xh, torch.tensor([args.t], device=dev), cond_1024)
-    caps["hr_flow_t500_out"] = out.feats
-    print(f"hr flow t={args.t}: l2={out.feats.norm().item():.4f}")
+    if args.skip_hr_sampler:
+        # Everything below needs the 1024 flow model and the 1024^3 decode; the
+        # coordinate captures above do not. Omitting them leaves hr_noise,
+        # hr_flow_t500_out, hr_slat, out7 and out_coords out of the dump.
+        print("--skip-hr-sampler: stopping after the coordinate captures "
+              "(no HR flow, no HR sampler, no 1024^3 decode)")
+    else:
+        # ── HR flow: forward @ t=500 + full sampler with 1024 model + cond_1024 ──
+        flow_hr, cfg_hr = load_flow(os.path.join(args.models, "slat_flow_img2shape_dit_1_3B_1024_bf16"), dev)
+        g = torch.Generator().manual_seed(args.hr_seed)
+        hr_noise = torch.randn(Lhr, cfg_hr["in_channels"], generator=g).to(dev)
+        caps["hr_noise"] = hr_noise
+        xh = sp.SparseTensor(feats=hr_noise.clone(), coords=hr_coords.to(dev))
+        with torch.no_grad():
+            out = flow_hr(xh, torch.tensor([args.t], device=dev), cond_1024)
+        caps["hr_flow_t500_out"] = out.feats
+        print(f"hr flow t={args.t}: l2={out.feats.norm().item():.4f}")
 
-    xh0 = sp.SparseTensor(feats=hr_noise.clone(), coords=hr_coords.to(dev))
-    with torch.no_grad():
-        hr_slat = sampler.sample(flow_hr, xh0, cond=cond_1024, neg_cond=torch.zeros_like(cond_1024),
-                                 **sampler_params, verbose=True).samples
-    hr_slat = hr_slat * std + mean
-    caps["hr_slat"] = hr_slat.feats
-    print(f"hr_slat: {hr_slat.feats.shape} mean={hr_slat.feats.mean().item():.5f}")
-    del flow_hr
-    if dev.type == "cuda":
-        torch.cuda.empty_cache()
+        xh0 = sp.SparseTensor(feats=hr_noise.clone(), coords=hr_coords.to(dev))
+        with torch.no_grad():
+            hr_slat = sampler.sample(flow_hr, xh0, cond=cond_1024, neg_cond=torch.zeros_like(cond_1024),
+                                     **sampler_params, verbose=True).samples
+        hr_slat = hr_slat * std + mean
+        caps["hr_slat"] = hr_slat.feats
+        print(f"hr_slat: {hr_slat.feats.shape} mean={hr_slat.feats.mean().item():.5f}")
+        del flow_hr
+        if dev.type == "cuda":
+            torch.cuda.empty_cache()
 
-    # ── final decode of the HR slat at resolution 1024, level by level ───────
-    # Only the final 7-channel output is kept: the per-level intermediates are
-    # multiple GB at 1024^3 (and the decoder's level logic is already validated
-    # exactly at the 512 tier). We run the base SparseUnetVaeDecoder forward
-    # manually to get the raw 7 channels — dec(...) would run the FDG mesh
-    # conversion (stubbed o_voxel). Running the decode on CPU is host-RAM heavy.
-    dec.set_resolution(args.resolution)
-    hr_slat_cpu = hr_slat.cpu()
-    with torch.no_grad():
-        h = dec.from_latent(hr_slat_cpu.float())
-        for i, res in enumerate(dec.blocks):
-            for j, block in enumerate(res):
-                if i < len(dec.blocks) - 1 and j == len(res) - 1:
-                    h, _sub = block(h)
-                else:
-                    h = block(h)
-            print(f"decode level {i}: {h.feats.shape[0]} voxels x {h.feats.shape[1]} ch")
-        hn = h.replace(F.layer_norm(h.feats, h.feats.shape[-1:]))
-        out7 = dec.output_layer(hn)
-    caps["out7"] = out7.feats
-    caps["out_coords"] = out7.coords.float()
-    print(f"out7: {out7.feats.shape}")
+        # ── final decode of the HR slat at resolution 1024, level by level ───────
+        # Only the final 7-channel output is kept: the per-level intermediates are
+        # multiple GB at 1024^3 (and the decoder's level logic is already validated
+        # exactly at the 512 tier). We run the base SparseUnetVaeDecoder forward
+        # manually to get the raw 7 channels — dec(...) would run the FDG mesh
+        # conversion (stubbed o_voxel). Running the decode on CPU is host-RAM heavy.
+        dec.set_resolution(args.resolution)
+        hr_slat_cpu = hr_slat.cpu()
+        with torch.no_grad():
+            h = dec.from_latent(hr_slat_cpu.float())
+            for i, res in enumerate(dec.blocks):
+                for j, block in enumerate(res):
+                    if i < len(dec.blocks) - 1 and j == len(res) - 1:
+                        h, _sub = block(h)
+                    else:
+                        h = block(h)
+                print(f"decode level {i}: {h.feats.shape[0]} voxels x {h.feats.shape[1]} ch")
+            hn = h.replace(F.layer_norm(h.feats, h.feats.shape[-1:]))
+            out7 = dec.output_layer(hn)
+        caps["out7"] = out7.feats
+        caps["out_coords"] = out7.coords.float()
+        print(f"out7: {out7.feats.shape}")
 
     import gguf
     writer = gguf.GGUFWriter(args.out, "reference")
     manifest = {"shapes": {}, "atol": 2e-3, "rtol": 2e-3,
-                "lr_resolution": args.lr_resolution, "resolution": args.resolution}
+                "lr_resolution": args.lr_resolution, "resolution": args.resolution,
+                "skip_hr_sampler": bool(args.skip_hr_sampler)}
     for name, t in caps.items():
         a = t.detach().cpu().float().numpy()
         manifest["shapes"][name] = list(a.shape)

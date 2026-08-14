@@ -271,10 +271,36 @@ def _force_true_fp32():
         torch.backends.cuda.enable_math_sdp(True)
 
 
+def _redirect_pipeline_log():
+    """Point the reference tree's pipeline logger at a writable location.
+
+    Some TRELLIS.2 checkouts log to a hardcoded POSIX path ("/tmp/..."). On
+    Windows that resolves against the current drive (F:\\tmp\\...), which
+    normally does not exist, so the decoder dies inside a logging FileHandler
+    instead of on anything numerical. Only redirected when the original
+    directory is missing, so the container — where /tmp exists — is untouched.
+    Checkouts without the module simply have nothing to patch.
+    """
+    import importlib
+    import tempfile
+
+    try:
+        mod = importlib.import_module("trellis2.utils.pipeline_logger")
+    except Exception:
+        return
+    path = getattr(mod, "LOG_PATH", None)
+    if not isinstance(path, str) or not path:
+        return
+    directory = os.path.dirname(path)
+    if directory and not os.path.isdir(directory):
+        mod.LOG_PATH = os.path.join(tempfile.gettempdir(), os.path.basename(path))
+
+
 def setup():
     _force_true_fp32()
     _install_sdpa_sparse_attention()
     _install_torch_sparse_conv()
+    _redirect_pipeline_log()
 
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
