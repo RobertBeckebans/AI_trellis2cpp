@@ -336,11 +336,24 @@ func (s *server) worker() {
 			}
 		}
 
+		// A build carrying both GPU backends makes every one of them print its
+		// init banner at startup, whichever is actually used — so the log alone
+		// could not say which one a run went to, and reading it off the per-step
+		// milliseconds is not a reasonable ask. Report it once the models are up,
+		// which is the first progress event: the load callback fires before the
+		// backend is chosen.
+		backendLogged := false
 		mesh, err := s.eng.Generate(j.image, j.pipeline, j.Background, j.Seed, j.Steps, j.Guidance, j.TextureSteps,
 			func() {
 				setStage("loading models", 0, 0)
 			},
 			func(stage, step, total int) {
+				if !backendLogged {
+					backendLogged = true
+					if b, _, _, loaded := s.eng.Info(); loaded && b != "" {
+						log.Printf("  running on %s", b)
+					}
+				}
 				// The cascade reports its settled resolution as a second
 				// upsample event — (achieved, requested), not a step counter.
 				// Say so in the log rather than letting it read as "1536/1536".

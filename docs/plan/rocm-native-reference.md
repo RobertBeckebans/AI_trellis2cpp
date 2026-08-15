@@ -274,6 +274,59 @@ CPU/HIP split per test; this is the tracking list.
       the CUDA/HIP backend, and there is no F32 flash kernel to route to. The HR
       cascade therefore still carries the ~5e-02, since exact is not an option at
       its token counts. Worth reporting upstream independently of this fork.
+- [ ] **Vulkan is not usable above 1024, and degrades below it.** Measured on the
+      same card, same image, same seed, with the runtime backend switch:
+
+      | | ROCm | Vulkan |
+      |---|---|---|
+      | 1024, boundary edges | 3,534 (0.042 %) | 15,171 (**0.172 %**) |
+      | 1024, non-manifold | 22,814 | 53,593 |
+      | 1024, expansion | 3.997 | 4.008 |
+      | 1024, total time | 321 s | **232 s** |
+      | **1536** | (not run) | **collapsed** |
+
+      At 1536 it falls apart rather than degrading: finest-level expansion
+      **2.820** where a surface gives ~4, and 163,318 triangles for 2,183,769
+      vertices — a fifteenth of the usual ratio — with 16.06 % boundary edges.
+      The viewer shows loose fragments, not a mesh. The corruption starts well
+      before the finest level: levels grow 6.3× → 2.5× → 1.7× → 2.8× instead of
+      roughly 4× each.
+
+      The chunking was active (`split block 262144`), so this is *not* the
+      mul_mat column ceiling. Vulkan has a second limit of its own — it asserted
+      on `maxComputeWorkGroupCount` under `TRELLIS2_NO_CHUNK`, so evidently not
+      every op checks it and some produce garbage silently instead.
+
+      **The two backends fail differently, and only one of them coherently.**
+      Same image and seed at 1536:
+
+      | | ROCm | Vulkan |
+      |---|---|---|
+      | level growth | 4.08 → 4.21 → 4.24 → **4.51** | 6.33 → 2.49 → **1.73** → 2.82 |
+      | verts / tris | 9,247,597 / 22,122,300 | 2,183,769 / **163,318** |
+      | tris per vert | 2.39 | **0.075** |
+      | boundary edges | 0.69 % | **16.06 %** |
+      | non-manifold | **9.87 %** | 1.29 % (meaningless at that tri count) |
+
+      ROCm subdivides consistently and only overshoots at the finest level —
+      the known runaway from `1536-cascade_backend-limits.md`, worse than the
+      7.47 % recorded there, and the built-in early warning **fired correctly**.
+      Vulkan's growth rates are incoherent from level 2 onward: it collapses
+      long before the finest level, and the extractor then finds almost no
+      closed surface.
+
+- [ ] **The subdivision-runaway warning is one-sided and missed the worse case.**
+      It fires on `ratio > 4`. Vulkan's 2.82 sits *below* four, so nothing was
+      logged for the run that failed far harder. A ratio well under 4 is equally
+      diagnostic — the decoder is losing voxels rather than adding volume — and
+      `tris/verts` (2.39 healthy, 0.075 collapsed) is an even cheaper tell that
+      nothing currently reads. Making the check two-sided would have put both
+      failures in the log instead of leaving one to the eye, which is what the
+      warning exists for.
+
+      At 1024 the trade is real and worth knowing: Vulkan is 28 % faster (the
+      flow samplers run 3-4× faster) and produces four times the boundary edges.
+      Neither backend is simply better.
 - [ ] **Upstream AMD: the mul_mat column truncation is rocBLAS, not ggml.**
       Reproduced with PyTorch alone — `tools/rocblas_col_truncation.py` —
       `torch.matmul` leaves the tail of a tall narrow GEMM as exact zeros with
