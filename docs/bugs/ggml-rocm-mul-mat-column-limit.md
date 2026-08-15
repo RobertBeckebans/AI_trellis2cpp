@@ -22,14 +22,47 @@ It is a fixed threshold, not a fraction of the matrix: a matmul with exactly
 2 097 152 columns is correct, one with 2 097 153 columns loses exactly the last
 row of output.
 
-### What was not measured
+### 2026-08-15: this is not ggml. It is the BLAS underneath.
 
-- Only one shape was tested: `src0` `[64, 64]`, i.e. M = K = 64. Whether the
-  ceiling moves with M or K is unknown, so the two numbers above may be specific
-  to this shape rather than universal.
+Reproduced with **PyTorch alone, no ggml involved** —
+`tools/rocblas_col_truncation.py`. `torch.matmul` on the same card leaves the
+tail of its output as exact zeros, silently, with the same signature:
+
+| dtype | L=600k | L=2.2M | L=4.5M | L=9M |
+|---|---|---|---|---|
+| f32 | **524,288** | **524,288** | **524,288** | **524,288** |
+| f16 | ok | ok | **4,194,304** | **8,388,608** |
+| bf16 | ok | ok | **4,194,304** | **8,388,608** |
+| f64 | ok | — | — | — |
+
+Consequences for the framing above:
+
+- **The title is wrong.** Any ROCm consumer that multiplies a tall, narrow
+  matrix is exposed, ggml merely happened to be where we saw it.
+- **ROCm 7.2 does not fix it.** That PyTorch run was on `torch.version.hip`
+  7.2.26024, a release newer than the 6.4 this project builds against, and the
+  f32 cap sits at exactly the same 2^19. An SDK upgrade is not the way out.
+- **The thresholds are per kernel, not per backend.** ggml loses f16 at 2^21
+  where PyTorch survives to 2^22, so the two dispatch to different kernels and
+  each has its own cliff. The f32 cap at 2^19 is identical in both, which is
+  what points at a shared layer.
+- **It is shape-dependent.** `K = M = 256` is clean where `K = M = 64`
+  truncates, so only the narrow-GEMM kernel is affected.
+
+**Inferred, not verified:** 2^19 = 65536 × 8 and 2^22 = 65536 × 64 exactly,
+which looks like a grid dimension pinned at 65535 multiplied by the kernel's
+tile height rather than an arithmetic overflow. Worth checking first.
+
+This belongs to AMD (rocBLAS / hipBLASLt / Tensile) rather than to ggml. The
+reproducer is short enough to attach to a ticket as it stands.
+
+### What was still not measured
+
 - NVIDIA/CUDA was not tested at all. The title says ROCm/HIP because that is
   where it was observed, not because CUDA was checked and found healthy.
 - Quantized `src0` types were not tested; they take a different kernel path.
+- The exact boundary was found by sampling powers of two, not by bisection, so
+  the true cliff could sit anywhere between the last clean and first bad size.
 
 ## Environment
 

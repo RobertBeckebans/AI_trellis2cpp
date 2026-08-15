@@ -210,11 +210,55 @@ CPU/HIP split per test; this is the tracking list.
 
 **Still open — no plan of their own yet:**
 
-- [ ] **`chunked_decode` fails for every non-default block size**, including a
-      voxel-count mismatch (858 vs 855). The default block size is bit-identical,
-      which is the lever for bisecting it. This fork's own feature and the
-      closest thing to a regression against `e87069e` (encoder levels chunked).
-      Highest-value next step.
+- [~] **`chunked_decode` fails for every non-default block size** on HIP,
+      including a voxel-count mismatch (858 vs 855). **Diagnosed: the chunking
+      is correct and the backend is not shape-stable.** On CPU, with the same
+      f16 weights, chunked equals unchunked *exactly* — `max|d| = 0` in all
+      twelve cases — so the claim the test header makes (norm and silu are
+      per-row and commute with the neighbour gather) holds, and `res` really is
+      the full `[Cin, L]` input every block gathers from. The divergence is
+      ggml's ROCm kernels returning different results for different matrix
+      shapes, and it scales with weight precision:
+
+      | | CPU f16 | GPU f32 | GPU f16 |
+      |---|---|---|---|
+      | texture decoder | 0 | ≤ 2.03e-06 | 1.19e-03 |
+      | shape decoder | 0 | 7.25e-05 (`block=37` only) | voxel count changes |
+      | shape encoder | 0 | ≤ 5.72e-06 | 3.86e-03 |
+
+      Not a regression against `e87069e` — that suspicion is withdrawn. What
+      remains is a decision rather than a fix: the test asserts bit-identity,
+      which is right on CPU and unattainable on HIP. Either the gate becomes
+      backend-aware, or the shape-dependence is chased into ggml. Note the
+      practical consequence before choosing: at f16 on ROCm the chunk size
+      changes the mesh, and the chunk size comes from the backend's column
+      limit, so production output depends on it.
+- [~] **Does f16 weight noise fray the geometry?** The question that follows
+      from the entry above: the `to_subdiv` head is thresholded at zero, and f16
+      leaves ~1e-3 of noise on those logits where f32 leaves ~1e-6. Measured
+      with `tools/gguf_precision_ab.sh` — one image, seed 1234, 1024³, three
+      weight configurations, reading the `[mesh]` line the C-ABI prints under
+      `TRELLIS2_TIMING`:
+
+      | | verts | boundary edges | non-manifold | L4/L3 |
+      |---|---|---|---|---|
+      | all f16 | 2,572,004 | 195,049 (2.6321 %) | 62,095 | 3.894 |
+      | shape_dec f32 | 2,571,970 | 194,688 (2.6273 %) | 62,018 | 3.894 |
+      | all f32 | 2,968,528 | 131,909 (1.5586 %) | 54,812 | 3.949 |
+
+      **The decoder is not the cause.** The middle row is the controlled
+      comparison — identical latent, verified by voxel-identical decode levels,
+      only the decoder's weights swapped — and it moves the boundary fraction by
+      0.0048 points. The one spare gigabyte buys nothing.
+
+      **The bottom row is not evidence.** It looks dramatic (41 % fewer boundary
+      edges) but f32 weights in DINO and the flows send the sampler down a
+      different trajectory despite the same seed, so it is a *different object*:
+      2.97M vertices against 2.57M. At n = 1 that could equally be a denser
+      sample meshing more cleanly. **Do not cite this as "f32 makes better
+      meshes."** Settling it needs two or three more seeds per configuration, or
+      a sharper cut — flows in f32, decoder in f16 — to ask whether precision
+      matters upstream of the decoder at all.
 - [ ] **`dino`'s patch embedding is ~f16 accurate** (`embd` 4.618e-04 → `cond`
       1.623e-04) against a reference verified correct to float64. Identical on
       CPU and GPU, and unchanged by graphs or attention path, so it is the port
@@ -230,6 +274,23 @@ CPU/HIP split per test; this is the tracking list.
       the CUDA/HIP backend, and there is no F32 flash kernel to route to. The HR
       cascade therefore still carries the ~5e-02, since exact is not an option at
       its token counts. Worth reporting upstream independently of this fork.
+- [ ] **Upstream AMD: the mul_mat column truncation is rocBLAS, not ggml.**
+      Reproduced with PyTorch alone — `tools/rocblas_col_truncation.py` —
+      `torch.matmul` leaves the tail of a tall narrow GEMM as exact zeros with
+      no error: f32 past 2^19, f16/bf16 past 2^22, clean at `K = M = 256`, clean
+      in f64. This is what the decoder chunking works around, and it is the one
+      finding here that reaches past this project.
+
+      Two things fall out of it. **ROCm 7.2 does not fix it** — that measurement
+      ran on `torch.version.hip` 7.2.26024, newer than the 6.4 this project
+      builds against, and the f32 cap is the same 2^19, so an SDK upgrade is not
+      the way out and the chunking stays. And the existing note
+      `docs/bugs/ggml-rocm-mul-mat-column-limit.md` blames ggml for something
+      ggml does not own; it now carries the PyTorch measurement and says so.
+
+      Unverified but worth checking first: 2^19 = 65536 × 8 and 2^22 = 65536 × 64
+      exactly, which suggests a grid dimension pinned at 65535 times the tile
+      height rather than an arithmetic overflow.
 
 ## Tests / verification
 
