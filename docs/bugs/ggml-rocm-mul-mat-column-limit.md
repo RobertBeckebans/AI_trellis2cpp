@@ -53,8 +53,34 @@ Consequences for the framing above:
 which looks like a grid dimension pinned at 65535 multiplied by the kernel's
 tile height rather than an arithmetic overflow. Worth checking first.
 
-This belongs to AMD (rocBLAS / hipBLASLt / Tensile) rather than to ggml. The
-reproducer is short enough to attach to a ticket as it stands.
+### 2026-08-15: Vulkan on the same GPU does not truncate
+
+The strongest evidence, because it removes the hardware from suspicion.
+`tests/test_large_rows` built twice from the *same* ggml commit (`30bf8685`),
+run on the *same* Radeon AI PRO R9700, differing only in backend:
+
+| op | HIP / ROCm 6.4 | Vulkan (AMD proprietary driver, KHR_coopmat) |
+|---|---|---|
+| `mul_mat f32` | first bad row **524,288** = 2^19 | **no break** |
+| `mul_mat f16` | first bad row **2,097,152** = 2^21 | no break |
+| `mul_mat bf16` | first bad row **2,097,152** = 2^21 | **no break** |
+| `get_rows`, `add`, `norm`, `silu`, `repeat` | OK | OK |
+
+Note the two failure modes are not the same kind of thing. Vulkan's f16 differs
+from the CPU by ~2.6e-03 spread across the whole matrix from row 19 onwards —
+ordinary reduced-precision accumulation. HIP's f16 is *bit-identical* to the CPU
+up to 2^21 and then drops to exact zeros. One computes inaccurately, the other
+stops computing, and only the second leaves no trace.
+
+That closes the chain:
+
+- CPU is correct → not the port
+- PyTorch on ROCm 7.2 fails identically → not ggml
+- **Vulkan on the same card is correct → not the hardware**
+
+What is left is AMD's BLAS stack (rocBLAS / hipBLASLt / Tensile). The PyTorch
+reproducer is short enough to attach to a ticket as it stands; this table is the
+argument that the ticket cannot be handed back as a hardware limitation.
 
 ### What was still not measured
 

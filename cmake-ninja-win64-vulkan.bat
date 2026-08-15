@@ -18,8 +18,6 @@ if not defined VULKAN_SDK (
   exit /b 1
 )
 
-set ROCM_BIN=C:\Program Files\AMD\ROCm\6.4\bin
-
 rem glslc greifbar machen, falls der SDK-Installer den PATH nicht gesetzt hat
 set PATH=%VULKAN_SDK%\Bin;%PATH%
 
@@ -31,14 +29,19 @@ rmdir /s /q build 2>nul
 
 cmake -B build ^
   -G "Ninja Multi-Config" ^
-  -DCMAKE_C_COMPILER="%ROCM_BIN%\clang.exe" ^
-  -DCMAKE_CXX_COMPILER="%ROCM_BIN%\clang++.exe" ^
+  -DCMAKE_C_COMPILER="clang.exe" ^
+  -DCMAKE_CXX_COMPILER="clang++.exe" ^
+  -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake ^
+  -DVCPKG_MANIFEST_FEATURES=cgal ^
   -DGGML_VULKAN=ON ^
   -DGGML_HIP=OFF ^
   -DBUILD_SHARED_LIBS=ON ^
   -DCMAKE_RUNTIME_OUTPUT_DIRECTORY="%DLL_OUT%" ^
   -DTRELLIS2_BUILD_EXAMPLES=OFF ^
   -DTRELLIS2_BUILD_TESTS=OFF ^
+  -DTRELLIS2_CGAL=ON ^
+  -DTRELLIS2_AUTOREMESHER=ON ^
+  -DTRELLIS2_FORCE_TINYBVH=ON ^
   .
 
 if errorlevel 1 (

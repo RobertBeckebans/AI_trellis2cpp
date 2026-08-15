@@ -288,9 +288,22 @@ CPU/HIP split per test; this is the tracking list.
       `docs/bugs/ggml-rocm-mul-mat-column-limit.md` blames ggml for something
       ggml does not own; it now carries the PyTorch measurement and says so.
 
+      **Vulkan on the same GPU does not truncate.** `tests/test_large_rows`
+      built from the same ggml commit against Vulkan instead of HIP reports no
+      break for f32, f16 or bf16 where HIP breaks at 2^19 / 2^21 / 2^21. So it
+      is not the hardware either, and the chain is closed: CPU correct → not the
+      port; PyTorch on ROCm equally broken → not ggml; Vulkan correct → not the
+      silicon. Note the failure modes differ in kind — Vulkan's f16 is merely
+      imprecise (~2.6e-03 across the whole matrix), HIP's is bit-identical and
+      then exactly zero. Only the second is silent.
+
       Unverified but worth checking first: 2^19 = 65536 × 8 and 2^22 = 65536 × 64
       exactly, which suggests a grid dimension pinned at 65535 times the tile
       height rather than an arithmetic overflow.
+
+      The Vulkan tree lives in `build-vulkan/` (configured by hand, not via
+      `cmake-ninja-win64-vulkan.bat`, which wipes `build/`). Worth keeping until
+      the ticket is filed.
 
 ## Tests / verification
 

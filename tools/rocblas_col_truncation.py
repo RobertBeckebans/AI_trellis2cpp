@@ -30,6 +30,11 @@ networks, large batches of small features — gets silent zeros for everything
 past the cliff. In this project it cost every mesh face past 2^21 voxels in a
 1024³ decode, which is what the chunking now works around.
 
+It is not the hardware. Running the same probe (tests/test_large_rows, same ggml
+commit, same card) against the Vulkan backend instead of HIP shows no break at
+all for f32, f16 or bf16 — so the GPU can compute these shapes, ROCm just stops
+writing. See docs/bugs/ggml-rocm-mul-mat-column-limit.md for that table.
+
 Usage:  uv run --extra rocm python tools/rocblas_col_truncation.py
 Exit:   0 clean, 1 truncation observed, 2 no GPU.
 """
