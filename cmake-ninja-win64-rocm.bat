@@ -20,7 +20,19 @@ rem   opt-in so a default build never pulls a GPL-3.0-or-later package.
 set ROCM_ROOT=C:\Program Files\AMD\ROCm\6.4
 set ROCM_BIN=%ROCM_ROOT%\bin
 
-set PATH=%ROCM_BIN%;%PATH%
+rem Both GPU backends go into one library. ggml registers each with the same
+rem backend registry, so a single server can be pointed at either at runtime
+rem with TRELLIS2_DEVICE=rocm / vulkan / cpu - no second build tree, which is
+rem what comparing them used to cost. Vulkan needs glslc from the SDK to
+rem generate its shaders at build time.
+if not defined VULKAN_SDK (
+  echo VULKAN_SDK ist nicht gesetzt - Vulkan SDK installieren oder Shell neu
+  echo oeffnen. Nur ROCm bauen: -DGGML_VULKAN=OFF unten setzen.
+  pause
+  exit /b 1
+)
+
+set PATH=%ROCM_BIN%;%VULKAN_SDK%\Bin;%PATH%
 
 rem CMAKE_RUNTIME_OUTPUT_DIRECTORY must be absolute (relative paths get
 rem reinterpreted per-subdir by ggml's nested CMakeLists).
@@ -39,7 +51,7 @@ cmake -B build ^
   -DCMAKE_CXX_COMPILER="%ROCM_BIN%\clang++.exe" ^
   -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake ^
   -DVCPKG_MANIFEST_FEATURES=cgal ^
-  -DGGML_VULKAN=OFF ^
+  -DGGML_VULKAN=ON ^
   -DGGML_HIP=ON ^
   -DAMDGPU_TARGETS=gfx1201 ^
   -DBUILD_SHARED_LIBS=ON ^
@@ -80,7 +92,17 @@ if errorlevel 1 (
 )
 
 echo.
-echo Fertig: build\bin\Release\trellis2.dll  (+ ggml.dll, ggml-base.dll, ggml-cpu.dll, ggml-hip.dll)
+echo Fertig: build\bin\Release\trellis2.dll
+echo         (+ ggml.dll, ggml-base.dll, ggml-cpu.dll, ggml-hip.dll, ggml-vulkan.dll)
+echo.
+echo Backend zur Laufzeit waehlen, ohne neu zu bauen:
+echo   set TRELLIS2_DEVICE=rocm     :: HIP  (Default, erstes GPU-Geraet)
+echo   set TRELLIS2_DEVICE=vulkan   :: Vulkan
+echo   set TRELLIS2_DEVICE=cpu      :: CPU
+echo Die Variable muss in der Umgebung stehen, BEVOR der Server startet - der
+echo Weg ueber os.Setenv erreicht das getenv() der DLL auf Windows nicht.
+echo Passt der Name auf kein GPU-Geraet, faellt es auf die CPU zurueck und sagt
+echo es; es wird bewusst nicht das andere Backend genommen.
 echo.
 echo Vergleich im Viewer: "watertight print wrap (CGAL)" und "quad retopology"
 echo sind einzeln und gemeinsam schaltbar. Der Server loggt fuer jeden Export

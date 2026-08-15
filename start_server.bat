@@ -83,11 +83,12 @@ rem
 rem To turn it off, delete the variable rather than setting it to 0 - the
 rem library tests for presence, so TRELLIS2_TIMING=0 still enables it:
 rem   set TRELLIS2_TIMING=
-::set TRELLIS2_TIMING=1
+set TRELLIS2_TIMING=1
 ::set TRELLIS2_SDPA_FLASH=1
 ::set TRELLIS2_SDPA_EXACT=1
 ::set TRELLIS2_SHAPE_ENC_CPU=1
 ::set TRELLIS2_SHAPE_DEC_CPU=1
+::set TRELLIS2_NO_CHUNK=1
 
 rem Explicit .\ — cmd does not necessarily resolve executables from the current
 rem directory (NoDefaultCurrentDirectoryInExePath), which fails with exit 9009.

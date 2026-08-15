@@ -163,7 +163,14 @@ type job struct {
 	// asked for, but the 1536 cascade's token budget can step it back toward
 	// 1024 in units of 128 on a dense object — that has to be visible rather
 	// than showing up as a mesh that is quietly coarser than requested.
-	Resolution int    `json:"resolution,omitempty"`
+	Resolution int `json:"resolution,omitempty"`
+	// Backend the models were actually loaded on, as ggml reports it — e.g.
+	// "AMD Radeon AI PRO R9700 [Vulkan0]". Recorded per generation because a
+	// build carrying both GPU backends can switch between them at runtime, and
+	// two meshes from the same seed then differ for a reason that is otherwise
+	// invisible afterwards. The requested setting is not enough: "auto" says
+	// nothing about what it resolved to.
+	Device     string `json:"device,omitempty"`
 	Thumbnail  string `json:"thumbnail,omitempty"`
 	Stage      string `json:"stage,omitempty"`
 	Step       int    `json:"step"`
@@ -397,9 +404,14 @@ func (s *server) worker() {
 			finishTiming()
 		}
 
+		// Read after the run, not before it: the models load lazily inside the
+		// generation, so this is the first point at which the backend is settled.
+		backendUsed, _, _, _ := s.eng.Info()
+
 		j.mu.Lock()
 		if err == nil {
 			j.State = "done"
+			j.Device = backendUsed
 		}
 		j.Stage = ""
 		j.Step, j.Total = 0, 0
@@ -431,6 +443,50 @@ func (s *server) unloadModelsIfIdle(before func()) bool {
 		before()
 	}
 	return s.eng.Unload()
+}
+
+// Switch the compute backend without restarting.
+//
+// The library picks its backend inside init_best_backend() at model-load time,
+// from TRELLIS2_DEVICE, and re-reads it on every load rather than caching it.
+// So a switch is: put the name where the DLL's getenv() will see it, then drop
+// the loaded models. The next generation comes up on the other backend. No ABI
+// change, and no second build tree — which is the point.
+//
+// Only useful for a build that carries more than one GPU backend;
+// cmake-ninja-win64-rocm.bat builds HIP and Vulkan together. A name matching no
+// device makes the library fall back to the CPU and say so on stderr, rather
+// than quietly using the other one.
+//
+// Refused while a generation is running: the models in use are the ones that
+// would have to be freed.
+func (s *server) setDevice(name string) error {
+	s.lifecycle.Lock()
+	defer s.lifecycle.Unlock()
+	s.mu.Lock()
+	busy := s.active || s.queued > 0
+	s.mu.Unlock()
+	if busy {
+		return fmt.Errorf("a generation is running")
+	}
+	if err := os.Setenv("TRELLIS2_DEVICE", name); err != nil {
+		return err
+	}
+	// os.Setenv alone does not reach the library's getenv() on Windows.
+	if err := setNativeEnv("TRELLIS2_DEVICE", name); err != nil {
+		return err
+	}
+	s.eng.Unload()
+	return nil
+}
+
+// What the next model load will use. Empty means the library's own default:
+// the first GPU device it finds, else the CPU.
+func currentDevice() string {
+	if v := os.Getenv("TRELLIS2_DEVICE"); v != "" {
+		return v
+	}
+	return "auto"
 }
 
 func (s *server) setUnloadIdle(enabled bool) bool {
@@ -739,6 +795,7 @@ type jobSummary struct {
 	ID            string `json:"id"`
 	CreatedAt     int64  `json:"createdAt"`
 	Quality       string `json:"quality,omitempty"`
+	Device        string `json:"device,omitempty"`
 	Thumbnail     string `json:"thumbnail,omitempty"`
 	PreviewSeq    int    `json:"previewSeq"`
 	Source        bool   `json:"sourceAvailable"`
@@ -788,7 +845,7 @@ func (s *server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		j.mu.Lock()
 		if j.State == "done" {
 			out = append(out, jobSummary{
-				ID: j.ID, CreatedAt: j.CreatedAt, Quality: j.Quality,
+				ID: j.ID, CreatedAt: j.CreatedAt, Quality: j.Quality, Device: j.Device,
 				Thumbnail: j.Thumbnail, PreviewSeq: j.PreviewSeq,
 				Source:        len(j.source) > 0 || j.sourcePath != "",
 				Regeneratable: len(j.image) > 0 || j.inputPath != "" || j.sourcePath != "",
@@ -1249,6 +1306,7 @@ func (s *server) info() map[string]interface{} {
 		"textured":           textured,
 		"models_loaded":      loaded,
 		"unload_idle":        unloadIdle,
+		"device":             currentDevice(),
 		"generation_active":  generationActive,
 		"print_remesh":       s.eng.HasPrintRemesh(),
 		"quad_remesh":        s.eng.HasQuadRemesh(),
@@ -1274,10 +1332,18 @@ func (s *server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad form: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	v := r.FormValue("unload_idle")
-	enabled := v == "1" || v == "true" || v == "on"
-	if s.setUnloadIdle(enabled) {
-		log.Printf("models unloaded while idle")
+	if d := r.FormValue("device"); d != "" {
+		if err := s.setDevice(d); err != nil {
+			http.Error(w, "device: "+err.Error(), http.StatusConflict)
+			return
+		}
+		log.Printf("compute device set to %q; models unloaded, the next generation reloads on it", d)
+	}
+	if v := r.FormValue("unload_idle"); v != "" {
+		enabled := v == "1" || v == "true" || v == "on"
+		if s.setUnloadIdle(enabled) {
+			log.Printf("models unloaded while idle")
+		}
 	}
 	writeJSON(w, s.info())
 }

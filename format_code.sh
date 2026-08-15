@@ -71,7 +71,9 @@ cp .clang-format-header .clang-format
 find . -regex ".*\.\(h\|hpp\)" \
 	! -path "./.venv/*" \
 	! -path "./build/*" \
-	! -path "./build-clang/*" \
+	! -path "./build-cuda/*" \
+	! -path "./build-rocm/*" \
+	! -path "./build-vulkan/*" \
 	! -path "./libs/*" \
 	! -path "./extern/*" \
 	! -path "./ggml/*" \
@@ -84,7 +86,9 @@ cp .clang-format-cpp .clang-format
 find . -regex ".*\.\(c\|cpp\)" \
 	! -path "./.venv/*" \
     ! -path "./build/*" \
-    ! -path "./build-clang/*" \
+    ! -path "./build-cuda/*" \
+	! -path "./build-rocm/*" \
+	! -path "./build-vulkan/*" \
 	! -path "./libs/*" \
 	! -path "./extern/*" \
 	! -path "./ggml/*" \

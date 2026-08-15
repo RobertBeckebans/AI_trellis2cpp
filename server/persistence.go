@@ -24,6 +24,7 @@ type persistedJob struct {
 	FinishedAt   int64         `json:"finishedAt,omitempty"`
 	DurationMS   int64         `json:"durationMs,omitempty"`
 	Quality      string        `json:"quality,omitempty"`
+	Device       string        `json:"device,omitempty"`
 	Thumbnail    string        `json:"thumbnail,omitempty"`
 	Pipeline     int           `json:"pipeline"`
 	Seed         uint64        `json:"seed"`
@@ -58,7 +59,7 @@ func (s *server) persistJob(j *job) error {
 	manifest := persistedJob{
 		Version: persistedJobVersion, ID: j.ID, CreatedAt: j.CreatedAt,
 		StartedAt: j.StartedAt, FinishedAt: j.FinishedAt, DurationMS: j.DurationMS,
-		Quality: j.Quality, Thumbnail: j.Thumbnail,
+		Quality: j.Quality, Device: j.Device, Thumbnail: j.Thumbnail,
 		Pipeline: j.pipeline, Seed: j.Seed, Steps: j.Steps,
 		TextureSteps: j.TextureSteps, Guidance: j.Guidance,
 		Background: j.Background,
@@ -216,7 +217,7 @@ func loadPersistedJob(dir string) (*job, error) {
 	return &job{
 		ID: m.ID, State: "done", CreatedAt: m.CreatedAt, StartedAt: m.StartedAt,
 		FinishedAt: m.FinishedAt, DurationMS: m.DurationMS,
-		Quality: m.Quality, Thumbnail: m.Thumbnail,
+		Quality: m.Quality, Device: m.Device, Thumbnail: m.Thumbnail,
 		PreviewSeq: len(m.Frames), Frames: m.Frames,
 		LivePreview: m.LivePreview || len(m.Frames) > 0, StageTimings: m.StageTimings,
 		pipeline: m.Pipeline, Seed: m.Seed, Steps: m.Steps,

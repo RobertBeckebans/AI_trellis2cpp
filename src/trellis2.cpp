@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cctype>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -238,12 +239,34 @@ void disable_cuda_graphs_once()
 	( void )done;
 }
 
-// Pick the best available compute backend: the first GPU device exposed by the
-// ggml backend registry (CUDA / Metal / Vulkan / ...), falling back to CPU.
-// Mirrors sam3.cpp's "use a GPU backend automatically if one is available".
-// device: nullptr/"auto" = GPU if available else CPU; "cpu" = force CPU.
-// The TRELLIS2_DEVICE env var overrides "auto".
-ggml_backend_t init_best_backend( std::string& name_out, const char* device = nullptr )
+// Pick the compute backend: the first GPU device exposed by the ggml backend
+// registry (CUDA / HIP / Metal / Vulkan / ...), falling back to CPU. Mirrors
+// sam3.cpp's "use a GPU backend automatically if one is available".
+//
+// device / TRELLIS2_DEVICE (the env var wins only over "auto"):
+//   nullptr, "" or "auto"  first GPU, else CPU
+//   "cpu"                  force CPU
+//   anything else          case-insensitive substring of the ggml device name,
+//                          so "vulkan" or "rocm" selects between backends when
+//                          the build carries more than one. A name that matches
+//                          nothing falls through to the CPU rather than to the
+//                          other GPU — picking a backend the caller did not ask
+//                          for would make a comparison silently meaningless.
+//
+// Building HIP and Vulkan into one library (-DGGML_HIP=ON -DGGML_VULKAN=ON) is
+// what makes that switch useful: both register with the same registry, and one
+// server can then be pointed at either without a second build tree.
+// The GPU device the last successful load settled on, so trellis2_gpu_free_vram()
+// can ask the backend that actually holds the weights. Written only while a model
+// loads, which the server serialises behind its inference mutex.
+//
+// Deliberately never cleared on a CPU load. The pipeline pins the SS occupancy
+// decoder to the CPU on purpose (no CONV_3D kernel on the CUDA/HIP backend), so
+// clearing here would forget the GPU that still holds every other stage's
+// weights. Stale is the right answer until another GPU load replaces it.
+ggml_backend_dev_t g_active_gpu_dev = nullptr;
+
+ggml_backend_t	   init_best_backend( std::string& name_out, const char* device = nullptr )
 {
 	disable_cuda_graphs_once();
 	std::string want = device ? device : "";
@@ -251,18 +274,42 @@ ggml_backend_t init_best_backend( std::string& name_out, const char* device = nu
 		if( const char* env = std::getenv( "TRELLIS2_DEVICE" ) )
 			want = env;
 	}
-	if( want != "cpu" )
+	std::string lower_want = want;
+	std::transform( lower_want.begin(), lower_want.end(), lower_want.begin(), []( unsigned char c ) { return ( char )std::tolower( c ); } );
+	const bool by_name = !lower_want.empty() && lower_want != "auto" && lower_want != "cpu";
+
+	if( lower_want != "cpu" )
 		for( size_t i = 0; i < ggml_backend_dev_count(); ++i ) {
 			ggml_backend_dev_t dev = ggml_backend_dev_get( i );
-			if( ggml_backend_dev_type( dev ) == GGML_BACKEND_DEVICE_TYPE_GPU ) {
-				ggml_backend_t b = ggml_backend_dev_init( dev, nullptr );
-				if( b ) {
-					const char* d = ggml_backend_dev_description( dev );
-					name_out	  = d ? d : ggml_backend_dev_name( dev );
-					return b;
-				}
+			if( ggml_backend_dev_type( dev ) != GGML_BACKEND_DEVICE_TYPE_GPU )
+				continue;
+			if( by_name ) {
+				// Match the registry name ("ROCm0", "Vulkan0") and the human
+				// description, so both "rocm" and a card name work.
+				std::string hay = ggml_backend_dev_name( dev ) ? ggml_backend_dev_name( dev ) : "";
+				if( const char* d = ggml_backend_dev_description( dev ) )
+					hay += std::string( " " ) + d;
+				std::transform( hay.begin(), hay.end(), hay.begin(), []( unsigned char c ) { return ( char )std::tolower( c ); } );
+				if( hay.find( lower_want ) == std::string::npos )
+					continue;
+			}
+			ggml_backend_t b = ggml_backend_dev_init( dev, nullptr );
+			if( b ) {
+				// Both GPU backends describe the same card, so the description
+				// alone cannot say which one is running. Name the device too —
+				// otherwise a build carrying HIP and Vulkan logs the same line
+				// either way and a comparison cannot be checked afterwards.
+				const char* d = ggml_backend_dev_description( dev );
+				const char* n = ggml_backend_dev_name( dev );
+				name_out	  = d ? d : ( n ? n : "GPU" );
+				if( d && n )
+					name_out += std::string( " [" ) + n + "]";
+				g_active_gpu_dev = dev;
+				return b;
 			}
 		}
+	if( by_name )
+		std::fprintf( stderr, "[backend] no GPU device matched TRELLIS2_DEVICE=\"%s\"; falling back to the CPU\n", want.c_str() );
 	name_out		   = "CPU";
 	ggml_backend_t cpu = ggml_backend_cpu_init();
 	// ggml defaults to 4 threads; use every core (TRELLIS2_N_THREADS overrides).
@@ -303,9 +350,18 @@ const char* kv_str( const gguf_context* g, const char* key, const char* def )
 
 size_t trellis2_gpu_free_vram()
 {
-	ggml_backend_dev_t dev = ggml_backend_dev_by_type( GGML_BACKEND_DEVICE_TYPE_GPU );
+	// The device the models were actually loaded on, not merely the first GPU
+	// the registry lists. A build carrying both HIP and Vulkan registers two
+	// devices for the same card, and each backend's allocator only sees its own
+	// allocations — asking the idle one would report a card that looks empty
+	// while the other holds 13 GB of weights. Callers use this to place the
+	// shape decoder and to pick a cascade tier, so a wrong answer is not
+	// cosmetic.
+	ggml_backend_dev_t dev = g_active_gpu_dev;
 	if( !dev )
-		return 0; // CPU-only build/host
+		dev = ggml_backend_dev_by_type( GGML_BACKEND_DEVICE_TYPE_GPU );
+	if( !dev )
+		return 0; // CPU-only build/host, or nothing loaded yet
 	size_t free = 0, total = 0;
 	ggml_backend_dev_memory( dev, &free, &total );
 	return free;
@@ -2880,6 +2936,23 @@ static int64_t chunk_rows_limit()
 	return ( int64_t )1 << 18; // 262144
 }
 
+// Escape hatch for demonstrating the defect the split exists to avoid.
+//
+// TRELLIS2_NO_CHUNK=1 lets every level run as one graph even when that is known
+// to exceed what the backend will write, so the truncation can be reproduced on
+// purpose — the 1024^3 Einstein bust losing every face past 2^21 voxels is the
+// picture this produces, and it is the evidence an AMD ticket wants next to
+// tools/rocblas_col_truncation.py. It is not a performance knob: on a backend
+// with the ceiling it silently corrupts output, which is the entire point.
+static bool chunking_disabled()
+{
+	static const bool off = []() {
+		const char* e = std::getenv( "TRELLIS2_NO_CHUNK" );
+		return e && e[0] == '1';
+	}();
+	return off;
+}
+
 // The finest decoder level, evaluated in voxel blocks so no mul_mat ever sees
 // more columns than the backend can write.
 //
@@ -3477,7 +3550,16 @@ static bool shape_dec_run( trellis2_shape_dec_model* m,
 			const std::string wname	   = lvl == 0 ? std::string( "from_latent.weight" ) : ( "blocks." + std::to_string( lvl - 1 ) + "." + std::to_string( hp.num_blocks[lvl - 1] ) + ".conv2.weight" );
 			auto			  wit	   = m->tensors.find( wname );
 			const int64_t	  max_rows = wit == m->tensors.end() ? mul_mat_max_rows( GGML_TYPE_F32 ) : mul_mat_max_rows( wit->second->type );
-			const int64_t	  block	   = std::min( chunk_rows_limit(), max_rows );
+			// TRELLIS2_NO_CHUNK keeps the level in one graph past the ceiling, so
+			// the truncation can be reproduced deliberately. Say so, loudly.
+			const int64_t	  block = chunking_disabled() ? ( int64_t )L : std::min( chunk_rows_limit(), max_rows );
+			if( chunking_disabled() && ( int64_t )L > max_rows )
+				std::fprintf( stderr,
+					"[shape_dec] TRELLIS2_NO_CHUNK: level %d runs %d rows in one graph, past the %lld the backend writes. "
+					"Output beyond that is expected to be zero. This is the defect, not a result.\n",
+					lvl,
+					L,
+					( long long )max_rows );
 
 			// Per-level voxel counts. The cascade's token budget bounds the HR
 			// flow's INPUT; nothing bounds the decoder's OUTPUT, and it is the
@@ -4564,7 +4646,7 @@ bool trellis2_shape_enc_encode( trellis2_shape_enc_model* m,
 			// Must mirror the condition below exactly. It has drifted twice
 			// already, and a warning that describes a case which is in fact
 			// handled sends the next investigation somewhere pointless.
-			const bool		  will_chunk = has_down && !taps && ( int64_t )L > chunk_rows_limit();
+			const bool		  will_chunk = !chunking_disabled() && has_down && !taps && ( int64_t )L > chunk_rows_limit();
 			// This level's own mul_mat column ceiling. mul_mat_max_rows was
 			// measured for a [64, 64] weight and the bug note says so; the
 			// encoder's convs are wider, so treat it as the best estimate
@@ -4623,7 +4705,7 @@ bool trellis2_shape_enc_encode( trellis2_shape_enc_model* m,
 		// 0 qualifies without a per-stage ping-pong, because it carries no
 		// ConvNeXt blocks. Taps are excluded: they want the full-length
 		// intermediates this path never forms.
-		if( has_down && !taps && ( int64_t )L > chunk_rows_limit() ) {
+		if( !chunking_disabled() && has_down && !taps && ( int64_t )L > chunk_rows_limit() ) {
 			std::vector<float> lvl_out;
 			if( !shape_enc_level_chunked( m, hp, lvl, C_in, C_out, L, Lc, lvl == 0 ? in_shift : feats, nfine, ncoarse, childidx, chunk_rows_limit(), lvl_out, error ) )
 				return false;

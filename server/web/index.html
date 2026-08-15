@@ -221,6 +221,19 @@
       <small>transparent, black, and white backgrounds supported</small></span>
     </div>
     <input id="file" type="file" accept="image/*" hidden>
+    <!-- Only meaningful when the library carries more than one GPU backend
+         (cmake-ninja-win64-rocm.bat builds HIP and Vulkan together). Switching
+         unloads the models; the next generation reloads on the chosen one, so
+         it is refused while one is running. -->
+    <div>
+      <label for="device">compute backend</label>
+      <select id="device" title="which backend the next generation loads on; switching unloads the models" style="width:100%;background:var(--bg);color:var(--text);border:1px solid var(--edge);border-radius:6px;padding:6px 8px">
+        <option value="auto">auto (first GPU)</option>
+        <option value="rocm">ROCm / HIP</option>
+        <option value="vulkan">Vulkan</option>
+        <option value="cpu">CPU</option>
+      </select>
+    </div>
     <div>
       <label for="quality">quality</label>
       <select id="quality" style="width:100%;background:var(--bg);color:var(--text);border:1px solid var(--edge);border-radius:6px;padding:6px 8px"></select>
@@ -416,6 +429,12 @@ function applyRuntimeInfo(i) {
   $("backend").textContent = backendName
     + (i.models_loaded === false ? " · models unloaded" : "");
   $("unloadidle").checked = !!i.unload_idle;
+  if (i.device) {
+    $("device").value = i.device;
+    $("device").dataset.current = i.device; // what a failed switch reverts to
+  }
+  // Models in use cannot be freed, so the switch waits for the run to finish.
+  $("device").disabled = !!i.generation_active;
   const hasPrintWrap = !!i.print_remesh;
   $("printwrap").disabled = !hasPrintWrap;
   $("printwraplabel").title = hasPrintWrap
@@ -461,6 +480,25 @@ fetch("/api/info").then(r => r.json())
     $("texsteps").disabled = !i.textured;
   })
   .catch(() => { $("backend").textContent = "?"; });
+
+$("device").addEventListener("change", async () => {
+  const sel = $("device"), want = sel.value, was = sel.dataset.current || "auto";
+  sel.disabled = true;
+  try {
+    const body = new URLSearchParams({ device: want });
+    const r = await fetch("/api/settings", { method: "POST", body });
+    if (!r.ok) throw new Error(await r.text());
+    const i = await r.json();
+    applyRuntimeInfo(i);
+    sel.dataset.current = i.device || want;
+    setStatus("compute backend: " + (i.device || want) + " · models unloaded, the next generation reloads on it");
+  } catch (e) {
+    sel.value = was;
+    setStatus("could not switch backend: " + e.message, true);
+  } finally {
+    sel.disabled = false;
+  }
+});
 
 $("unloadidle").addEventListener("change", async () => {
   const cb = $("unloadidle"), enabled = cb.checked;
@@ -677,7 +715,7 @@ async function poll(id, thumb, quality) {
       $("bar").firstElementChild.style.width = "100%";
       setStatus("fetching mesh…");
       await loadMesh(id);
-      addHistory(id, thumb, quality);
+      addHistory(id, thumb, quality, j.device || "");
       try { await refreshRuntimeInfo(); } catch (e) { /* informational only */ }
       const elapsed = j.durationMs ? ` in ${(j.durationMs / 1000).toFixed(1)}s` : "";
       // Say which grid it actually came out at whenever that is not simply the
@@ -1221,6 +1259,7 @@ async function refreshHistory() {
     if (!r.ok) throw new Error(await r.text());
     history = (await r.json()).map(h => ({
       id: h.id, thumb: h.thumbnail || "", quality: h.quality || "auto",
+      device: h.device || "",
       ts: h.createdAt || 0, sourceAvailable: !!h.sourceAvailable,
       regeneratable: !!h.regeneratable,
     }));
@@ -1237,6 +1276,16 @@ async function refreshHistory() {
   }
 }
 
+// The badge has room for a word, not for "AMD Radeon AI PRO R9700 [Vulkan0]".
+// ggml's device name is the part that distinguishes the backends, so keep that
+// and leave the full string to the tooltip. Older generations carry no device
+// at all and simply show the quality alone.
+function deviceTag(dev) {
+  if (!dev) return "";
+  const m = dev.match(/\[([A-Za-z]+)\d*\]/);
+  return m ? m[1] : (dev.length > 10 ? dev.slice(0, 10) : dev);
+}
+
 function renderHistory() {
   $("histwrap").style.display = history.length ? "" : "none";
   $("showcasebtn").disabled = !history.length || showcaseBusy;
@@ -1245,11 +1294,14 @@ function renderHistory() {
   history.forEach(h => {
     const el = document.createElement("div");
     el.className = "hitem" + (h.id === activeGen ? " active" : "");
-    el.title = h.quality + " · " + new Date(h.ts).toLocaleString();
+    const tag = deviceTag(h.device);
+    el.title = h.quality + (h.device ? " · " + h.device : "")
+             + " · " + new Date(h.ts).toLocaleString();
     const img = document.createElement("img");
     if (h.thumb) img.src = h.thumb;
     img.alt = "";
-    const q = document.createElement("span"); q.className = "q"; q.textContent = h.quality;
+    const q = document.createElement("span"); q.className = "q";
+    q.textContent = h.quality + (tag ? " · " + tag : "");
     const x = document.createElement("span"); x.className = "x"; x.title = "remove"; x.textContent = "×";
     el.append(img, q, x);
     el.addEventListener("click", e => {
@@ -1260,9 +1312,9 @@ function renderHistory() {
   });
 }
 
-function addHistory(id, thumb, quality) {
+function addHistory(id, thumb, quality, device) {
   history = history.filter(h => h.id !== id);          // de-dupe
-  history.unshift({ id, thumb, quality, ts: Date.now(),
+  history.unshift({ id, thumb, quality, device: device || "", ts: Date.now(),
                     sourceAvailable: true, regeneratable: true });
   activeGen = id;
   if (glbJobId === id) $("regen").disabled = false;

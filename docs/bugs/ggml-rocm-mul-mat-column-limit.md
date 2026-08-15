@@ -82,6 +82,36 @@ What is left is AMD's BLAS stack (rocBLAS / hipBLASLt / Tensile). The PyTorch
 reproducer is short enough to attach to a ticket as it stands; this table is the
 argument that the ticket cannot be handed back as a hardware limitation.
 
+### Vulkan names the limit out loud, which settles the mechanism
+
+Running a real 1024³ decode with `TRELLIS2_NO_CHUNK=1` on the Vulkan build —
+2,940,217 rows in one graph — does not truncate. It aborts:
+
+```text
+ggml-vulkan.cpp:8131: GGML_ASSERT(wg0 <= ctx->device->properties.limits.maxComputeWorkGroupCount[0]
+                               && wg1 <= ... && wg2 <= ...) failed
+```
+
+So both backends carry the same kind of ceiling — a **compute workgroup count**
+limit, which is exactly the "grid dimension pinned at 65535 times the tile
+height" the powers of two suggested. That part is no longer inferred.
+
+The difference is what each does at the boundary:
+
+| | at the limit |
+|---|---|
+| Vulkan | asserts, names the limit, stops |
+| HIP / ROCm | writes nothing past it, returns `GGML_STATUS_SUCCESS` |
+
+That reframes the ticket. The complaint is not "the limit is too low" — a limit
+is legitimate. It is that **rocBLAS does not check it**, so the caller cannot
+tell a completed GEMM from a half-written one. Vulkan demonstrates the correct
+behaviour on the same hardware, one assert away.
+
+(Vulkan's own ceiling sits somewhere between 2.2M rows, which `test_large_rows`
+clears cleanly, and the 2.94M above. It was never measured precisely, because a
+backend that fails loudly does not need a workaround.)
+
 ### What was still not measured
 
 - NVIDIA/CUDA was not tested at all. The title says ROCm/HIP because that is
