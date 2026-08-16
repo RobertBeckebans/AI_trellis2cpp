@@ -13,7 +13,125 @@ submodule (Metal on by default on Apple), DLL-export decoration, and a
 CMake build with example executables. A flat C ABI (`src/trellis2_capi.h`) drives
 a Go demo server with a browser mesh viewer.
 
-## Quick start (demo)
+## What this fork adds
+
+This is a **downstream fork**. The port itself is upstream work: the stage-1
+geometry port by [rms80](https://github.com/rms80), and the complete
+image→mesh pipeline — DINOv3 encoder, shape-SLAT stage, demo server, PBR
+texturing, CGAL print wrap — by
+[Richard Palethorpe](https://github.com/richiejp), through
+`84f4a2c`. Everything below was added on top of that base; check `git log`
+before attributing a design decision.
+
+**Runs on AMD, and on Windows.** Upstream targets Linux and CUDA through a
+container. This fork adds a HIP/ROCm backend (developed on a Radeon AI PRO
+R9700, `gfx1201`), a Vulkan backend, a Windows DLL build with the Go server
+alongside it, and ready-made configure scripts for all three. The CUDA path is
+kept and still builds, but it is not exercised here for want of the hardware,
+and it does inherit one change: ggml's CUDA graphs are disabled by default,
+because they crash on HIP and the two share that code. `TRELLIS2_CUDA_GRAPHS=1`
+turns them back on.
+
+**Both GPU backends live in one build and switch at runtime.** ggml registers
+each with the same device registry, so `TRELLIS2_DEVICE=cpu|rocm|vulkan` — or a
+dropdown in the viewer — picks between them without a second build tree or a
+restart. The backend a mesh was produced on is recorded in its generation
+manifest, because two meshes from one seed otherwise differ for a reason
+nothing preserves.
+
+**1536³ cascade tier**, with a token budget that steps the resolution back down
+when the scaffold would exceed it, rather than failing at the decode.
+
+**Quad retopology and a normal-map bake**, so generated geometry is usable
+downstream: the [AutoRemesher](https://github.com/huxingyi/autoremesher) core
+vendored and built without Qt or TBB, reachable from the C ABI, the server and
+the viewer; plus a tangent-space normal map baked into the exported GLB so
+replacement geometry keeps the original detail. In practice this is the
+`print+quad` combination — Alpha Wrap hands the remesher the closed 2-manifold
+it needs, and the bake carries the dense mesh's detail onto the result. Read
+the licence note below before assuming it is reachable in a default build. The bake is in **MikkTSpace**,
+using [meshoptimizer](https://github.com/zeux/meshoptimizer)'s
+MikkTSpace-compatible generator (`meshopt_generateTangents` with
+`meshopt_TangentCompatible`). That is not a concession to one tool: MikkTSpace
+is what glTF 2.0 prescribes — a consumer that finds no `TANGENT` attribute is
+told to derive tangents with the standard MikkTSpace algorithm — so it is the
+only basis a normal map can be baked against and stay correct across
+conformant importers. Blender's, which recomputes rather than reading the
+attribute, is simply where a mismatched basis becomes visible first.
+
+**The GPL surface is smaller, but the good retopology still needs it.** The
+closest-surface PBR projection moved from CGAL to
+[tinybvh](https://github.com/jbikker/tinybvh), so a default configure pulls in
+no copyleft and produces generations and full-density GLB exports on MIT terms
+alone. That is not the same as the whole feature set being license-free: the
+usable low-poly path still runs through CGAL's Alpha Wrap, because AutoRemesher
+wants a closed 2-manifold and does not cope with raw dual-grid geometry at
+these resolutions. Without Alpha Wrap there is no low-poly target for the bake
+to project onto, which makes the tinybvh projection moot in that
+configuration. See D4 in
+[`docs/plan/autoremesher-quad-remesh.md`](docs/plan/autoremesher-quad-remesh.md)
+for the mode matrix and which combination is which license.
+
+**A silent GPU defect found, isolated, and worked around by chunking.** On
+`gfx1201`, `mul_mat` stops writing past a fixed column count and still reports
+success — which sheared roughly a quarter off every 1024³ mesh with nothing
+logged anywhere. It is not ggml and not the hardware: reproduced in ten lines
+of plain PyTorch, absent on Vulkan on the same card, and independently hit by
+the ROCm fork of TRELLIS.2 itself, which chunks its own GEMMs for the same
+reason. The fix here is the same shape — the decoder evaluates its finest level
+in voxel blocks so no single matmul reaches the ceiling. That is
+bit-identical to the unchunked path rather than merely close
+(`tests/test_chunked_decode`, `max|d| = 0`), and costs nothing measurable in
+wall clock. `TRELLIS2_NO_CHUNK=1` turns it off to reproduce the artefact
+deliberately. Written up in
+[`docs/bugs/ggml-rocm-mul-mat-column-limit.md`](docs/bugs/ggml-rocm-mul-mat-column-limit.md)
+with a standalone reproducer.
+
+**Numerical parity you can actually run.** The PyTorch reference environment is
+reproducible natively through `uv`, including AMD's Windows ROCm wheels, so the
+golden dumps no longer need the CUDA container. The reference implementation
+can also produce a *whole generation* that lands in the viewer next to the
+backend runs of the same image
+([`scripts/ref_generate.py`](scripts/ref_generate.py)), which is what turned
+"the backends look different" into numbers. Tap-by-tap status is in
+[`docs/VERIFICATION.md`](docs/VERIFICATION.md).
+
+**Diagnosability throughout**: per-stage timings and a progress trace for
+server work, a report of which projection backend a build uses, and warnings
+when the decoder's subdivision runs away *or* collapses — the latter added
+because the worst failure on record passed the one-sided check in silence.
+
+## Quick start
+
+Windows with an AMD card — the primary path for this fork. No container.
+
+```sh
+git clone --recursive https://github.com/RobertBeckebans/AI_trellis2cpp.git
+cd AI_trellis2cpp
+scripts/download_ggufs.sh          # prebuilt f16 GGUFs -> ggufs/ (~14 GB)
+cmake-ninja-win64-rocm.bat         # HIP + Vulkan in one library
+start_server.bat
+# open http://localhost:8742 and drop an image
+```
+
+Three things worth knowing before the first run:
+
+- `scripts/download_ggufs.sh` is a shell script — run it from **Git Bash**, not
+  from `cmd`.
+- `cmake-ninja-win64-rocm.bat` needs the **ROCm SDK** and the **Vulkan SDK**
+  (it refuses to start without `VULKAN_SDK`, since it builds both backends into
+  one library). To skip Vulkan, set `-DGGML_VULKAN=OFF` in the script, or use
+  `cmake-ninja-win64-cpu.bat` / `cmake-ninja-win64-vulkan.bat` instead. It
+  **wipes `build/`**, so it is a configure step, not a rebuild step.
+- `start_server.bat` is the normal way to start: it rebuilds whatever is stale
+  and puts the DLL and the ROCm runtime on `PATH` before launching.
+
+The device selector in the viewer then switches between CPU, ROCm and Vulkan
+without a restart.
+
+## Quick start (docker, CUDA)
+
+The upstream container path, unchanged. Linux and an NVIDIA card.
 
 ```sh
 git submodule update --init --depth 1                 # ggml
@@ -33,9 +151,10 @@ docker run --rm --device nvidia.com/gpu=all -v "$PWD":/work -w /work/server -p 8
 Or just run `scripts/demo.sh`, which builds the lib + server, auto-downloads any
 missing GGUFs, and launches the container.
 
-### Prebuilt GGUFs
+## Prebuilt GGUFs
 
-`scripts/download_ggufs.sh` pulls the ready-made f16 GGUFs from three public repos
+Applies to both quick starts. `scripts/download_ggufs.sh` pulls the ready-made
+f16 GGUFs from three public repos
 under the [LocalAI-io](https://huggingface.co/LocalAI-io) org, so you can skip the
 safetensors download and the conversion step entirely:
 
@@ -48,7 +167,11 @@ GGUFs from source, use the original flow instead: `scripts/download_models.sh` (
 safetensors → `models/`, ~7 GB) then `docker run … trellis2-ref bash
 scripts/convert_all.sh` (safetensors → GGUF, f16 + f32). The card + license sources
 for the published repos live in `scripts/hf/`, and `scripts/upload_ggufs.sh`
-(re)publishes them.
+(re)publishes them. The conversion also runs without the container — see
+[`docs/reference-environment.md`](docs/reference-environment.md), which is the
+same `uv` environment the parity dumps use.
+
+## The demo server
 
 Completed generations are committed atomically under `generations/` (final
 mesh, replay frames, and manifest) and restored with the same job IDs after a
@@ -58,10 +181,15 @@ a different durable location. Incomplete writes are ignored on startup. With
 pipeline on the first generation, and releases it again when the queue is idle.
 
 The browser UI has a **quality** selector: coarse preview (64³ marching cubes),
-512³ fine, or **1024³ cascade** (the TRELLIS.2 default and highest resolution
-currently supported here). Upstream's optional 1536 cascade is not yet ported. Coarse falls
-back automatically if the shape-SLAT models are absent (`-coarse`); the 1024
-cascade needs the extra 1024 model (`-no-1024` disables it).
+512³ fine, **1024³ cascade** (the TRELLIS.2 default), or **1536³ cascade**. The
+1536 tier reuses the 1024 checkpoints and applies a token budget that steps the
+resolution back down when the scaffold would exceed it, so a request that will
+not fit degrades instead of failing at the decode. Coarse falls
+back automatically if the shape-SLAT models are absent (`-coarse`); both
+cascades need the extra 1024 model (`-no-1024` disables them). A **compute
+device** selector sits above quality: one build carries CPU, ROCm and Vulkan,
+and switching drops the resident models so the next generation reloads on the
+chosen backend.
 Enable **free VRAM when idle** to unload the resident model pipeline between
 generations; the next queued generation reloads it automatically.
 **Live steps** is off by default because each sparse-structure frame requires an
@@ -297,6 +425,14 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 
+On Windows the configure scripts in the repository root do this with the right
+backend already selected — `cmake-ninja-win64-rocm.bat` (HIP **and** Vulkan in
+one library, the primary build for this fork), `cmake-ninja-win64-vulkan.bat`,
+or `cmake-ninja-win64-cpu.bat`. They wipe `build/` first. `start_server.bat`
+then builds what is stale and launches the Go server with the DLL and the ROCm
+runtime on `PATH`; that `PATH` also matters for `ctest`, which otherwise blocks
+in the loader rather than failing.
+
 CGAL is auto-detected. Install CGAL 5.5 or newer before configuring to enable
 the portable CPU print-remesh backend, or pass `-DTRELLIS2_CGAL=OFF` to disable
 the probe explicitly. CMake prints whether Alpha Wrap was enabled. The standard
@@ -341,6 +477,12 @@ reduction.
 MIT. See [LICENSE](LICENSE). Every third-party component, its license, what it
 is used for and how it is obtained is listed in
 [THIRD_PARTY.md](THIRD_PARTY.md) — read that before adding a dependency.
+
+Upstream is MIT too, and the copyright of the base pipeline stays with its
+authors — rms80 and Richard Palethorpe. Nothing in this repository is adopted
+from the TRELLIS.2 reference implementation itself: its behaviour and file
+formats are reimplemented under our own design, which is why a checkout of the
+reference is kept out of the tree even though it is MIT as well.
 
 Vendored code under `third_party/` is also MIT:
 [meshoptimizer](https://github.com/zeux/meshoptimizer) (Arseny Kapoulkine),

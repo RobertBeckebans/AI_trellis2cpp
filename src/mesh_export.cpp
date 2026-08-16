@@ -682,11 +682,14 @@ namespace
 	// positions, normals, both UV copies and any material stay attached to the
 	// same vertices as the tangents.
 	//
-	// meshopt_TangentCompatible is deliberate rather than incidental: Blender's
-	// glTF importer recomputes tangents with MikkTSpace instead of reading
-	// TANGENT, so a map baked against a differently-weighted basis picks up
-	// shading error the moment the asset is opened there — which is exactly the
-	// workflow this bake exists to remove.
+	// meshopt_TangentCompatible is deliberate rather than incidental, and the
+	// reason is the format, not any one tool: glTF 2.0 prescribes MikkTSpace —
+	// a consumer that finds no TANGENT attribute is told to derive tangents
+	// with the standard MikkTSpace algorithm. So it is the only basis a normal
+	// map can be baked against and stay correct across conformant importers.
+	// Blender's, which recomputes instead of reading TANGENT, is simply where a
+	// differently-weighted basis shows up as shading error first — which is
+	// exactly the workflow this bake exists to remove.
 	//
 	// The generator is fed the *normalized* UVs, the ones the GLB carries. Texel
 	// space would scale u and v by AW and AH, which skews the basis whenever the
