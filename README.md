@@ -461,9 +461,9 @@ reduction.
 | path           | what                                                   |
 |----------------|--------------------------------------------------------|
 | `src/trellis2.h` | public API (DLL-decorated, versioned)                  |
-| `trellis2.cpp` | implementation                                         |
-| `convert_ss_flow_to_gguf.py` | stage-1 DiT checkpoint → GGUF converter  |
-| `convert_ss_dec_to_gguf.py`  | stage-1 decoder checkpoint → GGUF converter |
+| `src/trellis2.cpp` | implementation                                         |
+| `scripts/convert_ss_flow_to_gguf.py` | stage-1 DiT checkpoint → GGUF converter  |
+| `scripts/convert_ss_dec_to_gguf.py`  | stage-1 decoder checkpoint → GGUF converter |
 | `src/mesh_export.{h,cpp}` | CUDA-free GLB export with direct vertex PBR or projected UV-atlas textures |
 | `src/print_remesh.{h,cpp}` | optional CGAL Alpha Wrap reconstruction and closest-surface PBR transfer |
 | `examples/`    | CLI tools (`dino_info`, `ss_flow_info`, `ss_sample`, `ss_decode`, `ss_mesh`, `mesh2glb`) |
