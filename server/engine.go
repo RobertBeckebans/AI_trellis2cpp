@@ -11,13 +11,14 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
 )
 
-const abiVersion = 16
+const abiVersion = 17
 
 // Progress stages (enum t2_stage).
 const (
@@ -87,6 +88,7 @@ type engine struct {
 	pipelineFree    func(p uintptr)
 	pipelineBackend func(p uintptr) string
 	pipelineCaps    func(p uintptr) int32
+	runConfig       func(p uintptr) string
 	generate        func(p uintptr, img unsafe.Pointer, imgLen int32, pipelineType, backgroundMode int32,
 		seed uint64, steps int32, guidance float32, textureSteps int32, cb uintptr, user unsafe.Pointer,
 		preview uintptr, previewUser unsafe.Pointer,
@@ -169,6 +171,7 @@ func newEngine(libPath, dinoGGUF, flowGGUF, decGGUF, slatGGUF, slatHRGGUF, shape
 	purego.RegisterLibFunc(&e.pipelineFree, lib, "t2_pipeline_free")
 	purego.RegisterLibFunc(&e.pipelineBackend, lib, "t2_pipeline_backend")
 	purego.RegisterLibFunc(&e.pipelineCaps, lib, "t2_pipeline_caps")
+	purego.RegisterLibFunc(&e.runConfig, lib, "t2_run_config")
 	purego.RegisterLibFunc(&e.generate, lib, "t2_generate")
 	purego.RegisterLibFunc(&e.meshNVerts, lib, "t2_mesh_n_verts")
 	purego.RegisterLibFunc(&e.meshNTris, lib, "t2_mesh_n_tris")
@@ -273,6 +276,35 @@ func (e *engine) loadLocked() error {
 	e.textured = e.caps&capTexture != 0
 	e.stateMu.Unlock()
 	return nil
+}
+
+// RunConfig reports the settings the library resolved for the loaded pipeline -
+// attention path, chunking gates, CUDA graphs, shape decoder placement - so a
+// generation can record what computed it. Several are decided from machine
+// state rather than from the request, so the request alone does not explain why
+// two runs of one seed differ.
+//
+// Read from the library rather than from os.Getenv on purpose: the DLL sees the
+// CRT's own copy of the environment, which is not necessarily this process's
+// view (see the setNativeEnv note in start_server.bat). Returns nil when no
+// pipeline is loaded, so a caller records nothing rather than something stale.
+func (e *engine) RunConfig() map[string]string {
+	e.stateMu.Lock()
+	p := e.pipeline
+	e.stateMu.Unlock()
+	if p == 0 || e.runConfig == nil {
+		return nil
+	}
+	out := map[string]string{}
+	for _, line := range strings.Split(e.runConfig(p), "\n") {
+		if k, v, ok := strings.Cut(line, "="); ok {
+			out[k] = v
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // Unload releases all resident model buffers. Backend/capability metadata is

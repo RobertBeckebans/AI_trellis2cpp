@@ -542,6 +542,12 @@ TRELLIS2_API bool							   trellis2_tex_dec_decode( trellis2_shape_dec_model* m,
 // whether to free the flow DiTs before a decode. Cheap (a cudaMemGetInfo).
 TRELLIS2_API size_t							   trellis2_gpu_free_vram();
 
+// The numerics-affecting knobs (attention path, chunking, CUDA graphs) as this
+// process resolved them, one key=value per line. For hosts that record what
+// produced a result; see the comment at the definition for why the library has
+// to be the one reporting it.
+TRELLIS2_API std::string trellis2_effective_config();
+
 /*****************************************************************************
 ** Public API – DINOv3 ViT-L/16 image-conditioning encoder
 **

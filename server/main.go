@@ -171,6 +171,12 @@ type job struct {
 	// invisible afterwards. The requested setting is not enough: "auto" says
 	// nothing about what it resolved to.
 	Device     string `json:"device,omitempty"`
+	// The library's own report of what it resolved for this run - attention
+	// path, chunking gates, CUDA graphs, shape decoder placement. Device says
+	// which card computed a mesh; this says how. Several entries are decided
+	// from machine state (free VRAM) rather than from the request, so without
+	// them two runs of one seed can differ with nothing recording why.
+	RunConfig  map[string]string `json:"runConfig,omitempty"`
 	Thumbnail  string `json:"thumbnail,omitempty"`
 	Stage      string `json:"stage,omitempty"`
 	Step       int    `json:"step"`
@@ -348,6 +354,10 @@ func (s *server) worker() {
 		// generations came back from a restart with no device on their tile.
 		backendLogged := false
 		backendUsed := ""
+		// Captured with the backend and for the same reason: by the time the
+		// manifest is written the pipeline may be gone (-unload-idle), and
+		// RunConfig needs it loaded to report the placement decisions.
+		var runCfgUsed map[string]string
 		mesh, err := s.eng.Generate(j.image, j.pipeline, j.Background, j.Seed, j.Steps, j.Guidance, j.TextureSteps,
 			func() {
 				setStage("loading models", 0, 0)
@@ -359,6 +369,7 @@ func (s *server) worker() {
 						backendUsed = b
 						log.Printf("  running on %s", b)
 					}
+					runCfgUsed = s.eng.RunConfig()
 				}
 				// The cascade reports its settled resolution as a second
 				// upsample event — (achieved, requested), not a step counter.
@@ -385,6 +396,7 @@ func (s *server) worker() {
 			j.Resolution = mesh.GridRes
 			// Before persistJob, not after: the manifest has to carry it.
 			j.Device = backendUsed
+			j.RunConfig = runCfgUsed
 		}
 		j.mu.Unlock()
 		if err == nil {

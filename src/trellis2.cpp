@@ -2936,6 +2936,35 @@ static int64_t chunk_rows_limit()
 	return ( int64_t )1 << 18; // 262144
 }
 
+// The voxel count above which an ENCODER level is evaluated block-wise, as
+// opposed to the block size itself. The two are separate questions and were not
+// separated until now: the gate reused chunk_rows_limit(), so a level split as
+// soon as it outgrew one block rather than when the backend required it.
+//
+// That is not merely redundant work. On ROCm at f16 the chunk shape changes the
+// result — ggml's kernels are not shape-stable there (chunked vs. unchunked
+// measures 3.86e-03 on the shape encoder, against exactly 0 on CPU), so a level
+// that splits without needing to still moves the latents that reach the texture
+// flow. See docs/plan/rocm-native-reference.md, "chunked_decode fails for every
+// non-default block size".
+//
+// The default is deliberately today's behaviour. The binding limit here is a
+// 32-bit workitem dispatch rather than the mul_mat column cap (see the comment
+// at the gate), and nobody has measured where it actually breaks, so picking a
+// new default from theory would be inventing a bound. TRELLIS2_ENC_CHUNK_ROWS
+// raises the gate so the levels a tier does not require can be run in one graph
+// and the difference measured; the block size stays chunk_rows_limit() either
+// way, which keeps the levels that do split bit-identical to today.
+static int64_t enc_chunk_gate()
+{
+	if( const char* e = std::getenv( "TRELLIS2_ENC_CHUNK_ROWS" ) ) {
+		const long long n = std::atoll( e );
+		if( n > 0 )
+			return ( int64_t )n;
+	}
+	return chunk_rows_limit();
+}
+
 // Escape hatch for demonstrating the defect the split exists to avoid.
 //
 // TRELLIS2_NO_CHUNK=1 lets every level run as one graph even when that is known
@@ -2951,6 +2980,53 @@ static bool chunking_disabled()
 		return e && e[0] == '1';
 	}();
 	return off;
+}
+
+// The knobs above, as this process actually resolved them, so a host can record
+// what produced a result instead of leaving two runs to differ for a reason
+// nothing preserves.
+//
+// It has to come from here rather than from the host reading the same
+// variables: the library gets its environment from the CRT copy the DLL
+// snapshots at load, which is not necessarily what the host process sees (see
+// the setNativeEnv note in start_server.bat). A host that guessed would
+// eventually record something other than what was computed, and a provenance
+// record that can be wrong is worse than none.
+//
+// Format is one key=value per line. Values carry no spaces or newlines, so a
+// host can split on '\n' and the first '=' without quoting rules.
+std::string trellis2_effective_config()
+{
+	std::string s;
+	const auto	add = [&s]( const char* k, const std::string& v ) {
+		 s += k;
+		 s += '=';
+		 s += v;
+		 s += '\n';
+	};
+
+	// Mirrors sdpa_auto()'s gate. Re-read rather than shared, because those are
+	// function-local statics inside the attention path; the getenv calls are the
+	// same ones, so the answer is the same.
+	const bool force_exact = std::getenv( "TRELLIS2_SDPA_EXACT" ) != nullptr;
+	const bool force_flash = std::getenv( "TRELLIS2_SDPA_FLASH" ) != nullptr;
+	add( "sdpa", force_exact ? "exact-pinned" : ( force_flash ? "flash-pinned" : "auto" ) );
+
+	size_t exact_cap_mb = 1024;
+	if( const char* env = std::getenv( "TRELLIS2_SDPA_EXACT_MAX_MB" ) )
+		exact_cap_mb = ( size_t )std::strtoull( env, nullptr, 10 );
+	add( "sdpa_exact_max_mb", std::to_string( exact_cap_mb ) );
+
+	add( "chunking", chunking_disabled() ? "off" : "on" );
+	add( "chunk_rows", std::to_string( ( long long )chunk_rows_limit() ) );
+	add( "enc_chunk_rows", std::to_string( ( long long )enc_chunk_gate() ) );
+
+	// disable_cuda_graphs_once() leaves ggml's graph path enabled only for the
+	// explicit opt-in; every other route ends with GGML_CUDA_DISABLE_GRAPHS set.
+	const char* graphs_optin = std::getenv( "TRELLIS2_CUDA_GRAPHS" );
+	add( "cuda_graphs", ( graphs_optin && graphs_optin[0] == '1' ) ? "on" : "off" );
+
+	return s;
 }
 
 // The finest decoder level, evaluated in voxel blocks so no mul_mat ever sees
@@ -4662,7 +4738,7 @@ bool trellis2_shape_enc_encode( trellis2_shape_enc_model* m,
 			// Must mirror the condition below exactly. It has drifted twice
 			// already, and a warning that describes a case which is in fact
 			// handled sends the next investigation somewhere pointless.
-			const bool		  will_chunk = !chunking_disabled() && has_down && !taps && ( int64_t )L > chunk_rows_limit();
+			const bool		  will_chunk = !chunking_disabled() && has_down && !taps && ( int64_t )L > enc_chunk_gate();
 			// This level's own mul_mat column ceiling. mul_mat_max_rows was
 			// measured for a [64, 64] weight and the bug note says so; the
 			// encoder's convs are wider, so treat it as the best estimate
@@ -4721,7 +4797,7 @@ bool trellis2_shape_enc_encode( trellis2_shape_enc_model* m,
 		// 0 qualifies without a per-stage ping-pong, because it carries no
 		// ConvNeXt blocks. Taps are excluded: they want the full-length
 		// intermediates this path never forms.
-		if( !chunking_disabled() && has_down && !taps && ( int64_t )L > chunk_rows_limit() ) {
+		if( !chunking_disabled() && has_down && !taps && ( int64_t )L > enc_chunk_gate() ) {
 			std::vector<float> lvl_out;
 			if( !shape_enc_level_chunked( m, hp, lvl, C_in, C_out, L, Lc, lvl == 0 ? in_shift : feats, nfine, ncoarse, childidx, chunk_rows_limit(), lvl_out, error ) )
 				return false;

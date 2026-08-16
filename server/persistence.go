@@ -34,6 +34,10 @@ type persistedJob struct {
 	// Absent in v1 manifests; those restore as 0 (auto), which is what they ran
 	// with before the field existed.
 	Background   int           `json:"background,omitempty"`
+	// Absent in manifests written before the library could report it. Those
+	// restore as nil, which reads as "not recorded" rather than "defaults" —
+	// the settings they ran with are genuinely unknown.
+	RunConfig    map[string]string `json:"runConfig,omitempty"`
 	Frames       []frameMeta   `json:"frames,omitempty"`
 	LivePreview  bool          `json:"livePreview,omitempty"`
 	StageTimings []stageTiming `json:"stageTimings,omitempty"`
@@ -62,7 +66,7 @@ func (s *server) persistJob(j *job) error {
 		Quality: j.Quality, Device: j.Device, Thumbnail: j.Thumbnail,
 		Pipeline: j.pipeline, Seed: j.Seed, Steps: j.Steps,
 		TextureSteps: j.TextureSteps, Guidance: j.Guidance,
-		Background: j.Background,
+		Background: j.Background, RunConfig: j.RunConfig,
 		Frames: append([]frameMeta(nil), j.Frames...), LivePreview: j.LivePreview,
 		StageTimings: append([]stageTiming(nil), j.StageTimings...),
 	}
@@ -222,7 +226,7 @@ func loadPersistedJob(dir string) (*job, error) {
 		LivePreview: m.LivePreview || len(m.Frames) > 0, StageTimings: m.StageTimings,
 		pipeline: m.Pipeline, Seed: m.Seed, Steps: m.Steps,
 		TextureSteps: m.TextureSteps, Guidance: m.Guidance,
-		Background: m.Background,
+		Background: m.Background, RunConfig: m.RunConfig,
 		persistDir: dir, meshPath: meshPath, inputPath: inputPath, sourcePath: sourcePath,
 	}, nil
 }

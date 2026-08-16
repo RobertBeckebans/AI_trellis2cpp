@@ -85,11 +85,58 @@ rem To turn it off, delete the variable rather than setting it to 0 - the
 rem library tests for presence, so TRELLIS2_TIMING=0 still enables it:
 rem   set TRELLIS2_TIMING=
 set TRELLIS2_TIMING=1
+rem ── Numerics knobs ──────────────────────────────────────────────────────
+rem Everything below changes WHAT is computed, not just how fast. All of them
+rem are recorded per generation in the manifest's "runConfig", so a stored
+rem result says which settings produced it - do not rely on remembering.
+rem Like TRELLIS2_TIMING they test for presence, so "=0" does NOT switch one
+rem off; comment the line out or clear it with "set TRELLIS2_XXX=".
+
+rem Pin the attention path. Default is size-gated: the exact materialized
+rem [L_k, L_q, heads] softmax while that matrix stays under 1 GiB - SS-flow
+rem (~0.8 GiB) and 512-SLAT (~0.4 GiB) - and ggml_flash_attn_ext above it, where
+rem exact is not an option at all (~7.7 GB at 1024, >100 GB at 1536).
+rem
+rem The two are NOT interchangeable. ggml's CUDA/HIP flash kernels accumulate in
+rem F16 and ignore ggml_flash_attn_ext_set_prec() outright, so on ROCm flash
+rem costs 5.198e-02 rel-L2 per SS-flow forward against 3.050e-06 exact, and
+rem 89.8% latent sign agreement against 99.9% - roughly one voxel in ten flips
+rem in the coarse occupancy structure. FLASH is therefore a deliberate choice of
+rem the less faithful kernel (it does produce smoother-looking meshes); EXACT
+rem everywhere will fail to allocate on the HR cascade tiers.
+rem TRELLIS2_SDPA_EXACT_MAX_MB moves the gate, 0 disables exact entirely.
 ::set TRELLIS2_SDPA_FLASH=1
 ::set TRELLIS2_SDPA_EXACT=1
+
+rem Force the texture stage's shape ENCODER onto the CPU. Escape hatch only -
+rem the dispatch-limit crash it existed for is fixed inside the encoder (the
+rem skip mean is summed as strided slices now). Slow.
 ::set TRELLIS2_SHAPE_ENC_CPU=1
+
+rem Force the shape DECODER onto the CPU. By default it is placed by free VRAM
+rem - GPU when the card can hold the decode once the flow DiTs are freed, CPU
+rem otherwise - and it falls back to the CPU by itself on a load OOM, so there
+rem is never a mid-generation failure. TRELLIS2_SHAPE_DEC_GPU forces the other
+rem way. The manifest records where it actually landed, not what was asked.
 ::set TRELLIS2_SHAPE_DEC_CPU=1
+
+rem Run every level in ONE graph, past the column count the backend will write.
+rem Not a performance knob: on ROCm/HIP the columns past 2^21 (f16 weights) or
+rem 2^19 (f32) are never written and stay zero, silently and with
+rem GGML_STATUS_SUCCESS - the 1024^3 Einstein bust losing every face past 2^21
+rem voxels is what this produces. It exists to reproduce that defect on purpose,
+rem next to tools/rocblas_col_truncation.py. Never for a real generation.
+rem See docs/bugs/ggml-rocm-mul-mat-column-limit.md.
 ::set TRELLIS2_NO_CHUNK=1
+
+rem Raise the ENCODER's block-wise gate without touching the block size (that
+rem stays TRELLIS2_CHUNK_ROWS, default 262144). Unset, the gate is the block
+rem size, so a level splits as soon as it outgrows one block rather than when
+rem the backend requires it. 2097152 keeps level 0 chunked at 1024 and returns
+rem level 1 to a single graph. Measured 2026-08-16: bit-identical output either
+rem way at 1024, so this is a diagnostic, not a fix. Levels that still split are
+rem unaffected.
+::set TRELLIS2_ENC_CHUNK_ROWS=2097152
 
 rem Explicit .\ — cmd does not necessarily resolve executables from the current
 rem directory (NoDefaultCurrentDirectoryInExePath), which fails with exit 9009.

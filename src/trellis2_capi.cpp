@@ -1377,6 +1377,28 @@ const char* t2_projection_backend()
 	return t2print::projection_backend();
 }
 
+const char* t2_run_config( t2_pipeline* p )
+{
+	// Rebuilt per call and held in a static, the way t2_last_bake_timings keeps
+	// its numbers: the caller gets a borrowed pointer valid until it asks again.
+	static std::string cfg;
+	cfg = trellis2_effective_config();
+
+	cfg += "shape_enc=";
+	cfg += std::getenv( "TRELLIS2_SHAPE_ENC_CPU" ) ? "cpu" : "auto";
+	cfg += '\n';
+
+	// The outcome rather than the request: the decoder follows free VRAM unless
+	// TRELLIS2_SHAPE_DEC_{GPU,CPU} pins it, and it silently falls back to the CPU
+	// when a GPU load hits OOM. Recording the knob would miss both.
+	if( p ) {
+		cfg += "shape_dec=";
+		cfg += p->shapedec_gpu ? "gpu" : "cpu";
+		cfg += '\n';
+	}
+	return cfg.c_str();
+}
+
 void t2_last_bake_timings( float* out_unwrap, float* out_rasterize, float* out_projection, float* out_texel_fill, float* out_encode )
 {
 	const t2glb::BakeTimings t = t2glb::last_bake_timings();

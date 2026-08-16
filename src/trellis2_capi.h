@@ -26,8 +26,9 @@
 extern "C" {
 #endif
 
+/* 17: t2_run_config added. */
 /* 16: T2_PIPE_1536 / T2_CAP_1536; t2_mesh_grid_resolution added. */
-#define T2_CAPI_ABI_VERSION 16
+#define T2_CAPI_ABI_VERSION 17
 
 TRELLIS2_CAPI int t2_abi_version();
 
@@ -211,6 +212,22 @@ TRELLIS2_CAPI t2_mesh_result* t2_prepare_print_mesh(
 ** result, they differ in which library does the nearest-surface search. The
 ** returned pointer is a static string and is never freed. */
 TRELLIS2_CAPI const char*	  t2_projection_backend( void );
+
+/* The settings that decide what a generation computes - attention path,
+** chunking gates, CUDA graphs, and where the shape decoder was placed - as this
+** process actually resolved them. One key=value per line; values contain no
+** spaces or newlines, so a host can split on '\n' and the first '='. Keys are
+** additive across ABI versions, so a host should ignore ones it does not know.
+**
+** Meant to be stored alongside a result. Several of these are decided from
+** machine state rather than from the request (the shape decoder follows free
+** VRAM, and the exact-attention gate can fall back to flash on a full card), so
+** two runs of one seed can differ for a reason the request does not record.
+**
+** p may be NULL for the process-wide settings alone; pass the pipeline to also
+** get the per-load placement decisions. The returned pointer is owned by the
+** library, valid until the next call, and must not be freed. */
+TRELLIS2_CAPI const char*	  t2_run_config( t2_pipeline* p );
 
 /* Sub-stage durations of the most recent t2_bake_glb / t2_bake_projected_glb
 ** call, in seconds. On dense meshes the bake is the largest single export cost
