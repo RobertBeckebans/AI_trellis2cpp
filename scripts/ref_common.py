@@ -20,7 +20,14 @@ import os
 import sys
 import types
 
-TRELLIS2_PY = os.environ.get("TRELLIS2_PY", "/trellis2")
+# Where the upstream `trellis2` package lives. Natively it is a checkout in the
+# repo root (gitignored, copied from docs/ref/); in docker/Dockerfile.ref it is
+# /trellis2. Prefer whichever actually contains the package so the same scripts
+# run in both, and let TRELLIS2_PY override for a checkout somewhere else.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TRELLIS2_PY = os.environ.get("TRELLIS2_PY")
+if not TRELLIS2_PY:
+    TRELLIS2_PY = _REPO_ROOT if os.path.isdir(os.path.join(_REPO_ROOT, "trellis2")) else "/trellis2"
 if TRELLIS2_PY not in sys.path:
     sys.path.insert(0, TRELLIS2_PY)
 

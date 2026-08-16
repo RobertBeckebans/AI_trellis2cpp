@@ -401,6 +401,12 @@ cmake -B build -DTRELLIS2_BUILD_TESTS=ON && cmake --build build -j
 ctest --test-dir build -LE model          # fast, without assets
 ctest --test-dir build                    # full parity (needs ggufs/ + dumps/)
 
+# On the Windows/HIP shared-library build the ROCm runtime has to be reachable,
+# or every test that links trellis2.dll blocks in the loader instead of failing:
+# ctest then sits at 0 % CPU forever on the first one. Use the same shell the
+# build script sets up, or prepend it yourself:
+#   set PATH=C:\Program Files\AMD\ROCm\6.4\bin;%PATH%
+
 # shared library for the Go server (Linux/CUDA, e.g. inside docker/Dockerfile.demo)
 cmake -B build-shared -DBUILD_SHARED_LIBS=ON -DGGML_CUDA=ON && cmake --build build-shared -j
 cd server && go build -o trellis2-server .

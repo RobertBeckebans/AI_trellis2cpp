@@ -112,6 +112,54 @@ behaviour on the same hardware, one assert away.
 clears cleanly, and the 2.94M above. It was never measured precisely, because a
 backend that fails loudly does not need a workaround.)
 
+### 2026-08-16: an unrelated project hit it and shipped the same workaround
+
+Found while making the upstream TRELLIS.2 Python package runnable natively for
+the backend comparison. The ROCm fork of it
+(`docs/ref/TRELLIS-2_rocm/`, by Cardboard-box-a) carries this in
+`trellis2/modules/sparse/linear.py`:
+
+```python
+# ROCm GFX1201 (RX 9070 XT) bug workaround:
+# hipBLASLt and rocBLAS GEMM kernels corrupt memory (→ NaN) when N > ~800k
+# for shapes like [N, K] @ [K, M] with small K/M.  Chunking keeps each
+# dispatch below the confirmed-safe threshold of 524288 rows.
+ROCM_SAFE_CHUNK = 524_288
+```
+
+plus `_sparse_conv3d_explicit_gemm_chunked` in
+`trellis2/modules/sparse/conv/conv_flex_gemm.py`, a second code path that
+bypasses the FlexGEMM Triton kernels entirely above that row count (im2col +
+`torch.mm` per 524k block), gated on `ROCM_SAFE_SPCONV=1`.
+
+That codebase knows nothing about ggml or about this port. What it corroborates:
+
+- **Independent confirmation that this is not ggml.** A pure PyTorch + Triton
+  stack hits it on the same architecture. Consistent with the
+  `tools/rocblas_col_truncation.py` measurement above, from a second source.
+- **Independent confirmation that column chunking is the right workaround.**
+  They arrived at the same fix, at the same granularity, without contact.
+- **A second data point on the threshold.** They call 524,288 rows
+  "confirmed-safe" and report symptoms from ~800k, against the ~2^21/2^22
+  cliffs measured here. So the boundary tracks the GEMM shape rather than a
+  single fixed row count — which strengthens the workgroup-count explanation
+  and weakens any reading of it as one hard-coded number.
+- **They name hipBLASLt as well as rocBLAS**, which this investigation had not
+  separated.
+
+Two differences worth stating rather than smoothing over:
+
+- **They observe NaN / "memory corruption", we observe exact zeros.** Plausibly
+  the same kernel-selection defect resolving differently per shape, but that is
+  interpretation. Nobody has measured both failure modes side by side.
+- **Their card is an RX 9070 XT, ours a Radeon AI PRO R9700.** Both gfx1201,
+  but it is not the same board, and their threshold numbers were measured on
+  theirs.
+
+For a ticket this is the strongest single item: two unrelated stacks, two
+independent discoveries, one architecture, and the same mitigation shipped in
+both.
+
 ### What was still not measured
 
 - NVIDIA/CUDA was not tested at all. The title says ROCm/HIP because that is
@@ -192,6 +240,10 @@ production block size and at a deliberately ragged 997-row block), an entire
 generation is byte-identical end to end, and the wall-clock difference is within
 noise (284.7 s against 284.0 s). Splitting the column dimension therefore costs
 nothing measurable and changes no results.
+
+The ROCm TRELLIS.2 fork independently shipped the same mitigation at the same
+granularity (`ROCM_SAFE_CHUNK = 524_288`, see 2026-08-16 above), which is as
+close to a second opinion on the workaround as this is going to get.
 
 ## Speculation, not verified
 

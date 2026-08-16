@@ -33,6 +33,14 @@ add_executable(mesh2glb mesh2glb.cpp)
 target_link_libraries(mesh2glb PRIVATE trellis2)
 target_compile_features(mesh2glb PRIVATE cxx_std_14)
 
+# Mesh a dumped dual-grid decoder output (.fdgvox) into a T2MESH01 blob. Lets
+# the PyTorch reference's voxels go through our extractor, so a reference mesh
+# can be compared against the backends without a second mesher in the picture.
+# Header-only (examples/flexible_dual_grid.h), so no model and no GPU.
+add_executable(dual_grid_cli dual_grid_cli.cpp)
+target_include_directories(dual_grid_cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_features(dual_grid_cli PRIVATE cxx_std_14)
+
 # Smoke/benchmark tool for the quad stage: OBJ or .t2mesh in, quad OBJ out.
 # Drives t2quad::remesh, i.e. the same path the server uses including input
 # preparation - talking to the vendored core directly would skip exactly the

@@ -53,6 +53,10 @@ crash-*
 /ggufs/
 /dumps/
 /generations/
+# Local checkout of the upstream TRELLIS.2 Python package, copied here so
+# scripts/ref_*.py can import it. MIT-licensed, but reference material we run
+# against — never adopted into our sources, so it stays out of the tree.
+/trellis2/
 slow-unit-*
 assets/
 data_toolkit/

@@ -342,7 +342,12 @@ func (s *server) worker() {
 		// milliseconds is not a reasonable ask. Report it once the models are up,
 		// which is the first progress event: the load callback fires before the
 		// backend is chosen.
+		// Captured here rather than read back after the run: by then the models
+		// may already have been unloaded (-unload-idle), and the manifest is
+		// written before that read happened at all — which is how persisted
+		// generations came back from a restart with no device on their tile.
 		backendLogged := false
+		backendUsed := ""
 		mesh, err := s.eng.Generate(j.image, j.pipeline, j.Background, j.Seed, j.Steps, j.Guidance, j.TextureSteps,
 			func() {
 				setStage("loading models", 0, 0)
@@ -351,6 +356,7 @@ func (s *server) worker() {
 				if !backendLogged {
 					backendLogged = true
 					if b, _, _, loaded := s.eng.Info(); loaded && b != "" {
+						backendUsed = b
 						log.Printf("  running on %s", b)
 					}
 				}
@@ -377,6 +383,8 @@ func (s *server) worker() {
 		} else {
 			j.mesh = mesh
 			j.Resolution = mesh.GridRes
+			// Before persistJob, not after: the manifest has to carry it.
+			j.Device = backendUsed
 		}
 		j.mu.Unlock()
 		if err == nil {
@@ -417,14 +425,9 @@ func (s *server) worker() {
 			finishTiming()
 		}
 
-		// Read after the run, not before it: the models load lazily inside the
-		// generation, so this is the first point at which the backend is settled.
-		backendUsed, _, _, _ := s.eng.Info()
-
 		j.mu.Lock()
 		if err == nil {
 			j.State = "done"
-			j.Device = backendUsed
 		}
 		j.Stage = ""
 		j.Step, j.Total = 0, 0

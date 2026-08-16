@@ -1,6 +1,6 @@
 # `backend-parity` — make the compute backends agree, or say by how much they do not
 
-- **Status:** planned
+- **Status:** in progress — phases 1c and 2 done, 0/1/1b/3 open
 - **GitHub Issue:** none — tracked by plan key (`backend-parity`), so progress
   entries are `docs/progress/backend-parity_<phase>-<name>.md`.
 - **Branch:** `pytorch-comparison` (current) or a fresh one
@@ -57,6 +57,28 @@ edges; Vulkan +3.00 % on vertices and +24 % on non-manifold. **Neither
 reproduces the reference, and they miss it in opposite directions.** ROCm's
 mesh looks smoother than the CPU's — that is a deviation, not a quality.
 
+**The same three backends at 512 split the problem in two** (measured
+2026-08-16, all `background = KEEP`, seed 42, same input file):
+
+| | 512 verts | vs CPU | 1024 verts | vs CPU |
+|---|---|---|---|---|
+| CPU | 711,670 | — | 2,854,472 | — |
+| ROCm | 711,680 | **+0.0014 %** | 2,838,357 | **−0.56 %** |
+| Vulkan | 728,910 | +2.42 % | 2,940,217 | +3.00 % |
+| PyTorch reference | 920,630 | +29.4 % | 3,674,840 | +28.8 % |
+
+**ROCm and the CPU are ten vertices apart at 512** — visually
+indistinguishable, and 400× closer than the same pair at 1024. Vulkan is off by
+a near-constant 2.4–3.0 % at both tiers. So the two GPU backends diverge for
+different reasons: Vulkan's is a flat accuracy offset consistent with its 286×
+worse per-forward floor, while ROCm's appears only in what the 1024 tier adds.
+One explanation will not cover both, and Phase 1 should stop looking for one.
+
+What "the 1024 tier adds" is deliberately vague: the cascade brings a scaffold
+upsample, a second flow model, the 1024 conditioning, one more decoder
+subdivision level, and the row counts at which chunking engages. The
+measurement narrows the search to that set. It does not name the culprit.
+
 ## Non-goals
 
 - **Making Vulkan the equal of ROCm.** Its floor is a kernel property; this plan
@@ -71,6 +93,14 @@ mesh looks smoother than the CPU's — that is a deviation, not a quality.
   fast iteration, and never Vulkan at 1536.
 
 ## Architecture decisions
+
+**D0 — Every comparison names its `background` mode.** Added after a wrong
+number went into a progress doc: a 512 comparison used runs made with
+`background = AUTO` against a reference driver that takes `preprocess_image`'s
+alpha branch, i.e. `KEEP`. Different preprocessing is a different conditioning
+image, so the two were never comparable, and the error was invisible because
+the manifests record the mode but nobody read it. The reference driver is
+always KEEP; so must every run measured against it be.
 
 **D1 — Mesh counters are not an accuracy metric.** This is the load-bearing
 decision, because it inverts the obvious approach.
@@ -142,10 +172,12 @@ nothing currently reads.
       the number that justifies it.
 - [ ] The question "do f32 flow weights move Vulkan's mesh toward the CPU"
       answered with a measurement, not an argument.
-- [ ] The expansion warning fires on both collapse and runaway, verified against
+- [x] The expansion warning fires on both collapse and runaway, verified against
       the two recorded failures (2.82 and 4.51).
-- [ ] `ctest --test-dir build -C Release -LE model` green throughout. A `SKIP`
-      (77) is not a pass.
+- [x] `ctest --test-dir build -C Release -LE model` green throughout. A `SKIP`
+      (77) is not a pass. — 10/10 passed, 0 skipped, as of phases 1c/2. Needs
+      the ROCm runtime on `PATH` on Windows or the tests hang in the loader;
+      see `AGENTS.md`.
 
 ## Context / affected files
 
@@ -168,6 +200,21 @@ nothing currently reads.
       boundary edges), while the *flow* is where the trajectory is set and where
       the error is measured. Compare against tonight's CPU run at seed 42.
       **Deliverable: does closing the tap error close the mesh gap, yes or no.**
+
+      Better motivated since the 512 measurement: Vulkan's offset is
+      near-constant across tiers, which is exactly the signature of a kernel
+      accuracy floor rather than something the cascade introduces. This is the
+      right experiment for Vulkan, and only for Vulkan.
+- [ ] **Phase 0b — What does the cascade do to ROCm?** New, and now the more
+      interesting half. ROCm reproduces the CPU at 512 to ten vertices and
+      misses it by 16,115 at 1024, so its divergence lives entirely in what the
+      1024 tier adds. Bisect that set rather than the whole pipeline: run
+      `1024` (single-shot, no cascade) against `1024_cascade` on the same seed,
+      and run the cascade with `TRELLIS2_NO_CHUNK=1` where it still fits. Each
+      of those isolates one suspect — the second flow model, the HR
+      conditioning, the extra subdivision level, the chunk boundaries. Cheap:
+      ROCm at 1024 is ~320 s, so the whole sweep is under an hour, against
+      100 minutes for a single CPU reference point.
 - [ ] **Phase 1 — The full tap table, against PyTorch.** Run the suite per
       backend with the runtime switch (`TRELLIS2_DEVICE=cpu|rocm|vulkan`, one
       build). `dino`, `ss_flow_forward`, `ss_sample`, `ss_dec`, `slat`,
@@ -183,7 +230,34 @@ nothing currently reads.
       PyTorch directly — which is the mesh question asked properly, one stage
       before the dual-grid extraction blurs it into edge counters. Costs one
       full dump: a 1024-model sampler run over ~11k tokens.
-- [ ] **Phase 1c — A PyTorch generation in the viewer.** The comparison the
+- [x] **Phase 1c — A PyTorch generation in the viewer.** Done —
+      `docs/progress/backend-parity_1c-2-pytorch-mesh-and-two-sided-diagnostics.md`.
+      Einstein, seed 42, type `512`: 920,630 verts / 1,896,504 tris, 0.98 %
+      boundary edges, 436 s, published as `generations/6daad1f22a18bbd0`. Route
+      taken: `scripts/ref_generate.py` (the upstream stages, stopping at the
+      decoder's 7 channels) → `examples/dual_grid_cli` (our extractor) →
+      `scripts/ref_publish_generation.py`. The upstream package now sits at
+      `trellis2/` in the repo root, gitignored.
+
+      Also done at 1024 (`generations/73f701b208b57c39`, 3,674,840 verts,
+      1,716 s), which makes the mesh counters directly comparable: the
+      reference has **more** boundary edges (0.2728 %) and **more**
+      non-manifold edges (72,713) than CPU, ROCm and Vulkan alike. D1 as a
+      measurement rather than an argument — rank by edge counts and the
+      reference implementation comes last.
+
+      First number out of it: the reference carries **29.4 % more vertices**
+      than our CPU run at 512 (920,630 vs 711,670) and +28.8 % at 1024. The two
+      reference runs share a scaffold, so that consistency is not two
+      independent samples. Not yet a defect —
+      the seed does not transfer between our RNG and PyTorch's — but the size
+      of it is what Phases 1 and 1b now exist to explain. The 1024 route is
+      also no longer an unknown: the 512 decode took 210 s at 920k voxels, so
+      three million is tens of minutes, not hours.
+
+      <details><summary>original phase text</summary>
+
+      The comparison the
       reviewer actually wants: a mesh produced by the reference implementation,
       sitting under `generations/` beside the ROCm, Vulkan and CPU runs of the
       same seed, judged by eye in the same viewer rather than through counters.
@@ -215,10 +289,18 @@ nothing currently reads.
       including the decoder output. That proves out the extraction and manifest
       work, and measures what 1024 would cost.
 
-- [ ] **Phase 2 — Two-sided diagnostics.** D4: warn outside roughly 3.5–4.2 on
-      the finest-level expansion, and when `tris/verts` falls below 1. Purely
-      diagnostic — it changes no result, it makes a broken one visible. Verify
-      against the two recorded failures.
+      </details>
+
+- [x] **Phase 2 — Two-sided diagnostics.** Done. The finest-level expansion
+      check in `src/trellis2.cpp` now also warns below 3.5 (the Vulkan 1536
+      collapse ran at 2.82 and logged nothing), and `src/trellis2_capi.cpp`
+      warns when `tris/verts` falls below 1 (that run: 0.075) — ungated, not
+      behind `TRELLIS2_TIMING`. Both are print-only.
+
+      Caveat found while doing Phase 1c: the PyTorch reference's own 512 run
+      expands 4.484 at the finest level, above the 4.2 upper threshold, with a
+      perfectly healthy mesh. The upper bound was calibrated on 1024 runs and
+      is a known false positive at 512; left as is, since it only warns.
 - [ ] **Phase 3 — The backend-comparison gate (optional).** D3. Only worth doing
       once Phase 1 says what the achievable spread actually is; a bound invented
       before the data would be arbitrary.

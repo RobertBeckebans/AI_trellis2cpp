@@ -3575,7 +3575,9 @@ static bool shape_dec_run( trellis2_shape_dec_model* m,
 					( long long )block,
 					( int64_t )L > max_rows ? "  <-- PAST THE CAP" : "" );
 
-			// Subdivision runaway, checked at the finest level only.
+			// Subdivision health, checked at the finest level only. Two-sided:
+			// too much expansion and too little are both failures, and only the
+			// first one used to be reported.
 			//
 			// A surface should roughly quadruple per subdivision. When it grows
 			// faster the decoder is thickening the set instead of following a
@@ -3585,9 +3587,16 @@ static bool shape_dec_run( trellis2_shape_dec_model* m,
 			// 4.00, 4.01, 4.04 and 4.04 here, and the one torn result (7.5 %
 			// non-manifold edges against 0.36–1.03 % for the others) at 4.52.
 			//
-			// So the threshold is a heuristic drawn from five points, not a
-			// derived constant, and it is deliberately placed with room on both
-			// sides. It only warns; the caller keeps its mesh, because a
+			// The other direction was silent until now, and it hid the worst
+			// failure this project has recorded: a Vulkan run at 1536 collapsed
+			// to 163k triangles over 2.18M vertices with 16.06 % boundary
+			// edges, and its finest expansion was 2.82 — comfortably below
+			// four, so nothing was logged. Losing voxels is as diagnostic as
+			// adding them.
+			//
+			// So both thresholds are heuristics drawn from a handful of points,
+			// not derived constants, placed with room either side of the
+			// healthy band. They only warn; the caller keeps its mesh, because a
 			// generation this expensive should not be thrown away on a rule of
 			// thumb. The definitive numbers are the boundary/non-manifold edge
 			// counts the pipeline reports after extraction.
@@ -3600,6 +3609,13 @@ static bool shape_dec_run( trellis2_shape_dec_model* m,
 						"[shape_dec] WARNING: the finest subdivision expanded %.2fx where a surface gives ~4."
 						" The decoder is adding volume rather than surface, and this mesh is likely to come out"
 						" torn (many non-manifold edges). A different seed, or the next tier down, usually avoids it.\n",
+						ratio );
+				else if( ratio < 3.5 )
+					std::fprintf( stderr,
+						"[shape_dec] WARNING: the finest subdivision expanded only %.2fx where a surface gives ~4."
+						" The decoder is dropping voxels rather than following a surface, and this mesh is likely to"
+						" come out full of holes. This is what a compute backend losing accuracy at high resolution"
+						" looks like; the next tier down, or a different backend, usually avoids it.\n",
 						ratio );
 			}
 

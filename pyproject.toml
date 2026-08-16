@@ -36,6 +36,10 @@ dependencies = [
     "tqdm",
     "imageio",
     "gguf",
+    # Not in the Dockerfile set: the upstream pipeline module imports matplotlib
+    # at module level for its sparse-structure visualisations, so importing
+    # Trellis2ImageTo3DPipeline needs it even when nothing is plotted.
+    "matplotlib",
 ]
 
 [project.optional-dependencies]

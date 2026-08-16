@@ -1171,6 +1171,26 @@ t2_mesh_result* t2_generate( t2_pipeline* p,
 	// of opening that gets a rough fill, it does not make filling free.
 	fdg::fill_holes( mesh, std::max( 64, 64 * grid / 512 ) );
 
+	// Collapse tell, cheaper than the edge walk below and not gated on
+	// TRELLIS2_TIMING. A dual-grid surface carries roughly two triangles per
+	// vertex (2.39 measured on healthy runs); the one collapsed generation on
+	// record produced 0.075 — 163k triangles over 2.18M vertices, i.e. a
+	// vertex set with almost no surface connecting it. The decoder-side
+	// expansion warning did not fire for it (2.82, under its own threshold),
+	// so this is the second, independent tell for the same failure.
+	if( mesh.n_verts() > 0 ) {
+		const double tpv = ( double )mesh.n_tris() / ( double )mesh.n_verts();
+		if( tpv < 1.0 )
+			std::fprintf( stderr,
+				"[mesh] WARNING: %zu triangles over %zu vertices (%.3f per vertex, a surface gives ~2)."
+				" Most of this vertex set is not connected into a surface — the mesh has collapsed rather"
+				" than merely being rough. Expect large holes; a lower resolution tier, or a different"
+				" compute backend, usually avoids it.\n",
+				mesh.n_tris(),
+				mesh.n_verts(),
+				tpv );
+	}
+
 	// What fill_holes could not close, as a number rather than an impression.
 	// A boundary edge belongs to exactly one triangle; on a closed surface there
 	// are none. Reporting the count and the largest loop separates "the limit is

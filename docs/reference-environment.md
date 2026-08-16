@@ -55,17 +55,29 @@ Backend-specific notes:
   `triton-rocm`, which the Linux ROCm torch wheels hard-depend on and which
   exists only on that index.
 
-The reference `trellis2` package is not on PyPI and is not vendored here (it is
-gitignored). Point `TRELLIS2_PY` at the checkout that contains `trellis2/`:
+The reference `trellis2` package is not on PyPI and is not vendored here. The
+simplest arrangement is a copy in the repository root, which is gitignored:
+
+```sh
+cp -r docs/ref/TRELLIS-2_rocm/trellis2 ./trellis2
+```
+
+`scripts/ref_common.py` picks that up on its own. It is MIT-licensed, so there
+is no conflict, but it stays untracked deliberately: it is reference material we
+run against, not code this project adopts.
+
+For a checkout somewhere else, point `TRELLIS2_PY` at the directory that
+*contains* `trellis2/`:
 
 ```sh
 # Windows (PowerShell)
-$env:TRELLIS2_PY = "F:\AITools\GFX\AI_trellis2cpp\docs\ideas\TRELLIS-2_rocm"
+$env:TRELLIS2_PY = "F:\AITools\GFX\AI_trellis2cpp\docs\ref\TRELLIS-2_rocm"
 # Linux
 export TRELLIS2_PY=$HOME/python/TRELLIS.2
 ```
 
-`scripts/ref_common.py` defaults it to `/trellis2`, the container's mount point.
+Without a root copy and without the variable, `ref_common` falls back to
+`/trellis2`, the container's mount point.
 
 Model weights (~7 GB) go to `models/`:
 
@@ -156,3 +168,39 @@ uv run --extra rocm python scripts/dump_cascade_reference.py --device cuda
 
 The GGUF converters (`scripts/convert_*_to_gguf.py`) run in the same environment
 and need no GPU.
+
+## Producing a reference generation
+
+The dumps above are per-stage activations for the parity tests. A *whole mesh*
+from the reference implementation, for side-by-side viewing against the
+backends, is three steps:
+
+```sh
+uv run --extra rocm python scripts/ref_generate.py \
+    --image assets/einstein.png --seed 42 --pipeline-type 512 \
+    --out dumps/einstein_ref512.fdgvox --out-json dumps/einstein_ref512.json
+
+./build/bin/Release/dual_grid_cli dumps/einstein_ref512.fdgvox \
+                                  dumps/einstein_ref512.t2mesh
+
+uv run --extra rocm python scripts/ref_publish_generation.py \
+    --mesh dumps/einstein_ref512.t2mesh --image assets/einstein.png \
+    --info dumps/einstein_ref512.json
+```
+
+`ref_generate.py` runs the upstream pipeline stages and stops at the shape
+decoder's raw 7 channels — the step after that is o_voxel's CUDA mesher, which
+does not build on Windows. `dual_grid_cli` meshes those channels with **our**
+extractor, the same one every backend uses, so the resulting artefact is
+"PyTorch geometry, our extraction" and any difference against a trellis2.cpp
+run is the network rather than the mesher. `ref_publish_generation.py` writes
+the `generations/<id>/` layout the server restores at startup, labelled
+`[PyTorch]` so the viewer's history tile says what it is.
+
+Einstein at seed 42, type `512`, cost 436 s on an R9700 (the decode runs on
+CPU, as it does in the port). `--pipeline-type 1024_cascade` runs the HR chain
+instead; budget roughly three times the decode.
+
+The seed does **not** transfer between this and a trellis2.cpp run — our RNG is
+not PyTorch's — so treat mesh-count differences as a sample difference until a
+tap or voxel-set comparison says otherwise.
