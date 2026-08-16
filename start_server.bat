@@ -31,11 +31,12 @@ rem Set before the builds too, so the ROCm toolchain is reachable.
 set PATH=%ROCM_BIN%;%DLL_DIR%;%PATH%
 
 if not exist "%~dp0%BUILD%\CMakeCache.txt" (
-  echo %BUILD%\ ist nicht konfiguriert.
-  echo Einmalig konfigurieren und bauen, z.B.:
-  echo   cmake-ninja-win64-rocm.bat      ^(HIP^)
-  echo   cmake-ninja-win64-cpu.bat       ^(nur CPU^)
+  echo %BUILD%\ is not configured.
+  echo Configure and build it once, e.g.:
+  echo   cmake-ninja-win64-rocm.bat      ^(HIP + Vulkan^)
+  echo   cmake-ninja-win64-cuda.bat      ^(CUDA + Vulkan^)
   echo   cmake-ninja-win64-vulkan.bat    ^(Vulkan^)
+  echo   cmake-ninja-win64-cpu.bat       ^(CPU only^)
   pause
   exit /b 1
 )
@@ -44,12 +45,12 @@ echo [1/2] trellis2.dll
 cmake --build "%BUILD%" --config Release
 if errorlevel 1 (
   echo.
-  echo Bibliotheks-Build fehlgeschlagen - siehe Ausgabe oben. Haeufige Ursachen:
-  echo   * Ein Server laeuft noch und haelt trellis2.dll gesperrt.
-  echo   * "CMake Generate step failed" nach einem ggml-Sprung: veraltete
-  echo     Cache-Eintraege. Gezielt loeschen, z.B. bei MATH_LIBRARY-NOTFOUND:
+  echo Library build failed - see the output above. Common causes:
+  echo   * A server is still running and holding trellis2.dll locked.
+  echo   * "CMake Generate step failed" after a ggml bump: stale cache entries.
+  echo     Drop them individually, e.g. for MATH_LIBRARY-NOTFOUND:
   echo       cmake -B %BUILD% -U MATH_LIBRARY
-  echo     Sonst %BUILD%\ neu konfigurieren ^(cmake-ninja-win64-*.bat^).
+  echo     Otherwise reconfigure %BUILD%\ ^(cmake-ninja-win64-*.bat^).
   pause
   exit /b 1
 )
@@ -60,7 +61,7 @@ go build -o trellis2-server.exe .
 if errorlevel 1 (
   popd
   echo.
-  echo Server-Build fehlgeschlagen.
+  echo Server build failed.
   pause
   exit /b 1
 )
@@ -104,7 +105,7 @@ set RC=%ERRORLEVEL%
 popd
 if not "%RC%"=="0" (
   echo.
-  echo Server mit Fehler beendet ^(exit %RC%^).
+  echo Server exited with an error ^(exit %RC%^).
   pause
 )
 endlocal

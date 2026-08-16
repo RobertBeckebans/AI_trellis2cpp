@@ -23,14 +23,19 @@ texturing, CGAL print wrap — by
 `84f4a2c`. Everything below was added on top of that base; check `git log`
 before attributing a design decision.
 
-**Runs on AMD, and on Windows.** Upstream targets Linux and CUDA through a
-container. This fork adds a HIP/ROCm backend (developed on a Radeon AI PRO
-R9700, `gfx1201`), a Vulkan backend, a Windows DLL build with the Go server
-alongside it, and ready-made configure scripts for all three. The CUDA path is
-kept and still builds, but it is not exercised here for want of the hardware,
-and it does inherit one change: ggml's CUDA graphs are disabled by default,
-because they crash on HIP and the two share that code. `TRELLIS2_CUDA_GRAPHS=1`
-turns them back on.
+**Runs natively on Windows, on any of four backends.** Upstream reaches the GPU
+through a Linux CUDA container. This fork adds a Windows DLL build with the Go
+server alongside it, and configure scripts for CPU, **CUDA**, Vulkan and
+HIP/ROCm — so CUDA users gain the container-free path, and AMD users gain a
+backend that did not exist before (developed on a Radeon AI PRO R9700,
+`gfx1201`).
+
+Two honest caveats on the CUDA side. It is **not exercised here** for want of
+the hardware: the Windows CUDA script is modelled on the working ROCm one and
+checked against ggml's CMake, and the container path is upstream's and
+unchanged, but neither is measured by this fork. And CUDA does inherit one
+change — ggml's CUDA graphs are disabled by default, because they crash on HIP
+and the two share that code. `TRELLIS2_CUDA_GRAPHS=1` turns them back on.
 
 **Both GPU backends live in one build and switch at runtime.** ggml registers
 each with the same device registry, so `TRELLIS2_DEVICE=cpu|rocm|vulkan` — or a
@@ -101,9 +106,9 @@ server work, a report of which projection backend a build uses, and warnings
 when the decoder's subdivision runs away *or* collapses — the latter added
 because the worst failure on record passed the one-sided check in silence.
 
-## Quick start
+## Quick start (Windows, AMD)
 
-Windows with an AMD card — the primary path for this fork. No container.
+The primary path for this fork. No container.
 
 ```sh
 git clone --recursive https://github.com/RobertBeckebans/AI_trellis2cpp.git
@@ -128,6 +133,44 @@ Three things worth knowing before the first run:
 
 The device selector in the viewer then switches between CPU, ROCm and Vulkan
 without a restart.
+
+## Quick start (Windows, NVIDIA)
+
+CUDA is still supported and did not have to give anything up for the AMD work —
+what is new is that it no longer needs the Linux container.
+
+```sh
+git clone --recursive https://github.com/RobertBeckebans/AI_trellis2cpp.git
+cd AI_trellis2cpp
+scripts/download_ggufs.sh          # prebuilt f16 GGUFs -> ggufs/ (~14 GB)
+cmake-msbuild-win64-cuda.bat       # CUDA + Vulkan in one library, into build-cuda\
+start_server.bat build-cuda
+# open http://localhost:8742 and drop an image
+```
+
+Needed once, beyond the AMD list above:
+
+- **CUDA Toolkit 12.8 or newer.** `CUDA_ARCHS` at the top of the script is set
+  to `120` (Blackwell, RTX 50xx); `sm_120` does not exist in older toolkits.
+  For an RTX 40xx use `89`, 30xx `86`, 20xx `75`, or list several.
+- **Visual Studio 2019/2022 or the Build Tools.** nvcc only accepts MSVC as its
+  host compiler on Windows, so this script uses `cl.exe` where the others
+  borrow the ROCm clang. It calls `vcvars64.bat` itself — a plain `cmd` window
+  is enough.
+- **vcpkg with `eigen3` and `cgal`.** The scripts expect it at `C:\vcpkg`;
+  edit `CMAKE_TOOLCHAIN_FILE` in the script if yours lives elsewhere. Without
+  it the print wrap and the quad stage configure as unavailable rather than
+  failing, so check the configure output.
+
+It builds into `build-cuda\` rather than `build\`, so an AMD and an NVIDIA tree
+can coexist on one machine and the server picks between them.
+
+**This path is untested here** — there is no NVIDIA card in the machine this
+fork is developed on. The script is modelled on the working ROCm one and
+checked against ggml's CMake, but "it configures and builds" is a prediction,
+not a measurement. Likewise, none of the numerical parity work in
+[`docs/VERIFICATION.md`](docs/VERIFICATION.md) has been run on CUDA; the
+figures there are CPU, ROCm and Vulkan.
 
 ## Quick start (docker, CUDA)
 

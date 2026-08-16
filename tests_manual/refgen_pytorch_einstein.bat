@@ -8,7 +8,7 @@ rem   our dual-grid extractor, then the generations/ record.
 rem
 rem   Pass --resume through as the first argument to skip straight to the
 rem   decode using the checkpoint the last attempt left behind:
-rem       refgen_einstein.bat --resume
+rem       refgen_pytorch_einstein.bat --resume
 rem
 rem   Every step pauses on failure, so the error stays readable instead of
 rem   scrolling away behind the two commands that used to run after it.
@@ -22,12 +22,12 @@ uv run --extra rocm python scripts/ref_generate.py ^
     %EXTRA%
 if errorlevel 1 (
   echo.
-  echo Schritt 1 fehlgeschlagen ^(exit %ERRORLEVEL%^) - siehe Ausgabe oben.
-  echo Haeufigste Ursache ist der Decode-Schritt am Ende: der expandiert auf
-  echo ~3,8 Mio. Voxel und ist der einzige Speicherfresser im Lauf.
-  echo Der Checkpoint nach dem Sampler liegt in
+  echo Step 1 failed ^(exit %ERRORLEVEL%^) - see the output above.
+  echo The usual cause is the decode at the end: it expands to roughly 3.8M
+  echo voxels and is the only memory-hungry step in the run.
+  echo The checkpoint taken after the sampler is in
   echo   dumps\einstein_ref1024.state.npz
-  echo Ein erneuter Versuch nur des Decodes:  refgen_einstein.bat --resume
+  echo To retry just the decode:  refgen_pytorch_einstein.bat --resume
   pause
   exit /b 1
 )
@@ -37,7 +37,7 @@ echo [2/3] dual-grid extraction
 build\bin\Release\dual_grid_cli.exe dumps\einstein_ref1024.fdgvox dumps\einstein_ref1024.t2mesh
 if errorlevel 1 (
   echo.
-  echo Schritt 2 fehlgeschlagen ^(exit %ERRORLEVEL%^).
+  echo Step 2 failed ^(exit %ERRORLEVEL%^).
   pause
   exit /b 1
 )
@@ -49,12 +49,12 @@ uv run --extra rocm python scripts/ref_publish_generation.py ^
     --info dumps/einstein_ref1024.json --force
 if errorlevel 1 (
   echo.
-  echo Schritt 3 fehlgeschlagen ^(exit %ERRORLEVEL%^).
+  echo Step 3 failed ^(exit %ERRORLEVEL%^).
   pause
   exit /b 1
 )
 
 echo.
-echo Fertig. Im Viewer die Seite neu laden, die Kachel heisst "1024 . PyTorch".
+echo Done. Reload the page in the viewer; the tile reads "1024 . PyTorch".
 pause
 endlocal

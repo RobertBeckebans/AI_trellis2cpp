@@ -2,6 +2,10 @@
 /build/
 /build-*/
 
+# a vcpkg clone in the project root is one of the locations the Windows
+# configure scripts look in, so it must not show up as untracked
+/vcpkg/
+
 # scratch / generated artifacts (meshes, latents, occupancy grids)
 /tmp/
 *.o

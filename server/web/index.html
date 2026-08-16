@@ -221,14 +221,19 @@
       <small>transparent, black, and white backgrounds supported</small></span>
     </div>
     <input id="file" type="file" accept="image/*" hidden>
-    <!-- Only meaningful when the library carries more than one GPU backend
-         (cmake-ninja-win64-rocm.bat builds HIP and Vulkan together). Switching
-         unloads the models; the next generation reloads on the chosen one, so
-         it is refused while one is running. -->
+    <!-- The list is static because it names what the library CAN be built with,
+         not what this build has: cmake-ninja-win64-rocm.bat carries HIP and
+         Vulkan, cmake-ninja-win64-cuda.bat CUDA and Vulkan. Picking one the
+         build does not contain falls back to the CPU and says so on stderr,
+         which is deliberate - silently using the other GPU would make a
+         backend comparison meaningless. Switching unloads the models; the next
+         generation reloads on the chosen one, so it is refused while one is
+         running. -->
     <div>
       <label for="device">compute backend</label>
       <select id="device" title="which backend the next generation loads on; switching unloads the models" style="width:100%;background:var(--bg);color:var(--text);border:1px solid var(--edge);border-radius:6px;padding:6px 8px">
         <option value="auto">auto (first GPU)</option>
+        <option value="cuda">CUDA</option>
         <option value="rocm">ROCm / HIP</option>
         <option value="vulkan">Vulkan</option>
         <option value="cpu">CPU</option>

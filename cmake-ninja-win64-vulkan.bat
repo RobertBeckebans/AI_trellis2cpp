@@ -13,12 +13,12 @@ rem   The compiler still comes from ROCm — it is a plain clang for host code
 rem   and saves needing a VS developer prompt.
 
 if not defined VULKAN_SDK (
-  echo VULKAN_SDK ist nicht gesetzt - Vulkan SDK installieren oder Shell neu oeffnen.
+  echo VULKAN_SDK is not set - install the Vulkan SDK, or open a new shell.
   pause
   exit /b 1
 )
 
-rem glslc greifbar machen, falls der SDK-Installer den PATH nicht gesetzt hat
+rem Make glslc reachable in case the SDK installer did not put it on PATH.
 set PATH=%VULKAN_SDK%\Bin;%PATH%
 
 rem CMAKE_RUNTIME_OUTPUT_DIRECTORY must be absolute (relative paths get
@@ -45,7 +45,7 @@ cmake -B build ^
   .
 
 if errorlevel 1 (
-  echo CMake-Konfiguration fehlgeschlagen.
+  echo CMake configure failed.
   pause
   exit /b 1
 )
@@ -53,15 +53,15 @@ if errorlevel 1 (
 cmake --build build --config Release
 
 if errorlevel 1 (
-  echo Build fehlgeschlagen.
+  echo Build failed.
   pause
   exit /b 1
 )
 
 echo.
-echo Fertig: build\bin\Release\trellis2.dll  (+ ggml.dll, ggml-base.dll, ggml-cpu.dll, ggml-vulkan.dll)
+echo Done: build\bin\Release\trellis2.dll  (+ ggml.dll, ggml-base.dll, ggml-cpu.dll, ggml-vulkan.dll)
 echo.
-echo Starten aus server\:
+echo Start from server\:
 echo   trellis2-server.exe -lib ..\build\bin\Release\trellis2.dll
 pause
 endlocal
