@@ -89,10 +89,7 @@ enum t2_caps { T2_CAP_COARSE = 1, T2_CAP_512 = 2, T2_CAP_1024 = 4, T2_CAP_TEXTUR
 ** importer connects baseColorTexture's alpha into the shader only for
 ** BLEND/MASK, so this is what stops that link appearing; the texture is
 ** untouched either way. */
-enum t2_export_flags {
-	T2_EXPORT_BASE_COLOR_ONLY = 1,
-	T2_EXPORT_OPAQUE		  = 2
-};
+enum t2_export_flags { T2_EXPORT_BASE_COLOR_ONLY = 1, T2_EXPORT_OPAQUE = 2 };
 
 /* Options for both GLB bakes, passed by pointer rather than as flat arguments:
 ** the lists had reached the 15-argument ceiling the Go host's FFI enforces, so

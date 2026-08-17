@@ -342,8 +342,8 @@ namespace
 		const uint32_t bv_bc  = view( basecolor_png.data(), basecolor_png.size(), 0 );
 		// Skipped entirely under base_color_only — the point of that option is a
 		// smaller file, which a referenced-by-nobody buffer view would defeat.
-		const uint32_t bv_mr  = metalrough_png.empty() ? 0u : view( metalrough_png.data(), metalrough_png.size(), 0 );
-		const uint32_t bv_nm  = has_normal ? view( normal_png.data(), normal_png.size(), 0 ) : 0u;
+		const uint32_t bv_mr = metalrough_png.empty() ? 0u : view( metalrough_png.data(), metalrough_png.size(), 0 );
+		const uint32_t bv_nm = has_normal ? view( normal_png.data(), normal_png.size(), 0 ) : 0u;
 		pad4( bin, 0 );
 
 		float pmin[3] = { 1e30f, 1e30f, 1e30f }, pmax[3] = { -1e30f, -1e30f, -1e30f };
@@ -373,9 +373,9 @@ namespace
 		// Texture indices are positional, so dropping the metallic/roughness map
 		// shifts the normal map down one. Derive them rather than hard-coding, or
 		// base_color_only silently points normalTexture at the wrong image.
-		const bool	   want_mr	= !metalrough_png.empty();
-		const uint32_t tex_nm	= want_mr ? 2u : 1u;
-		const uint32_t n_tex	= 1u + ( want_mr ? 1u : 0u ) + ( has_normal ? 1u : 0u );
+		const bool	   want_mr = !metalrough_png.empty();
+		const uint32_t tex_nm  = want_mr ? 2u : 1u;
+		const uint32_t n_tex   = 1u + ( want_mr ? 1u : 0u ) + ( has_normal ? 1u : 0u );
 
 		j += "\"materials\":[{\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0}";
 		if( want_mr )
@@ -557,7 +557,9 @@ namespace
 		j += "\"scene\":0,\"scenes\":[{\"nodes\":[0]}],";
 		j += node_json( opt.unit_scale );
 		j += "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"NORMAL\":1,\"COLOR_0\":2,\"_METALLIC_ROUGHNESS\":3},\"indices\":4,\"material\":0}]}],";
-		std::snprintf( buf, sizeof buf, "\"materials\":[{\"pbrMetallicRoughness\":{\"baseColorFactor\":[1,1,1,1],\"metallicFactor\":%.8g,\"roughnessFactor\":%.8g},",
+		std::snprintf( buf,
+			sizeof buf,
+			"\"materials\":[{\"pbrMetallicRoughness\":{\"baseColorFactor\":[1,1,1,1],\"metallicFactor\":%.8g,\"roughnessFactor\":%.8g},",
 			opt.base_color_only ? 0.0f : metallic,
 			opt.base_color_only ? 1.0f : roughness );
 		j += buf;

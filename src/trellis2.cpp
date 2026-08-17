@@ -558,6 +558,13 @@ namespace
 // of failing to allocate — the failure mode that made flash unconditional. That
 // check makes the choice depend on machine state, so it says so when it fires;
 // TRELLIS2_SDPA_EXACT / TRELLIS2_SDPA_FLASH pin one path for reproducibility.
+//
+// The exact path builds its score matrix in blocks of query rows
+// (TRELLIS2_SDPA_BLOCK_MB, default 1 GiB), so its peak memory no longer scales
+// with the token count and TRELLIS2_SDPA_EXACT is usable at HR sizes. What the
+// blocking does not bound is time: the arithmetic is unchanged, so whether
+// exact is affordable at 23k tokens is a measurement nobody has taken yet. The
+// gate above is therefore left where it is.
 ggml_tensor* sdpa_auto( ggml_context* ctx, ggml_tensor* q3, ggml_tensor* k3, ggml_tensor* v3, int C, float scale )
 {
 	ggml_tensor*		qp = ggml_cont( ctx, ggml_permute( ctx, q3, 0, 2, 1, 3 ) ); // [hd, Lq, H]
@@ -570,6 +577,17 @@ ggml_tensor* sdpa_auto( ggml_context* ctx, ggml_tensor* q3, ggml_tensor* k3, ggm
 		  if( const char* env = std::getenv( "TRELLIS2_SDPA_EXACT_MAX_MB" ) )
 			  return ( size_t )std::strtoull( env, nullptr, 10 ) * 1024u * 1024u;
 		  return ( size_t )1024u * 1024u * 1024u; // 1 GiB, the pre-flash gate
+	}();
+	// The largest score matrix built in ONE piece. Separate from the cap above,
+	// which decides *whether* exact runs; this decides *how* it is assembled, and
+	// the two answer different questions. Sizing them together is a footgun: a cap
+	// raised to let a big score through then asks for that score in one
+	// allocation, which is how a 26 GB matrix ended up paging to host memory and
+	// running 20x slower than flash instead of merely slower.
+	static const size_t block_cap = []() -> size_t {
+		if( const char* env = std::getenv( "TRELLIS2_SDPA_BLOCK_MB" ) )
+			return ( size_t )std::strtoull( env, nullptr, 10 ) * 1024u * 1024u;
+		return ( size_t )1024u * 1024u * 1024u; // 1 GiB
 	}();
 
 	// [L_k, L_q, heads] f32, plus the softmax result the graph holds alongside it.
@@ -597,12 +615,51 @@ ggml_tensor* sdpa_auto( ggml_context* ctx, ggml_tensor* q3, ggml_tensor* k3, ggm
 		ggml_flash_attn_ext_set_prec( o, GGML_PREC_F32 );
 		return ggml_reshape_2d( ctx, o, C, o->ne[2] ); // [C, Lq]
 	}
-	ggml_tensor* sc = ggml_mul_mat( ctx, kp, qp ); // [Lk, Lq, H]
-	sc				= ggml_soft_max_ext( ctx, sc, nullptr, scale, 0.0f );
-	ggml_tensor* vt = ggml_cont( ctx, ggml_permute( ctx, vp, 1, 0, 2, 3 ) ); // [Lk, hd, H]
-	ggml_tensor* o	= ggml_mul_mat( ctx, vt, sc );							 // [hd, Lq, H]
-	o				= ggml_cont( ctx, ggml_permute( ctx, o, 0, 2, 1, 3 ) );	 // [hd, H, Lq]
-	return ggml_reshape_2d( ctx, o, C, o->ne[2] );							 // [C, Lq]
+	// Exact attention, with the score matrix built in blocks of query rows.
+	//
+	// Splitting the QUERY axis is exact and needs no correction term: soft_max
+	// runs along the key axis, so every query row is independent of every other.
+	// Only a split along KEYS would need flash's online rescaling, which is the
+	// whole of flash's complexity and none of it is required here. Peak score
+	// memory becomes Lk*B*H*4 instead of Lk*Lq*H*4.
+	//
+	// That is what puts the exact path within reach at HR token counts at all.
+	// The 1024 cascade's 23,358 tokens want 26 GB in one piece, which does not
+	// fit beside the model on a 32 GB card, so it paged and cost 585 s per step
+	// against flash's 28.9 s — an unusable "working" path. In 1 GiB blocks the
+	// same arithmetic never leaves VRAM.
+	//
+	// A score that already fit block_cap takes a single block and builds the
+	// same graph as before, so nothing that ran exact until now changes.
+	ggml_tensor*  vt	 = ggml_cont( ctx, ggml_permute( ctx, vp, 1, 0, 2, 3 ) ); // [Lk, hd, H]
+	const int64_t Lq	 = qp->ne[1];
+	const int64_t Hn	 = qp->ne[2];
+	const size_t  row_sz = ( size_t )kp->ne[1] * ( size_t )Hn * sizeof( float ); // one query row of scores
+	int64_t		  block	 = row_sz ? ( int64_t )( block_cap / row_sz ) : Lq;
+	block				 = block < 1 ? 1 : ( block > Lq ? Lq : block );
+	// Each block costs ~5 graph nodes and the flow graphs are built with a fixed
+	// budget of 32768 (see the ggml_init_params above them), which the blocking
+	// knows nothing about. Left unbounded, a small TRELLIS2_SDPA_BLOCK_MB does not
+	// degrade — it aborts in ggml_new_object, which is a poor answer to a knob set
+	// too low. 64 blocks is far above what any real configuration asks for (the
+	// 1024 cascade wants 25 at the 1 GiB default), so this only ever fires on a
+	// pathological setting, and then it grows the block instead of failing.
+	const int64_t max_blocks = 64;
+	if( ( Lq + block - 1 ) / block > max_blocks )
+		block = ( Lq + max_blocks - 1 ) / max_blocks;
+
+	ggml_tensor* o = nullptr;
+	for( int64_t q0 = 0; q0 < Lq; q0 += block ) {
+		const int64_t nrows = ( Lq - q0 ) < block ? ( Lq - q0 ) : block;
+		// The full-length case must stay the identical graph, so no view/copy.
+		ggml_tensor*  qb = nrows == Lq ? qp : ggml_cont( ctx, ggml_view_3d( ctx, qp, qp->ne[0], nrows, Hn, qp->nb[1], qp->nb[2], ( size_t )q0 * qp->nb[1] ) );
+		ggml_tensor*  sc = ggml_mul_mat( ctx, kp, qb ); // [Lk, nrows, H]
+		sc				 = ggml_soft_max_ext( ctx, sc, nullptr, scale, 0.0f );
+		ggml_tensor* ob	 = ggml_mul_mat( ctx, vt, sc );			  // [hd, nrows, H]
+		o				 = o ? ggml_concat( ctx, o, ob, 1 ) : ob; // along Lq
+	}
+	o = ggml_cont( ctx, ggml_permute( ctx, o, 0, 2, 1, 3 ) ); // [hd, H, Lq]
+	return ggml_reshape_2d( ctx, o, C, o->ne[2] );			  // [C, Lq]
 }
 
 // Sinusoidal timestep embedding (cos|sin), matching TimestepEmbedder.
@@ -3017,6 +3074,11 @@ std::string trellis2_effective_config()
 		exact_cap_mb = ( size_t )std::strtoull( env, nullptr, 10 );
 	add( "sdpa_exact_max_mb", std::to_string( exact_cap_mb ) );
 
+	size_t block_cap_mb = 1024;
+	if( const char* env = std::getenv( "TRELLIS2_SDPA_BLOCK_MB" ) )
+		block_cap_mb = ( size_t )std::strtoull( env, nullptr, 10 );
+	add( "sdpa_block_mb", std::to_string( block_cap_mb ) );
+
 	add( "chunking", chunking_disabled() ? "off" : "on" );
 	add( "chunk_rows", std::to_string( ( long long )chunk_rows_limit() ) );
 	add( "enc_chunk_rows", std::to_string( ( long long )enc_chunk_gate() ) );
@@ -3943,11 +4005,7 @@ static bool shape_dec_run( trellis2_shape_dec_model* m,
 			// figure is the cheapest tell that a level's neighbour map is wrong:
 			// too few taps scales the output down without changing its shape.
 			if( t2_timing )
-				std::fprintf( stderr, "[shape_dec] level %d: %zu of %lld neighbour slots present (%.2f of 27 per voxel)\n",
-					lvl,
-					n_present,
-					( long long )L * 27,
-					( double )n_present / ( double )L );
+				std::fprintf( stderr, "[shape_dec] level %d: %zu of %lld neighbour slots present (%.2f of 27 per voxel)\n", lvl, n_present, ( long long )L * 27, ( double )n_present / ( double )L );
 		}
 		if( lvl == 0 ) {
 			ggml_backend_tensor_set( in_a, slat, 0, ( size_t )hp.latent_channels * L * es );
