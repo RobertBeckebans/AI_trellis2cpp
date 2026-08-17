@@ -25,6 +25,19 @@ namespace t2glb
 namespace
 {
 
+	// The scene's single node, carrying the unit conversion as a node transform
+	// rather than in the vertex data. That keeps the mesh canonical at 1 unit =
+	// 1 metre — importers that honour node transforms (Blender, engines) apply
+	// the factor, and anything reading the accessors directly still sees metres.
+	std::string node_json( float unit_scale )
+	{
+		if( !( unit_scale > 0.0f ) || unit_scale == 1.0f )
+			return "\"nodes\":[{\"mesh\":0}],";
+		char buf[128];
+		std::snprintf( buf, sizeof buf, "\"nodes\":[{\"mesh\":0,\"scale\":[%.8g,%.8g,%.8g]}],", unit_scale, unit_scale, unit_scale );
+		return buf;
+	}
+
 	// Stage logging to stderr, opt-in via T2GLB_VERBOSE (keeps the library quiet by
 	// default while giving the CLI / debugging a progress trace).
 	bool verbose()
@@ -295,6 +308,7 @@ namespace
 		const std::vector<uint8_t>&			  metalrough_png,
 		const std::vector<uint8_t>&			  normal_png,
 		bool								  transparent,
+		const MeshExportOptions&			  opt,
 		std::vector<uint8_t>&				  out )
 	{
 		const uint32_t		 nv			 = ( uint32_t )( pos.size() / 3 );
@@ -326,7 +340,9 @@ namespace
 		const uint32_t bv_tan = has_tangent ? view( tan.data(), tan.size() * 4, 34962 ) : 0u;
 		const uint32_t bv_idx = view( idx.data(), idx.size() * 4, 34963 );
 		const uint32_t bv_bc  = view( basecolor_png.data(), basecolor_png.size(), 0 );
-		const uint32_t bv_mr  = view( metalrough_png.data(), metalrough_png.size(), 0 );
+		// Skipped entirely under base_color_only — the point of that option is a
+		// smaller file, which a referenced-by-nobody buffer view would defeat.
+		const uint32_t bv_mr  = metalrough_png.empty() ? 0u : view( metalrough_png.data(), metalrough_png.size(), 0 );
 		const uint32_t bv_nm  = has_normal ? view( normal_png.data(), normal_png.size(), 0 ) : 0u;
 		pad4( bin, 0 );
 
@@ -344,7 +360,8 @@ namespace
 
 		char		   buf[2048];
 		std::string	   j = "{\"asset\":{\"version\":\"2.0\",\"generator\":\"trellis2cpp\"},";
-		j += "\"scene\":0,\"scenes\":[{\"nodes\":[0]}],\"nodes\":[{\"mesh\":0}],";
+		j += "\"scene\":0,\"scenes\":[{\"nodes\":[0]}],";
+		j += node_json( opt.unit_scale );
 		snprintf( buf, sizeof buf, "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":%u,\"NORMAL\":%u,\"TEXCOORD_0\":%u", ac_pos, ac_nrm, ac_uv );
 		j += buf;
 		if( has_tangent ) {
@@ -353,16 +370,39 @@ namespace
 		}
 		snprintf( buf, sizeof buf, "},\"indices\":%u,\"material\":0}]}],", ac_idx );
 		j += buf;
-		j += "\"materials\":[{\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0},\"metallicRoughnessTexture\":{\"index\":1},\"metallicFactor\":1.0,\"roughnessFactor\":1.0},";
-		if( has_normal )
-			j += "\"normalTexture\":{\"index\":2,\"scale\":1.0},";
-		if( transparent )
+		// Texture indices are positional, so dropping the metallic/roughness map
+		// shifts the normal map down one. Derive them rather than hard-coding, or
+		// base_color_only silently points normalTexture at the wrong image.
+		const bool	   want_mr	= !metalrough_png.empty();
+		const uint32_t tex_nm	= want_mr ? 2u : 1u;
+		const uint32_t n_tex	= 1u + ( want_mr ? 1u : 0u ) + ( has_normal ? 1u : 0u );
+
+		j += "\"materials\":[{\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":0}";
+		if( want_mr )
+			j += ",\"metallicRoughnessTexture\":{\"index\":1},\"metallicFactor\":1.0,\"roughnessFactor\":1.0},";
+		else
+			// A plain diffuse surface: no metal, fully rough, so a renderer that
+			// reads the factors gets the albedo unmodulated.
+			j += ",\"metallicFactor\":0.0,\"roughnessFactor\":1.0},";
+		if( has_normal ) {
+			snprintf( buf, sizeof buf, "\"normalTexture\":{\"index\":%u,\"scale\":1.0},", tex_nm );
+			j += buf;
+		}
+		if( transparent && !opt.opaque )
 			j += "\"alphaMode\":\"BLEND\",";
 		j += "\"doubleSided\":true}],";
-		j += has_normal ? "\"textures\":[{\"source\":0,\"sampler\":0},{\"source\":1,\"sampler\":0},{\"source\":2,\"sampler\":0}]," :
-						  "\"textures\":[{\"source\":0,\"sampler\":0},{\"source\":1,\"sampler\":0}],";
-		snprintf( buf, sizeof buf, "\"images\":[{\"bufferView\":%u,\"mimeType\":\"image/png\"},{\"bufferView\":%u,\"mimeType\":\"image/png\"}", bv_bc, bv_mr );
+		j += "\"textures\":[";
+		for( uint32_t t = 0; t < n_tex; ++t ) {
+			snprintf( buf, sizeof buf, "%s{\"source\":%u,\"sampler\":0}", t ? "," : "", t );
+			j += buf;
+		}
+		j += "],";
+		snprintf( buf, sizeof buf, "\"images\":[{\"bufferView\":%u,\"mimeType\":\"image/png\"}", bv_bc );
 		j += buf;
+		if( want_mr ) {
+			snprintf( buf, sizeof buf, ",{\"bufferView\":%u,\"mimeType\":\"image/png\"}", bv_mr );
+			j += buf;
+		}
 		if( has_normal ) {
 			snprintf( buf, sizeof buf, ",{\"bufferView\":%u,\"mimeType\":\"image/png\"}", bv_nm );
 			j += buf;
@@ -422,7 +462,7 @@ namespace
 	// 2D atlas. Metallic/roughness have no standard per-vertex glTF semantics, so
 	// their averages drive the standard material while the original quantised
 	// values are retained in the application attribute _METALLIC_ROUGHNESS.
-	void write_vertex_glb( const PreparedMesh& mesh, std::vector<uint8_t>& out )
+	void write_vertex_glb( const PreparedMesh& mesh, const MeshExportOptions& opt, std::vector<uint8_t>& out )
 	{
 		const uint32_t nv		= ( uint32_t )( mesh.verts.size() / 3 );
 		const uint32_t ni		= ( uint32_t )mesh.tris.size();
@@ -514,11 +554,14 @@ namespace
 
 		char		buf[3072];
 		std::string j = "{\"asset\":{\"version\":\"2.0\",\"generator\":\"trellis2cpp\"},";
-		j += "\"scene\":0,\"scenes\":[{\"nodes\":[0]}],\"nodes\":[{\"mesh\":0}],";
+		j += "\"scene\":0,\"scenes\":[{\"nodes\":[0]}],";
+		j += node_json( opt.unit_scale );
 		j += "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"NORMAL\":1,\"COLOR_0\":2,\"_METALLIC_ROUGHNESS\":3},\"indices\":4,\"material\":0}]}],";
-		std::snprintf( buf, sizeof buf, "\"materials\":[{\"pbrMetallicRoughness\":{\"baseColorFactor\":[1,1,1,1],\"metallicFactor\":%.8g,\"roughnessFactor\":%.8g},", metallic, roughness );
+		std::snprintf( buf, sizeof buf, "\"materials\":[{\"pbrMetallicRoughness\":{\"baseColorFactor\":[1,1,1,1],\"metallicFactor\":%.8g,\"roughnessFactor\":%.8g},",
+			opt.base_color_only ? 0.0f : metallic,
+			opt.base_color_only ? 1.0f : roughness );
 		j += buf;
-		if( transparent )
+		if( transparent && !opt.opaque )
 			j += "\"alphaMode\":\"BLEND\",";
 		j += "\"doubleSided\":true}],";
 		std::snprintf( buf,
@@ -1117,7 +1160,13 @@ namespace
 		g_bake_timings.texel_fill = stage_elapsed();
 		GLBLOG( "texel fill done in %.2f s; inpaint + PNG encode ...", g_bake_timings.texel_fill );
 		std::vector<uint8_t> bc_png, mr_png, nm_png;
-		if( !encode_png( AW, AH, 4, bc8.data(), bc_png ) || !encode_png( AW, AH, 3, mr8.data(), mr_png ) ) {
+		if( !encode_png( AW, AH, 4, bc8.data(), bc_png ) ) {
+			err = "PNG encode failed";
+			return false;
+		}
+		// Left empty under base_color_only, which is what write_glb keys the
+		// omitted texture/image/bufferView off.
+		if( !opt.base_color_only && !encode_png( AW, AH, 3, mr8.data(), mr_png ) ) {
 			err = "PNG encode failed";
 			return false;
 		}
@@ -1154,7 +1203,7 @@ namespace
 				gtan[4 * i + 3] = otan[4 * i + 3] < 0.0f ? -1.0f : 1.0f;
 			}
 		}
-		write_glb( gpos, gnrm, ggu, gtan, oidx, bc_png, mr_png, nm_png, transparent, out );
+		write_glb( gpos, gnrm, ggu, gtan, oidx, bc_png, mr_png, nm_png, transparent, opt, out );
 		g_bake_timings.encode = stage_elapsed();
 		GLBLOG( "inpaint + encode done in %.2f s; GLB %zu bytes (%u verts, %u tris; %s PBR atlas%s)",
 			g_bake_timings.encode,
@@ -1362,7 +1411,7 @@ bool mesh_to_glb( const float* verts, int nv, const int32_t* tris, int nt, const
 	// transparent cells and visible rectangular/triangular colour blocks.
 	// Preserve the material field directly on the original vertices instead.
 	if( !use_xatlas ) {
-		write_vertex_glb( prepared, out );
+		write_vertex_glb( prepared, opt, out );
 		GLBLOG( "GLB %zu bytes (%d verts, %d tris; vertex PBR)", out.size(), dnv, dnt );
 		return true;
 	}

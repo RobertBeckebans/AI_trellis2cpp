@@ -295,6 +295,21 @@
         <span>bake normal map (surface detail)</span>
       </label>
       <div id="normalmapstats"></div>
+      <label class="idle-option" for="basecoloronly"
+             title="export the base colour only: no metallic/roughness texture, and the material factors pinned to a plain diffuse surface. For engines that light their own way; takes one full-resolution PNG out of the file. Independent of the normal map above.">
+        <input id="basecoloronly" type="checkbox">
+        <span>base colour only (skip PBR)</span>
+      </label>
+      <label class="idle-option" for="opaqueexport"
+             title="write no alphaMode, leaving glTF's default OPAQUE. Blender connects the base colour's alpha into the shader only for BLEND/MASK, so this is what stops that link appearing. The texture itself is unchanged.">
+        <input id="opaqueexport" type="checkbox">
+        <span>opaque (no alpha link)</span>
+      </label>
+      <label class="idle-option" for="irongauss"
+             title="write a glTF node scale of 32, so 1 metre imports as 32 game units. It rides on the node transform rather than the vertex data, so the mesh stays canonical at 1 unit = 1 metre and this preview is unaffected.">
+        <input id="irongauss" type="checkbox">
+        <span>Irongauss units (1 m = 32)</span>
+      </label>
       <div class="row" id="quadremeshsettings" hidden>
         <div style="flex:1 1 100%">
           <label for="quaddensity" title="density hint, not an exact face count: it feeds a voxel size and the adaptivity setting moves the result away from it">target quads <output id="quaddensityval" style="opacity:.7"></output></label>
@@ -968,6 +983,12 @@ function exportQuery() {
   // map is baked from the dense source onto replacement geometry, so it is
   // meaningless without one of the two replacement stages above.
   if (!$("normalmap").checked) q.set("normalmap", "0");
+  if ($("basecoloronly").checked) q.set("basecoloronly", "1");
+  if ($("opaqueexport").checked) q.set("opaque", "1");
+  // Node-transform only: the viewer's GLB parser reads meshes[0].primitives[0]
+  // and never json.nodes, so the preview stays 1:1 while the download carries
+  // the engine's units.
+  if ($("irongauss").checked) q.set("unitscale", "32");
   return q;
 }
 
@@ -1598,10 +1619,10 @@ const viewer = (() => {
 
   // Parse the fixed-shape glTF 2.0 binary we emit (write_glb): one mesh, one
   // primitive with POSITION/NORMAL/TEXCOORD_0/indices and a metallic-roughness
-  // material with baseColor + metallicRoughness PNG textures. TANGENT and the
-  // normalTexture are optional - the bake omits both when the normal map is
-  // switched off, and older cached GLBs predate them - so both are read
-  // defensively and the renderer falls back to plain geometric normals.
+  // material carrying a baseColor PNG. Everything else is optional and read
+  // defensively: TANGENT + normalTexture are dropped when the normal map is
+  // switched off (and older cached GLBs predate them), and metallicRoughness is
+  // dropped by the base-colour-only export, which writes factors instead.
   function parseGLB(buf) {
     const dv = new DataView(buf);
     if (dv.getUint32(0, true) !== 0x46546C67) throw new Error("not a GLB");
@@ -1638,7 +1659,12 @@ const viewer = (() => {
       uvs:       accessor(prim.attributes.TEXCOORD_0),
       indices:   accessor(prim.indices),
       basePng:   pngOf(srcOf(mat.baseColorTexture.index)),
-      mrPng:     pngOf(srcOf(mat.metallicRoughnessTexture.index)),
+      // Absent under the base-colour-only export, which writes the factors
+      // instead of a map. glTF packs roughness in G and metallic in B, so a 1x1
+      // of the two factors is an exact stand-in for the missing texture.
+      mrPng:     mat.metallicRoughnessTexture ? pngOf(srcOf(mat.metallicRoughnessTexture.index)) : null,
+      metallic:  mat.metallicFactor ?? 1,
+      roughness: mat.roughnessFactor ?? 1,
       tangents:  hasNormalMap ? accessor(prim.attributes.TANGENT) : null,
       normalPng: hasNormalMap ? pngOf(srcOf(material.normalTexture.index)) : null,
       normalScale: hasNormalMap ? (material.normalTexture.scale ?? 1) : 1,
@@ -1674,7 +1700,9 @@ const viewer = (() => {
     const bmpOpts = { imageOrientation: "none", premultiplyAlpha: "none", colorSpaceConversion: "none" };
     const [baseBmp, mrBmp, nrmBmp] = await Promise.all([
       createImageBitmap(new Blob([g.basePng], { type: "image/png" }), bmpOpts),
-      createImageBitmap(new Blob([g.mrPng], { type: "image/png" }), bmpOpts),
+      g.mrPng ? createImageBitmap(new Blob([g.mrPng], { type: "image/png" }), bmpOpts)
+              : new ImageData(new Uint8ClampedArray(
+                  [0, Math.round(g.roughness * 255), Math.round(g.metallic * 255), 255]), 1, 1),
       g.normalPng ? createImageBitmap(new Blob([g.normalPng], { type: "image/png" }), bmpOpts) : null,
     ]);
     if (!texVao) {

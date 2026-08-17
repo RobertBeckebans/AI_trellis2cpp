@@ -18,7 +18,18 @@ import (
 	"github.com/ebitengine/purego"
 )
 
-const abiVersion = 17
+const abiVersion = 18
+
+// glbOptions mirrors struct t2_glb_options field for field (five 4-byte fields,
+// no padding on either side). Passed by pointer, which is what keeps both bake
+// bindings under purego's 15-argument ceiling — the flat lists had reached it.
+type glbOptions struct {
+	TextureSize     int32
+	ComponentFilter int32
+	NormalMap       int32
+	ExportFlags     int32
+	UnitScale       float32
+}
 
 // Progress stages (enum t2_stage).
 const (
@@ -117,10 +128,10 @@ type engine struct {
 		componentFilter int32, alphaRatio, offsetRatio float32,
 		err unsafe.Pointer, errLen int32) uintptr
 	bakeGLB func(verts unsafe.Pointer, nv int32, tris unsafe.Pointer, nt int32, pbr unsafe.Pointer,
-		texSize, componentFilter int32, outLen unsafe.Pointer, err unsafe.Pointer, errLen int32) uintptr
+		opts unsafe.Pointer, outLen unsafe.Pointer, err unsafe.Pointer, errLen int32) uintptr
 	bakeProjectedGLB func(targetVerts unsafe.Pointer, targetNV int32, targetTris unsafe.Pointer, targetNT int32,
 		sourceVerts unsafe.Pointer, sourceNV int32, sourceTris unsafe.Pointer, sourceNT int32,
-		sourcePBR unsafe.Pointer, texSize, sourceComponentFilter, normalMap int32,
+		sourcePBR unsafe.Pointer, opts unsafe.Pointer,
 		outLen unsafe.Pointer, err unsafe.Pointer, errLen int32) uintptr
 	lastNormalMapStats func(coveredTexels, rejectedTexels unsafe.Pointer)
 	freeBuffer         func(buf uintptr)
@@ -594,7 +605,7 @@ func (e *engine) PrepareQuadMesh(m *meshData, componentFilter, targetQuads int, 
 // BakeGLB turns a generated mesh into a portable vertex-coloured GLB. texSize
 // remains an atlas hint for the explicit T2GLB_XATLAS mode. Geometry retains its
 // original polygon density. CPU-only; it can run while the GPU is idle.
-func (e *engine) BakeGLB(m *meshData, texSize, componentFilter int) ([]byte, error) {
+func (e *engine) BakeGLB(m *meshData, texSize, componentFilter int, mat glbMaterial) ([]byte, error) {
 	if m == nil || m.NVerts == 0 || m.NTris == 0 {
 		return nil, fmt.Errorf("empty mesh")
 	}
@@ -602,11 +613,13 @@ func (e *engine) BakeGLB(m *meshData, texSize, componentFilter int) ([]byte, err
 	if len(m.PBR) == 6*m.NVerts {
 		pbr = unsafe.Pointer(&m.PBR[0])
 	}
+	opts := glbOptions{TextureSize: int32(texSize), ComponentFilter: int32(componentFilter),
+		NormalMap: 1, ExportFlags: mat.flags(), UnitScale: mat.UnitScale}
 	var outLen int32
 	errBuf := make([]byte, 512)
 	p := e.bakeGLB(unsafe.Pointer(&m.Verts[0]), int32(m.NVerts),
 		unsafe.Pointer(&m.Tris[0]), int32(m.NTris), pbr,
-		int32(texSize), int32(componentFilter),
+		unsafe.Pointer(&opts),
 		unsafe.Pointer(&outLen), unsafe.Pointer(&errBuf[0]), int32(len(errBuf)))
 	if p == 0 {
 		return nil, fmt.Errorf("%s", cstr(errBuf))
@@ -641,7 +654,7 @@ func (e *engine) LastNormalMapStats() NormalMapStats {
 // normalMap set it additionally bakes a tangent-space normal map and exports
 // the MikkTSpace-compatible TANGENT attribute it was baked against, which is
 // what carries the dense mesh's surface detail onto the replacement geometry.
-func (e *engine) BakeProjectedGLB(target, source *meshData, texSize, sourceComponentFilter int, normalMap bool) ([]byte, error) {
+func (e *engine) BakeProjectedGLB(target, source *meshData, texSize, sourceComponentFilter int, normalMap bool, mat glbMaterial) ([]byte, error) {
 	if target == nil || target.NVerts == 0 || target.NTris == 0 ||
 		source == nil || source.NVerts == 0 || source.NTris == 0 || len(source.PBR) != 6*source.NVerts {
 		return nil, fmt.Errorf("empty projected GLB mesh or missing source PBR")
@@ -657,13 +670,15 @@ func (e *engine) BakeProjectedGLB(target, source *meshData, texSize, sourceCompo
 	if normalMap {
 		normalMapFlag = 1
 	}
+	opts := glbOptions{TextureSize: int32(texSize), ComponentFilter: int32(sourceComponentFilter),
+		NormalMap: normalMapFlag, ExportFlags: mat.flags(), UnitScale: mat.UnitScale}
 	errBuf := make([]byte, 512)
 	p := e.bakeProjectedGLB(
 		unsafe.Pointer(&target.Verts[0]), int32(target.NVerts),
 		unsafe.Pointer(&target.Tris[0]), int32(target.NTris),
 		unsafe.Pointer(&source.Verts[0]), int32(source.NVerts),
 		unsafe.Pointer(&source.Tris[0]), int32(source.NTris),
-		unsafe.Pointer(&source.PBR[0]), int32(texSize), int32(sourceComponentFilter), normalMapFlag,
+		unsafe.Pointer(&source.PBR[0]), unsafe.Pointer(&opts),
 		unsafe.Pointer(&outLen), unsafe.Pointer(&errBuf[0]), int32(len(errBuf)))
 	if p == 0 {
 		return nil, fmt.Errorf("%s", cstr(errBuf))

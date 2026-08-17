@@ -1372,6 +1372,29 @@ t2_mesh_result* t2_prepare_print_mesh(
 	return r;
 }
 
+// Shared by both bakes so the two cannot drift. A non-positive unit_scale means
+// "unset" rather than "degenerate": hosts that predate the argument pass 0.
+// Shared by both bakes so the two cannot drift. A NULL `opts` means every
+// default; a non-positive texture_size / unit_scale means "unset" rather than
+// "degenerate", so a partially filled struct still behaves.
+static bool apply_glb_options( t2glb::MeshExportOptions& opt, const t2_glb_options* o, char* err, int err_len )
+{
+	if( !o )
+		return true;
+	if( o->texture_size > 0 )
+		opt.texture_size = o->texture_size;
+	if( o->component_filter < 0 || o->component_filter > 2 ) {
+		copy_err( err, err_len, "bad component filter" );
+		return false;
+	}
+	opt.components		= ( t2glb::ComponentFilter )o->component_filter;
+	opt.normal_map		= o->normal_map != 0;
+	opt.base_color_only = ( o->export_flags & T2_EXPORT_BASE_COLOR_ONLY ) != 0;
+	opt.opaque			= ( o->export_flags & T2_EXPORT_OPAQUE ) != 0;
+	opt.unit_scale		= o->unit_scale > 0.0f ? o->unit_scale : 1.0f;
+	return true;
+}
+
 const char* t2_projection_backend()
 {
 	return t2print::projection_backend();
@@ -1463,7 +1486,7 @@ void t2_quad_mesh_stats( const t2_mesh_result* r, int* out_quads, int* out_trian
 		*out_area_retained = ok ? r->quad_stats.area_retained : 0.0f;
 }
 
-uint8_t* t2_bake_glb( const float* verts, int n_verts, const int* tris, int n_tris, const float* pbr, int texture_size, int component_filter, int* out_len, char* err, int err_len )
+uint8_t* t2_bake_glb( const float* verts, int n_verts, const int* tris, int n_tris, const float* pbr, const t2_glb_options* opts, int* out_len, char* err, int err_len )
 {
 	if( out_len )
 		*out_len = 0;
@@ -1472,13 +1495,8 @@ uint8_t* t2_bake_glb( const float* verts, int n_verts, const int* tris, int n_tr
 		return nullptr;
 	}
 	t2glb::MeshExportOptions opt;
-	if( texture_size > 0 )
-		opt.texture_size = texture_size;
-	if( component_filter < 0 || component_filter > 2 ) {
-		copy_err( err, err_len, "bad component filter" );
+	if( !apply_glb_options( opt, opts, err, err_len ) )
 		return nullptr;
-	}
-	opt.components = ( t2glb::ComponentFilter )component_filter;
 	std::vector<uint8_t> glb;
 	std::string			 e;
 	if( !t2glb::mesh_to_glb( verts, n_verts, tris, n_tris, pbr, opt, glb, e ) ) {
@@ -1505,9 +1523,7 @@ uint8_t* t2_bake_projected_glb( const float* target_verts,
 	const int*								 source_tris,
 	int										 source_n_tris,
 	const float*							 source_pbr,
-	int										 texture_size,
-	int										 source_component_filter,
-	int										 normal_map,
+	const t2_glb_options*					 opts,
 	int*									 out_len,
 	char*									 err,
 	int										 err_len )
@@ -1518,15 +1534,9 @@ uint8_t* t2_bake_projected_glb( const float* target_verts,
 		copy_err( err, err_len, "empty projected GLB mesh" );
 		return nullptr;
 	}
-	if( source_component_filter < 0 || source_component_filter > 2 ) {
-		copy_err( err, err_len, "bad component filter" );
-		return nullptr;
-	}
 	t2glb::MeshExportOptions opt;
-	if( texture_size > 0 )
-		opt.texture_size = texture_size;
-	opt.components = ( t2glb::ComponentFilter )source_component_filter;
-	opt.normal_map = normal_map != 0;
+	if( !apply_glb_options( opt, opts, err, err_len ) )
+		return nullptr;
 	std::vector<uint8_t> glb;
 	std::string			 e;
 	if( !t2glb::mesh_to_projected_glb(

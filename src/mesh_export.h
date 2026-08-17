@@ -41,6 +41,21 @@ struct MeshExportOptions {
 	// atlas bake ignores it, since target and source are the same mesh there and
 	// the map would be flat by construction. Disable with T2GLB_NO_NORMALMAP.
 	bool			normal_map = true;
+	// Base colour only: drop the metallic/roughness texture and pin the factors
+	// to a plain diffuse material. For engines that light their own way and only
+	// want the albedo — it also takes one full-resolution PNG out of the GLB.
+	// Independent of normal_map, which keeps its own switch.
+	bool			base_color_only = false;
+	// Write no alphaMode, so the material stays glTF's default OPAQUE. Blender's
+	// importer wires baseColorTexture's alpha into the shader only for
+	// BLEND/MASK, so this is what stops the link appearing; the texture itself is
+	// untouched.
+	bool			opaque = false;
+	// Uniform scale written as the glTF node's transform, not baked into the
+	// vertex data — so the mesh stays canonical at 1 unit = 1 metre and only
+	// importers that honour node transforms see the conversion. Engines with
+	// their own unit convention set it (Irongauss: 32 units per metre).
+	float			unit_scale = 1.0f;
 };
 
 // Sub-stage durations of the last bake, in seconds. The bake is the single

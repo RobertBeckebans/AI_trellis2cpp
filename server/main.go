@@ -939,6 +939,37 @@ func writeMeshBinary(w io.Writer, mesh *meshData) error {
 	return binary.Write(w, binary.LittleEndian, mesh.Tris)
 }
 
+// glbMaterial carries the export-time material/unit choices through to the
+// bake. They change only what the glTF says, never the geometry — which is why
+// they are not part of prepareKey(): a prepared mesh is reusable across them.
+type glbMaterial struct {
+	BaseColorOnly bool
+	Opaque        bool
+	UnitScale     float32
+}
+
+// Mirrors enum t2_export_flags.
+const (
+	exportBaseColorOnly = 1
+	exportOpaque        = 2
+)
+
+func (m glbMaterial) flags() int32 {
+	var f int32
+	if m.BaseColorOnly {
+		f |= exportBaseColorOnly
+	}
+	if m.Opaque {
+		f |= exportOpaque
+	}
+	return f
+}
+
+// Part of the GLB cache key, since two bakes of one prepared mesh differ here.
+func (m glbMaterial) key() string {
+	return fmt.Sprintf("%t-%t-%g", m.BaseColorOnly, m.Opaque, m.UnitScale)
+}
+
 type exportOptions struct {
 	textureSize     int
 	componentFilter int
@@ -949,6 +980,7 @@ type exportOptions struct {
 	targetQuads     int
 	quadAdaptivity  float32
 	normalMap       bool
+	material        glbMaterial
 }
 
 func parseExportOptions(r *http.Request) exportOptions {
@@ -960,6 +992,7 @@ func parseExportOptions(r *http.Request) exportOptions {
 		targetQuads:     20000,      // density hint for the quad remesher, not a face count
 		quadAdaptivity:  1,          // curvature-adaptive density
 		normalMap:       true,       // transfer the dense mesh's detail, not just its material
+		material:        glbMaterial{UnitScale: 1},
 	}
 	if n := int(formUint(r, "tex", uint64(o.textureSize))); n >= 256 && n <= 4096 {
 		o.textureSize = n
@@ -976,6 +1009,13 @@ func parseExportOptions(r *http.Request) exportOptions {
 	// explicit "0"/"false" switches it off.
 	if v := r.FormValue("normalmap"); v != "" {
 		o.normalMap = v != "0" && v != "false"
+	}
+	o.material.BaseColorOnly = r.FormValue("basecoloronly") == "1" || r.FormValue("basecoloronly") == "true"
+	o.material.Opaque = r.FormValue("opaque") == "1" || r.FormValue("opaque") == "true"
+	// Engine unit conversion, written as the glTF node's scale. Bounded so a
+	// typo cannot produce a degenerate or astronomically scaled node.
+	if u := formFloat(r, "unitscale", o.material.UnitScale); u >= 0.0001 && u <= 10000 {
+		o.material.UnitScale = u
 	}
 	if n := int(formFloat(r, "quads", float32(o.targetQuads))); n >= 100 && n <= 500000 {
 		o.targetQuads = n
@@ -1011,6 +1051,9 @@ func (o exportOptions) glbKey() string {
 	if (o.printWrap || o.quadRemesh) && !o.normalMap {
 		key += "-nonormalmap"
 	}
+	// Same reasoning as the normal map: material and unit choices change the
+	// written glTF but not the prepared geometry.
+	key += "-" + o.material.key()
 	return key
 }
 
@@ -1211,7 +1254,7 @@ func (s *server) handleGLB(w http.ResponseWriter, r *http.Request) {
 				}
 				log.Printf("  projected GLB bake (%d px atlas%s) on %d tris ...", o.textureSize, detail, mesh.NTris)
 				err = sl.trackLive("projected GLB bake (unwrap + per-texel PBR"+detail+")", "baking", func() (e error) {
-					glb, e = s.eng.BakeProjectedGLB(mesh, source, o.textureSize, o.componentFilter, o.normalMap)
+					glb, e = s.eng.BakeProjectedGLB(mesh, source, o.textureSize, o.componentFilter, o.normalMap, o.material)
 					return
 				})
 				if err == nil && o.normalMap {
@@ -1225,13 +1268,13 @@ func (s *server) handleGLB(w http.ResponseWriter, r *http.Request) {
 				}
 			} else {
 				err = sl.track("GLB bake (vertex colours)", func() (e error) {
-					glb, e = s.eng.BakeGLB(mesh, o.textureSize, 2 /*already prepared*/)
+					glb, e = s.eng.BakeGLB(mesh, o.textureSize, 2 /*already prepared*/, o.material)
 					return
 				})
 			}
 		} else {
 			err = sl.track("GLB bake (vertex colours)", func() (e error) {
-				glb, e = s.eng.BakeGLB(mesh, o.textureSize, 2 /*already prepared*/)
+				glb, e = s.eng.BakeGLB(mesh, o.textureSize, 2 /*already prepared*/, o.material)
 				return
 			})
 		}

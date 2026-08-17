@@ -26,9 +26,10 @@
 extern "C" {
 #endif
 
+/* 18: both GLB bakes take a t2_glb_options struct; export_flags + unit_scale added. */
 /* 17: t2_run_config added. */
 /* 16: T2_PIPE_1536 / T2_CAP_1536; t2_mesh_grid_resolution added. */
-#define T2_CAPI_ABI_VERSION 17
+#define T2_CAPI_ABI_VERSION 18
 
 TRELLIS2_CAPI int t2_abi_version();
 
@@ -75,6 +76,41 @@ enum t2_background_mode {
 ** the 1536^3 decode is not part of the capability; that shows up as a decode
 ** failure, not as a silently downgraded run. */
 enum t2_caps { T2_CAP_COARSE = 1, T2_CAP_512 = 2, T2_CAP_1024 = 4, T2_CAP_TEXTURE = 8, T2_CAP_1536 = 16 };
+
+/* Bitmask for the `export_flags` argument of both GLB bakes. They shape the
+** written material only — geometry, UVs and the base colour are unaffected.
+**
+** T2_EXPORT_BASE_COLOR_ONLY drops the metallic/roughness texture and pins the
+** factors to a plain diffuse material, for engines that light their own way. It
+** takes one full-resolution PNG out of the file. Independent of the bakes'
+** `normal_map` argument, which keeps its own switch.
+**
+** T2_EXPORT_OPAQUE writes no alphaMode, leaving glTF's default OPAQUE. Blender's
+** importer connects baseColorTexture's alpha into the shader only for
+** BLEND/MASK, so this is what stops that link appearing; the texture is
+** untouched either way. */
+enum t2_export_flags {
+	T2_EXPORT_BASE_COLOR_ONLY = 1,
+	T2_EXPORT_OPAQUE		  = 2
+};
+
+/* Options for both GLB bakes, passed by pointer rather than as flat arguments:
+** the lists had reached the 15-argument ceiling the Go host's FFI enforces, so
+** every further option would have broken the binding. NULL selects the defaults
+** named below, which is also what a zeroed struct must NOT be confused with —
+** component_filter 0 is a real value ("remove tiny islands").
+**   texture_size      square atlas resolution hint; <=0 -> 2048
+**   component_filter  0 remove tiny islands, 1 largest only, 2 keep all
+**   normal_map        projected bake only; nonzero bakes the tangent-space map
+**   export_flags      bitmask of t2_export_flags
+**   unit_scale        uniform glTF node scale; <=0 -> 1.0 (1 unit = 1 metre) */
+typedef struct t2_glb_options {
+	int	  texture_size;
+	int	  component_filter;
+	int	  normal_map;
+	int	  export_flags;
+	float unit_scale;
+} t2_glb_options;
 
 /* Load-time flags for t2_pipeline_load. */
 enum t2_load_flags {
@@ -253,7 +289,7 @@ TRELLIS2_CAPI void	   t2_quad_mesh_stats( const t2_mesh_result* r, int* out_quad
 ** Operates on raw arrays so hosts can bake straight from their own buffers.
 ** On success returns a malloc'd GLB buffer (free with t2_free_buffer) and writes
 ** its length to *out_len; on failure returns NULL with a reason in err. */
-TRELLIS2_CAPI uint8_t* t2_bake_glb( const float* verts, int n_verts, const int* tris, int n_tris, const float* pbr, int texture_size, int component_filter, int* out_len, char* err, int err_len );
+TRELLIS2_CAPI uint8_t* t2_bake_glb( const float* verts, int n_verts, const int* tris, int n_tris, const float* pbr, const t2_glb_options* opts, int* out_len, char* err, int err_len );
 
 /* Bake a UV-atlas PBR GLB for replacement geometry by closest-surface
 ** projection from a dense source mesh. Every covered target atlas texel is
@@ -279,9 +315,7 @@ TRELLIS2_CAPI uint8_t* t2_bake_projected_glb( const float* target_verts,
 	const int*											   source_tris,
 	int													   source_n_tris,
 	const float*										   source_pbr,
-	int													   texture_size,
-	int													   source_component_filter,
-	int													   normal_map,
+	const t2_glb_options*								   opts,
 	int*												   out_len,
 	char*												   err,
 	int													   err_len );

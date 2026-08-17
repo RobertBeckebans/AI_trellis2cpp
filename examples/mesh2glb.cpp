@@ -52,6 +52,13 @@ int main( int argc, char** argv )
 			// tangent-space normal map by default; this drops it (and the
 			// TANGENT attribute) for a smaller GLB.
 			opt.normal_map = false;
+		} else if( std::strcmp( argv[i], "--base-color-only" ) == 0 ) {
+			opt.base_color_only = true;
+		} else if( std::strcmp( argv[i], "--opaque" ) == 0 ) {
+			opt.opaque = true;
+		} else if( std::strcmp( argv[i], "--unit-scale" ) == 0 && i + 1 < argc ) {
+			// Engine unit conversion, written as the glTF node's scale.
+			opt.unit_scale = ( float )std::atof( argv[++i] );
 		} else {
 			opt.texture_size = std::atoi( argv[i] );
 		}
