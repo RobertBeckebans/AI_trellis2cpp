@@ -215,9 +215,42 @@ int main( int argc, char** argv )
 			// genuine divergence, and one bad channel among good ones points at
 			// the split rather than the arithmetic. out7 is [7, L] with the
 			// channel fastest, matching the reference's [L, 7] row-major.
+			const std::vector<float>& got = taps.data[i];
+			// TRELLIS2_DUMP_TAPS=<dir> writes each failing tap next to the
+			// reference so the two can be taken apart offline — subtracting a
+			// known-good term from both sides is the only way to see which
+			// summand of `conv(x) + skip` is the wrong one, and no summary
+			// statistic can substitute for it.
+			if( const char* dir = std::getenv( "TRELLIS2_DUMP_TAPS" ) ) {
+				const std::string p = std::string( dir ) + "/port_" + name + ".bin";
+				if( FILE* f = std::fopen( p.c_str(), "wb" ) ) {
+					std::fwrite( got.data(), sizeof( float ), got.size(), f );
+					std::fclose( f );
+					std::printf( "     wrote %s (%zu floats)\n", p.c_str(), got.size() );
+				}
+			}
+			{
+				// Whole-tensor shape before any per-channel split. rms tells a
+				// missing term from a wrong one, and cos separates "scaled" from
+				// "unrelated" — both invisible in rel-L2 alone.
+				double dg = 0, dr = 0, dgr = 0, sg = 0, sr = 0;
+				for( size_t k = 0; k < a; ++k ) {
+					const double g = got[k], r = refbuf[k];
+					dg += g * g;
+					dr += r * r;
+					dgr += g * r;
+					sg += g;
+					sr += r;
+				}
+				std::printf( "     all   cos=%+.4f  mean got=%+.4f ref=%+.4f  rms got=%.4f ref=%.4f\n",
+					( dg > 0 && dr > 0 ) ? dgr / ( std::sqrt( dg ) * std::sqrt( dr ) ) : 0.0,
+					sg / ( double )a,
+					sr / ( double )a,
+					std::sqrt( dg / ( double )a ),
+					std::sqrt( dr / ( double )a ) );
+			}
 			const size_t nch = name == "out7" ? 7 : ( name == "pbr" ? 6 : 0 );
 			if( nch && a % nch == 0 ) {
-				const std::vector<float>& got = taps.data[i];
 				for( size_t c = 0; c < nch; ++c ) {
 					double dg = 0, dr = 0, dgr = 0, dd = 0, sg = 0, sr = 0;
 					size_t n = 0;

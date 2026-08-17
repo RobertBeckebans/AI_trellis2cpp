@@ -3696,29 +3696,19 @@ static bool shape_dec_run( trellis2_shape_dec_model* m,
 			}
 
 			if( ( int64_t )L > block ) {
-				// Taps used to exclude this level as well, on the same reasoning
-				// as the intermediate one below. It does not hold here: the
-				// finest level has no full-length intermediate to tap — it
-				// produces `out7`/`pbr` and nothing else, and `in_coords` comes
-				// from the host-side coords rather than the graph. Excluding it
-				// sent every tapped decode down the single-graph path, which is
-				// correct at level 3 (263k voxels, 1e-06) and wrong at level 4
-				// (1.185M, rel-L2 1.1) — so tests/test_slat could never validate
-				// the decoder output at all, and the failure looked like the
-				// port rather than the path.
-				const bool splittable = !has_up && lvl > 0 && hp.num_blocks[lvl] == 0;
+				// Taps are excluded here for the same reason as the intermediate
+				// level below, and it does hold: this path evaluates the level in
+				// coarse-voxel blocks and never forms `pre_up`, the full-length
+				// [C, L] the finest level feeds to the final norm — which is the
+				// one tensor that bisects the span between lvl{n-2}.pre_up and
+				// out7. Dropping the exclusion was tried and reverted: it changes
+				// no numbers (the two paths agree bit for bit) and costs the tap.
+				const bool splittable = !has_up && lvl > 0 && hp.num_blocks[lvl] == 0 && !taps;
 				if( splittable ) {
 					if( !shape_dec_final_level_chunked( m, hp, lvl, C, prev_C, L, nidx, up_hch, up_xch, pbr_scale, block, out_feats, error ) ) {
 						return false;
 					}
 					out_coords = coords;
-					// The same captures the single-graph path makes below, so a
-					// tapped run gates the identical tensors either way.
-					if( taps ) {
-						cap_coords( "lvl" + std::to_string( lvl ) + ".in_coords" );
-						cap( pbr_scale ? "pbr" : "out7", out_feats.data(), out_feats.size() );
-						cap_coords( "out_coords" );
-					}
 					if( t2_timing )
 						std::fprintf( stderr, "[shape_dec] nbr=%.0f graph=%.0f gather=%.0f ms\n", ms_nbr, ms_graph, ms_gather );
 					return true;
@@ -3936,16 +3926,28 @@ static bool shape_dec_run( trellis2_shape_dec_model* m,
 		if( needs_conv ) {
 			std::vector<int32_t> clamped( ( size_t )L );
 			std::vector<float>	 mask( ( size_t )L );
+			size_t				 n_present = 0;
 			for( int k = 0; k < 27; ++k ) {
 				const std::vector<int32_t>& ik = nidx[k];
 				for( int v = 0; v < L; ++v ) {
 					const bool miss		 = ik[( size_t )v] >= L;
 					clamped[( size_t )v] = miss ? 0 : ik[( size_t )v];
 					mask[( size_t )v]	 = miss ? 0.0f : 1.0f;
+					n_present += miss ? 0u : 1u;
 				}
 				ggml_backend_tensor_set( idx_t[k], clamped.data(), 0, ( size_t )L * sizeof( int32_t ) );
 				ggml_backend_tensor_set( mask_t[k], mask.data(), 0, ( size_t )L * sizeof( float ) );
 			}
+			// How much of the 27-tap neighbourhood actually contributes. A
+			// submanifold conv on a surface finds far fewer than 27, and the
+			// figure is the cheapest tell that a level's neighbour map is wrong:
+			// too few taps scales the output down without changing its shape.
+			if( t2_timing )
+				std::fprintf( stderr, "[shape_dec] level %d: %zu of %lld neighbour slots present (%.2f of 27 per voxel)\n",
+					lvl,
+					n_present,
+					( long long )L * 27,
+					( double )n_present / ( double )L );
 		}
 		if( lvl == 0 ) {
 			ggml_backend_tensor_set( in_a, slat, 0, ( size_t )hp.latent_channels * L * es );
@@ -4019,6 +4021,19 @@ static bool shape_dec_run( trellis2_shape_dec_model* m,
 					host_gather( x_o, C / 8, up_xch );	 // [C/8,     L_child]
 					if( t2_timing )
 						ms_gather += ms_since( t_gh );
+					// The hand-over between levels, named for the level that
+					// consumes it. This port splits the reference's single
+					// up-block across two levels, so these two tensors are the
+					// seam: everything before them is level lvl's arithmetic,
+					// everything after is level lvl+1's. Tapping them is what
+					// separates "the gather picked the wrong rows" from "the
+					// next level's convolution is wrong" — the coordinates
+					// alone cannot, since they are built on a different path.
+					if( taps ) {
+						const std::string nx = "lvl" + std::to_string( lvl + 1 );
+						cap( nx + ".in_hch", up_hch.data(), up_hch.size() );
+						cap( nx + ".in_xch", up_xch.data(), up_xch.size() );
+					}
 				} ) ) {
 				ggml_gallocr_free( alloc );
 				ggml_free( ctx );

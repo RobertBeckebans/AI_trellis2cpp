@@ -159,6 +159,27 @@ def main():
     dec.load_state_dict({k: v.float() for k, v in load_file(dstem + ".safetensors").items()})
     dec.eval().float().to(dev)
 
+    # The last up-block's SparseChannel2Spatial runs exactly twice — on the
+    # conv1 output, then on the skip source — and those two tensors are what the
+    # C++ port hands from one level to the next (it splits this block in half,
+    # where the reference keeps it whole). Capturing them here is what lets the
+    # span between lvl{n-2}.pre_up and lvl{n-1}.pre_up be bisected at all.
+    updown_caps = []
+    up_block = dec.blocks[len(dec.blocks) - 2][-1]
+    hook = up_block.updown.register_forward_hook(
+        lambda mod, inp, out: updown_caps.append(out.feats.detach())
+    )
+    # norm2 and conv2 of the same block, so the last two steps of
+    # `conv2(silu(norm2(h))) + skip` can be checked one at a time rather than
+    # as a sum.
+    stage_caps = {}
+    hooks2 = [
+        up_block.norm2.register_forward_hook(
+            lambda m, i, o: stage_caps.setdefault("norm2", o.detach())),
+        up_block.conv2.register_forward_hook(
+            lambda m, i, o: stage_caps.setdefault("conv2", o.feats.detach())),
+    ]
+
     with torch.no_grad():
         h = dec.from_latent(slat.float())
         for i, res in enumerate(dec.blocks):
@@ -171,8 +192,25 @@ def main():
                 else:
                     h = block(h)
             print(f"level {i}: {h.feats.shape[0]} voxels x {h.feats.shape[1]} ch")
+        # The finest level's features, i.e. the input to the final layer_norm +
+        # output_layer. The loop above only captures pre_up for levels that have
+        # an up-block (i < n-1), so this one was missing — which left the whole
+        # span between lvl{n-2}.pre_up and out7 unbisectable. See
+        # docs/progress/rocm-native-reference_3-slat-dump-and-out7.md.
+        caps[f"lvl{len(dec.blocks) - 1}.pre_up"] = h.feats
         hn = h.replace(F.layer_norm(h.feats, h.feats.shape[-1:]))
         out7 = dec.output_layer(hn)
+    hook.remove()
+    for h_ in hooks2:
+        h_.remove()
+    for k_, v_ in stage_caps.items():
+        caps[f"lvl{len(dec.blocks) - 1}.{k_}"] = v_
+    if len(updown_caps) == 2:
+        caps[f"lvl{len(dec.blocks) - 1}.in_hch"] = updown_caps[0]
+        caps[f"lvl{len(dec.blocks) - 1}.in_xch"] = updown_caps[1]
+    else:
+        print(f"WARNING: updown hook fired {len(updown_caps)}x, expected 2 — "
+              f"in_hch/in_xch not captured")
     caps["out7"] = out7.feats
     caps["out_coords"] = out7.coords.float()
     print(f"out7: {out7.feats.shape}, offsets mean={torch.sigmoid(out7.feats[:, 0:3]).mean().item():.4f}, "

@@ -3,7 +3,7 @@
 - **Issue:** none — tracked by plan key
 - **Plan:** [`docs/plan/rocm-native-reference.md`](../plan/rocm-native-reference.md) — phase 3
 - **Branch:** `pixal3d`
-- **Date:** 2026-08-16
+- **Date:** 2026-08-16, extended 2026-08-17 with the bisection
 - **Commits:** <to be added after review>
 
 ## Goal of the phase
@@ -17,165 +17,196 @@ the full cascade dump.
 
 ## What was done
 
-**The SLAT reference dump exists.** `dumps/reference_slat.gguf`,
-309,563,072 bytes, 21 tensors, seed 4321, `t=500`, resolution 512, run
-natively on the R9700. It carries per-level decoder activations
-(`lvl{0..3}.pre_up`, `lvl{0..3}.subdiv`), the active sets
-(`lvl{0..4}.in_coords`), the flow forward, the sampled SLAT, and `out7` /
-`out_coords` at 1,185,000 voxels.
+**The SLAT reference dump exists.** `dumps/reference_slat.gguf`, seed 4321,
+`t=500`, resolution 512, run natively on the R9700. It started at
+309,563,072 bytes / 21 tensors and grew to 1,598,843,264 / 26 as the
+bisection needed more taps.
 
 Worth recording for D1: the reference selected `Conv backend: none` and
-`Attention backend: sdpa`, i.e. the native-PyTorch sparse convolution and
-`SDPBackend.MATH`, not the fast kernels. That is the *most* numerically
-conservative configuration the reference offers, which strengthens it as
-a yardstick — but it is still a ROCm-generated reference and D1 still
-applies to every numeric row derived from it.
+`Attention backend: sdpa`, i.e. the ROCm fork's native-PyTorch sparse
+convolution and `SDPBackend.MATH`, not the fast kernels. That reads as the
+most conservative configuration available — and by the end of this entry it
+is the prime suspect instead.
 
-**`test_slat` went from `SKIP` to a real measurement**, and 14 of its 15
-decoder taps are green (table under Verification). That is new coverage
-for the whole shape-decoder chain: every level's active set is exact,
-every level's features agree to ~1e-06, and every subdivision logit to
-~7e-07.
+**`test_slat` went from `SKIP` to a real measurement**, and 16 of its 18
+decoder taps are green. That is new coverage for the whole shape-decoder
+chain: every level's active set is exact, every level's features agree to
+~1e-06, and every subdivision logit to ~7e-07.
 
-**Two defects found on the way, one fixed, one still open.**
+**`out7` failed, and the bisection that followed cleared the port.** Five
+rounds of taps narrowed a half-pipeline span to a single operation, and then
+showed that operation is right in the port and unreproducible in the
+reference. Detail under Verification.
+
+**Two defects found on the way**, one fixed (the CPU guard), one still open
+and no longer believed to be ours.
 
 ## Affected files
 
 - `src/trellis2.cpp` — the decoder's column-limit guard now checks the
-  backend before refusing (see Deviations); `splittable` no longer
-  excludes tapped runs, and the chunked finest-level path captures the
-  same taps the single-graph path does.
-- `tests/test_slat.cpp` — a failing multi-channel output is now broken
-  down per channel (rel-L2, cosine, mean, rms), so "wrong" can be told
-  apart from "differently meant".
-- `start_server.bat` — unrelated to this phase, carried along: the
-  numerics knobs are documented per switch.
+  backend before refusing; the level-to-level hand-over (`in_hch` / `in_xch`)
+  is tapped; the share of the 27-tap neighbourhood that contributes is
+  logged per level under `TRELLIS2_TIMING`.
+- `scripts/dump_slat_reference.py` — captures the finest level's `pre_up`
+  (the loop only did so for levels with an up-block) and, via forward hooks
+  on the last up-block, `in_hch` / `in_xch` / `norm2` / `conv2`.
+- `tests/test_slat.cpp` — a failing tap now reports whole-tensor cosine and
+  rms, plus a per-channel breakdown for `out7` / `pbr`; `TRELLIS2_DUMP_TAPS`
+  writes a failing tap out for offline analysis.
 - `dumps/reference_slat.gguf`, `dumps/manifest_slat.json` — new, gitignored.
 
 ## Deviations / fixed along the way
 
 **Fixed: the decoder refused to run on the CPU because of a GPU defect.**
 The guard behind the unchunked fallback compared the level's voxel count
-against `mul_mat_max_rows()`, which describes the ROCm/HIP column ceiling
-— on the CPU backend there is none. `test_slat` pins the decoder to the
-CPU by design, and with f32 weights the ceiling is 2^19 = 524,288, below
-the 1,185,000 voxels a 512 decode reaches at its finest level. So the
-decode aborted with a message naming a limit that did not apply, and the
-decoder had never been validated at all. The encoder learned this exact
-lesson in `e87069e` ("the warning now checks the backend"); this guard
-did not get the same fix.
+against `mul_mat_max_rows()`, which describes the ROCm/HIP column ceiling —
+on the CPU backend there is none. `test_slat` pins the decoder to the CPU by
+design, and with f32 weights the ceiling is 2^19 = 524,288, below the
+1,185,000 voxels a 512 decode reaches at its finest level. So the decode
+aborted naming a limit that did not apply, and the decoder had never been
+validated at all. The encoder learned this exact lesson in `e87069e` ("the
+warning now checks the backend"); this guard did not get the same fix.
 
-**Refuted: "the single-graph path is broken at large voxel counts."** The
-first hypothesis for the remaining `out7` failure was that the finest
-level diverges because taps exclude it from the chunked path. Removing
-`!taps` from `splittable` so the chunked path runs instead produced
-**bit-identical output** — same rel-L2, same worst index, same values. The
-two paths are not merely equivalent in principle, they agree to the bit.
-The evidence that had suggested otherwise (level 3 correct, level 4
-wrong) was a misreading: `lvl3.pre_up` is captured *before* the output
-layer and `out7` *after* it, so they were never comparable steps.
+**Six hypotheses raised and refuted.** Recorded because each one costs the
+same day twice if it is not:
 
-The change is kept because the exclusion's stated reason ("taps want the
-full-length intermediates this path never forms") does not hold for the
-finest level — it has no intermediate to tap — and because it is what
-proved the two paths agree. It changes no numbers.
+| Hypothesis | Refuted by |
+|---|---|
+| The single-graph path breaks at large voxel counts (taps exclude the chunked one) | Running the chunked path instead gives **bit-identical** output |
+| Level 3 correct / level 4 wrong ⇒ level 4's arithmetic | Misread: `lvl3.pre_up` is *before* the output layer, `out7` *after* — never comparable steps |
+| The skip connection is missing or wrong | `skip` rms is 3.21 against a 22.9 result; too small to account for it, and the port's post-skip mean is ~0 as expected |
+| A missing or wrong conv bias | The per-channel ref/port std ratio spans 0.9–71.0; a bias is a constant offset |
+| The neighbour map is wrong at the finest level | The port finds **20,262,654 of 31,995,000** slots, matching a count computed independently from the reference's own coordinates, exactly |
+| The GGUF weights are wrong or transposed | rms identical to the checkpoint; layout `[Ci,27,Co]` confirmed against the converter and two independent ports |
 
-**Refuted: a layout, sign or channel-order mismatch in `out7`.** The
-per-channel breakdown rules all three out; see Verification.
+**Reverted from the previous commit:** dropping `!taps` from `splittable`.
+The exclusion was right — the chunked path never forms `pre_up`, which is
+the one tensor that bisects this span. It changes no numbers either way.
 
 ## Verification
 
-`ctest -C Release -R "^slat$"`, ROCm runtime on `PATH` (without it the
-test dies at `0xc0000135` in the loader, as `AGENTS.md` warns).
+`ctest -C Release -R "^slat$"`, ROCm runtime on `PATH` (without it the test
+dies at `0xc0000135` in the loader, as `AGENTS.md` warns).
 
 | Tap | rel-L2 | |
 |---|---|---|
 | `lvl{0..4}.in_coords`, `out_coords` | **0** | exact |
 | `lvl{0..3}.pre_up` | 7.5e-07 … 1.1e-06 | OK |
 | `lvl{0..3}.subdiv` | 4.8e-07 … 6.1e-07 | OK |
+| `lvl4.in_hch` | **6.141e-07** | OK |
+| `lvl4.in_xch` | **7.556e-07** | OK |
 | `flow_t500_out` | 3.626e-06 | OK |
 | `slat` (12-step sampler) | 8.774e-02 | within its documented 2e-01 gate |
-| **`out7`** | **1.106** | **FAIL** |
+| `lvl4.pre_up` | 0.979 | FAIL |
+| `out7` | 1.103 | FAIL |
 
-Exact set sizes at every level mean no subdivision logit flipped sign, so
-the geometry the decoder selects is right; only the values it writes into
-it are wrong.
+Exact set sizes at every level mean no subdivision logit flipped sign: the
+geometry the decoder selects is right, only the values written into it differ.
 
-Per channel (`out7` is `[7, L]`, channel fastest, matching the
-reference's `[L, 7]` row-major):
+**Where the break is.** The finest level computes
+`conv2(silu(norm2(in_hch))) + repeat_interleave(in_xch)`
+(`SparseResBlockC2S3d._forward`). Taking it apart against the reference's own
+tensors:
 
-| ch | rel-L2 | cos | mean got | mean ref | rms got | rms ref |
-|---|---|---|---|---|---|---|
-| 0 | 0.953 | +0.456 | −0.007 | −0.283 | 0.60 | 0.75 |
-| 1 | 0.993 | +0.206 | +0.002 | −1.027 | 0.60 | 1.61 |
-| 2 | 0.985 | +0.316 | −0.007 | +0.513 | 0.56 | 0.97 |
-| 3 | 0.874 | +0.648 | −10.22 | −7.08 | 19.23 | 17.87 |
-| 4 | 1.128 | +0.201 | −10.63 | +7.68 | 19.45 | 25.61 |
-| 5 | 1.228 | +0.124 | −12.03 | +7.34 | 19.52 | 23.03 |
-| 6 | 1.011 | +0.176 | −0.066 | −7.79 | 5.26 | 12.97 |
+| Stage | reference rms | independent reimplementation | cos |
+|---|---|---|---|
+| `norm2` | 1.0000 | 1.0000 | **+1.000000** |
+| `pre_up` vs. `conv2 + skip` | 22.9039 | 22.9039 | **+1.000000** |
+| `conv2` | 22.6857 | 4.6109 | **+0.164** |
 
-Reading: every cosine is positive, so it is **not a sign flip**. The
-channel groups behave differently from one another (ch0–2 small, ch3–5
-large, ch6 its own), so it is **not a stride or layout mismatch** — that
-would make all seven look alike. The group structure and the magnitudes
-are right, which matches how `src/trellis2_capi.cpp` splits the seven
-channels (offsets, intersection flags, one further channel). What is
-wrong is the values, consistently: the reference's intersection channels
-carry mixed signs (−7.1 / +7.7 / +7.3, "intersected frac 0.5654") where
-the port's are uniformly −10 to −12, i.e. the port decides "no surface"
-where the reference decides "surface".
+So the reference's own `norm2` is a plain affine-free LayerNorm, its own
+`pre_up` really is `conv2 + skip`, and the disagreement is confined to the
+convolution.
+
+**And the convolution is right in the port.** Reimplementing the documented
+formula in Python — reference tensors in, original checkpoint weights,
+27-tap submanifold gather — reproduces the **port**, not the reference:
+
+```
+cos(reimplementation, port_conv2) = +1.000000   rms 4.6109 = 4.6109
+cos(reimplementation, ref_conv2)  = +0.164170
+```
+
+The reference's `conv2` could not be reproduced from any plausible input
+(`silu(norm2)` +0.164, `silu(in_hch)` +0.161, `in_hch` +0.179, `norm2`
++0.176 — a plateau, so the input is not the variable), nor from `conv_none`'s
+own `weight.view(-1, C_out, C_in)` (+0.060).
+
+**The strongest independent argument is outside the test.** The server
+produces sound 512 and 1024 meshes from this same decoder. An error of ~5x at
+the finest level is not subtle; it would destroy every mesh.
+
+**The reference is not bit-reproducible.** Across two runs of the same script
+with the same seed, `intersected frac` moved 0.5654 → 0.5628 and `offsets
+mean` 0.4550 → 0.4525. The port's figures are stable across runs; the
+reference's are not.
 
 ## Open points
 
-- **`out7` is unexplained.** The unverified span is now one short chain:
-  level 3's `norm1 → silu → conv1` (producing `h1`), the host-side gather
-  of surviving children, then level 4's `norm2 → silu → conv2 + skip`,
-  the final `norm(1e-5)` and `output_layer`. Everything before it is
-  green, including `lvl3.subdiv`, which hangs off the same `h` as
-  `conv1` — so the up-block's *input* is proven right.
-- **The production path is not implicated.** The server produces sound
-  512 and 1024 meshes, and this is the same decoder. Whether the defect
-  is in the port, in how the test feeds it, or in what the reference's
-  `out7` means, is exactly what is not yet known.
+- **`out7` is now the reference's problem, not the port's**, and the
+  mechanism is still unnamed. Everything around the convolution checks out at
+  cos +1.000000; the convolution itself, as the dump ran it, does not match
+  any reading of its own source. The suspect is `conv_none`, the ROCm fork's
+  addition, whose header calls it "MUCH SLOWER … Use for debugging" and which
+  ships a second, unreachable implementation beside it.
+- **This is D1 arriving in practice.** The plan warned that a
+  ROCm-generated reference is not independent of the port for numeric taps.
+  It is worse than the anticipated case: not a shared defect cancelling out,
+  but a reference-only one that reads as a port defect.
 - **The full cascade dump** (`dump_cascade_reference.py` *without*
-  `--skip-hr-sampler`) is still outstanding. It is what `backend-parity`
+  `--skip-hr-sampler`) is still outstanding, and is what `backend-parity`
   phase 1b depends on.
 - **`dump_texture_reference.py`** is still outstanding. Its input pair is
   identified — `dumps/einstein_ref512.t2mesh` plus
-  `generations/6daad1f22a18bbd0/input.img` (RGBA 1052²; the `--image`
-  argument needs an alpha channel, which `dumps/einstein_pre.png` does
-  not have) — but `tex_slat_flow_512` exists only as f16, and
-  `test_texture` wants the flow alongside `shape_enc` and `tex_dec`.
+  `generations/6daad1f22a18bbd0/input.img` (RGBA 1052²; `--image` needs an
+  alpha channel, which `dumps/einstein_pre.png` lacks) — but
+  `tex_slat_flow_512` exists only as f16.
+- **The dump has grown to 1.6 GB.** `norm2`, `conv2`, `in_hch` and `in_xch`
+  are investigation aids; only the finest level's `pre_up` earns a permanent
+  place once this is settled.
 - **The plan says the reference extra is `ref`; it is `rocm`.**
-  `uv run --extra rocm` is the working invocation. Worth correcting in
-  the plan's phase 0 text.
+  `uv run --extra rocm` is the working invocation.
 
 ## Next phase
 
-Tap `h1` — level 3's `conv1` output. It is already a named graph output
-in the port (`outs.emplace_back( "h1", … )`), just not captured, and
-adding the matching capture to `dump_slat_reference.py` bisects the
-remaining chain exactly: if `h1` agrees, the defect is in level 4; if it
-does not, it is in `conv1`. One dump re-run, one test run.
+Regenerate the dump with a different sparse-conv backend and see whether
+`out7` falls into line. `docs/ref/trellis2-apple/` (MIT, same Microsoft
+origin) ships `conv_pytorch.py`: an independent CUDA-free implementation that
+permutes `(Co,Kd,Kh,Kw,Ci) → (K,Ci,Co)` explicitly where `conv_none` takes a
+raw `view`. It is a configuration change, not code.
+
+If the port then agrees with the reference, `conv_none` is the culprit and
+the port was never wrong — and `backend-parity` gains a reference whose
+geometry path contains no vendor kernel at all, which is what its D2 asks
+for.
 
 ## Proposed commit message
 
 ```text
-Produce the SLAT reference dump, and stop the decoder guard firing on the CPU
+Bisect the decoder's finest level, and clear the port of the out7 failure
 
-dumps/reference_slat.gguf takes tests/test_slat from SKIP to a measurement:
-14 of 15 decoder taps green, active sets exact at every level, features and
-subdivision logits at ~1e-06.
+New taps split the one span that was opaque. The reference dump gains the
+finest level's pre_up (the loop only captured it for levels with an up-block),
+the two tensors the up-block hands across the level boundary, and norm2/conv2
+of that block. The port taps the matching pair after its host-side gather;
+tests/test_slat reports whole-tensor cos/rms and a per-channel breakdown for a
+failing tap, and TRELLIS2_DUMP_TAPS writes one out for offline work.
 
-It could not run before. The guard behind the unchunked fallback compared the
-level's voxel count against mul_mat_max_rows(), a ROCm ceiling the CPU backend
-does not have - and the test pins the decoder to the CPU, where f32 weights put
-that ceiling at 2^19, below the 1.185M voxels a 512 decode reaches. It now
-checks the backend, the way the encoder's equivalent warning has since e87069e.
+With those, out7 is no longer the port's. lvl4.in_hch and lvl4.in_xch match at
+6.1e-07 and 7.6e-07, the neighbour map matches the reference coordinates
+exactly (20,262,654 of 31,995,000 slots), and reimplementing the documented
+formula from the reference's own tensors and the original checkpoint reproduces
+the port bit for bit - cos +1.000000. The reference's conv2 output cannot be
+reproduced from any of them, while its norm2 and its pre_up = conv2 + skip both
+check out at cos +1.000000. The break is inside sp.SparseConv3d as the dump ran
+it, on the ROCm fork's conv_none backend, which its own header calls debug-grade.
 
-out7 still fails at rel-L2 1.106 and is not explained. A per-channel breakdown
-in the test rules out a sign flip, a layout mismatch and a channel permutation:
-the group structure and magnitudes are right, the values are not. Detail and
-the two refuted hypotheses in
+Reverts last commit's splittable change: the taps exclusion it dropped was
+right after all, because the chunked path never forms pre_up.
+
+Also logs how much of the 27-tap neighbourhood contributes per level - the
+cheapest tell that a neighbour map is wrong.
+
+Detail, the six refuted hypotheses and the next experiment in
 docs/progress/rocm-native-reference_3-slat-dump-and-out7.md.
 ```
