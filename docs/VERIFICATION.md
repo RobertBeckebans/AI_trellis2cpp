@@ -45,7 +45,7 @@ ctest --test-dir build                  # full parity (needs ggufs/ + dumps/)
 | SS-flow Euler sampler (12-step CFG) | `test_ss_sample` | z_s latent | **PASS**, rel-L2 5.7e-3, sign 99.85% (CPU) |
 | SS decoder (dense 3D-conv → 64³ occupancy) | `test_ss_dec` | occupancy logits | **PASS**, rel-L2 2e-5 |
 | shape-SLAT flow forward | `test_slat` | full output | **PASS**, rel-L2 2.9e-4 (CPU) / 8e-4 (GPU) |
-| shape-SLAT VAE decoder (sparse ConvNeXt U-Net, 4 levels, 16× up) | `test_slat` | per-level features + subdivision logits + final 7-ch output, all 5 levels | **PASS**, rel-L2 ≤ 6e-7 (levels 0–3 exact; final set within 0.0001%) |
+| shape-SLAT VAE decoder (sparse ConvNeXt U-Net, 4 levels, 16× up) | `test_slat` | 18 taps: per-level features + subdivision logits + active sets, all 5 levels, plus the finest level's `pre_up` and the final 7-ch output | **PASS**, 18/18, rel-L2 ≤ 1.1e-06 (`lvl4.pre_up` 3.962e-07, `out7` 4.318e-07; all coord sets exact). Reference produced on the **CPU** — the same script on ROCm fails those two taps at 0.979 / 1.103, and that failure is in the reference's own convolution, not the port. See `docs/progress/rocm-native-reference_3-slat-dump-and-out7.md` |
 | integrated subdivision guide | `test_slat` | all decoder levels; final guide coordinates equal decoded shape coordinates | **PASS** |
 | standalone shape encoder → texture flow → texture decoder | `test_texture` | shape latent, flow forward/sampler, guided 6-channel PBR decode | parity-gated; sampler backend drift uses the documented loose gate |
 | sparse PBR surface sampling | `test_pbr_sampling` | dense trilinear interpolation + sparse-boundary normalization | **PASS** |
@@ -112,6 +112,17 @@ Notes:
   error versus true fp32. `scripts/ref_common.py` disables it so the golden
   dumps are real fp32; otherwise a correct port looks like it has a 0.08-rel-L2
   bug (this exact trap cost a debugging session — see the flow-forward gate).
+- **Reference device matters.** `scripts/ref_common.py` does not use an upstream
+  conv backend — it registers its own sparse convolution and hard-assigns
+  `config.CONV`, so the `[SPARSE]` banner naming a backend says nothing about
+  what ran. That convolution is wrong on ROCm: 4.9x too large, uncorrelated with
+  the same arithmetic on the CPU, and not reproducible run to run. A reference
+  generated there fails the decoder's finest taps and reads as a *port* defect,
+  which sends the search to the wrong side. Numeric reference dumps go on the
+  CPU. Leading suspect is that its per-offset GEMM is unchunked and exceeds the
+  524,288-row limit the ROCm fork observes everywhere else
+  (`trellis2/modules/sparse/linear.py`); unconfirmed. This does not apply to the
+  1536 row above, where both sides compute the same integer quantization.
 - **Sampler drift.** The 12-step Euler + CFG-rescale loop chaotically amplifies
   per-step fp differences between backends; it validates tightly on CPU and
   drifts to ~0.1 rel-L2 on GPU. The decoder gate therefore decodes the
