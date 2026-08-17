@@ -209,6 +209,38 @@ int main( int argc, char** argv )
 		} else if( st.rel_l2 > gate ) {
 			std::printf( "  -> %s rel_l2 %.4g > %.0e, FAIL\n", name.c_str(), st.rel_l2, gate );
 			++n_fail;
+			// Break a failing multi-channel output down per channel. A single
+			// rel-L2 cannot tell "the maths is wrong" from "the channels mean
+			// something else here": cos ~ +1 is a scale/offset, ~ -1 a sign, ~ 0
+			// genuine divergence, and one bad channel among good ones points at
+			// the split rather than the arithmetic. out7 is [7, L] with the
+			// channel fastest, matching the reference's [L, 7] row-major.
+			const size_t nch = name == "out7" ? 7 : ( name == "pbr" ? 6 : 0 );
+			if( nch && a % nch == 0 ) {
+				const std::vector<float>& got = taps.data[i];
+				for( size_t c = 0; c < nch; ++c ) {
+					double dg = 0, dr = 0, dgr = 0, dd = 0, sg = 0, sr = 0;
+					size_t n = 0;
+					for( size_t k = c; k < a; k += nch, ++n ) {
+						const double g = got[k], r = refbuf[k];
+						dg += g * g;
+						dr += r * r;
+						dgr += g * r;
+						dd += ( g - r ) * ( g - r );
+						sg += g;
+						sr += r;
+					}
+					const double cos = ( dg > 0 && dr > 0 ) ? dgr / ( std::sqrt( dg ) * std::sqrt( dr ) ) : 0.0;
+					std::printf( "     ch%zu  relL2=%.4g  cos=%+.4f  mean got=%+.4f ref=%+.4f  rms got=%.4f ref=%.4f\n",
+						c,
+						dr > 0 ? std::sqrt( dd / dr ) : 0.0,
+						cos,
+						sg / ( double )n,
+						sr / ( double )n,
+						std::sqrt( dg / ( double )n ),
+						std::sqrt( dr / ( double )n ) );
+				}
+			}
 		}
 	}
 

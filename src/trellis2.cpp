@@ -3696,12 +3696,29 @@ static bool shape_dec_run( trellis2_shape_dec_model* m,
 			}
 
 			if( ( int64_t )L > block ) {
-				const bool splittable = !has_up && lvl > 0 && hp.num_blocks[lvl] == 0 && !taps;
+				// Taps used to exclude this level as well, on the same reasoning
+				// as the intermediate one below. It does not hold here: the
+				// finest level has no full-length intermediate to tap — it
+				// produces `out7`/`pbr` and nothing else, and `in_coords` comes
+				// from the host-side coords rather than the graph. Excluding it
+				// sent every tapped decode down the single-graph path, which is
+				// correct at level 3 (263k voxels, 1e-06) and wrong at level 4
+				// (1.185M, rel-L2 1.1) — so tests/test_slat could never validate
+				// the decoder output at all, and the failure looked like the
+				// port rather than the path.
+				const bool splittable = !has_up && lvl > 0 && hp.num_blocks[lvl] == 0;
 				if( splittable ) {
 					if( !shape_dec_final_level_chunked( m, hp, lvl, C, prev_C, L, nidx, up_hch, up_xch, pbr_scale, block, out_feats, error ) ) {
 						return false;
 					}
 					out_coords = coords;
+					// The same captures the single-graph path makes below, so a
+					// tapped run gates the identical tensors either way.
+					if( taps ) {
+						cap_coords( "lvl" + std::to_string( lvl ) + ".in_coords" );
+						cap( pbr_scale ? "pbr" : "out7", out_feats.data(), out_feats.size() );
+						cap_coords( "out_coords" );
+					}
 					if( t2_timing )
 						std::fprintf( stderr, "[shape_dec] nbr=%.0f graph=%.0f gather=%.0f ms\n", ms_nbr, ms_graph, ms_gather );
 					return true;
@@ -3741,7 +3758,16 @@ static bool shape_dec_run( trellis2_shape_dec_model* m,
 					continue;
 				}
 
-				if( ( int64_t )L > max_rows ) {
+				// ...and only on a GPU. mul_mat_max_rows describes a ROCm/HIP
+				// kernel ceiling; the CPU backend has none, so refusing there
+				// aborts a decode that would have been correct. The encoder's
+				// equivalent warning already checks this (e87069e); this guard
+				// did not, which is what stopped tests/test_slat validating the
+				// decoder at all: it pins the decoder to the CPU by design, and
+				// with f32 weights the ceiling is 2^19, below the 1.185M voxels
+				// a 512 decode reaches at its finest level.
+				const bool dec_on_cpu = m->backend_name.find( "CPU" ) != std::string::npos || m->backend_name.find( "cpu" ) != std::string::npos;
+				if( !dec_on_cpu && ( int64_t )L > max_rows ) {
 					set_error( error,
 						"level " + std::to_string( lvl ) + " has " + std::to_string( L ) + " voxels, past this backend's mul_mat column limit (" + std::to_string( max_rows ) +
 							"), and cannot be split (level 0, or taps requested)" );

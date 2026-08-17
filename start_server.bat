@@ -107,6 +107,7 @@ rem everywhere will fail to allocate on the HR cascade tiers.
 rem TRELLIS2_SDPA_EXACT_MAX_MB moves the gate, 0 disables exact entirely.
 ::set TRELLIS2_SDPA_FLASH=1
 ::set TRELLIS2_SDPA_EXACT=1
+::set TRELLIS2_SDPA_EXACT_MAX_MB=16384
 
 rem Force the texture stage's shape ENCODER onto the CPU. Escape hatch only -
 rem the dispatch-limit crash it existed for is fixed inside the encoder (the
