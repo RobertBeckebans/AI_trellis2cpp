@@ -26,10 +26,11 @@
 extern "C" {
 #endif
 
+/* 19: t2_generate takes a t2_gen_options struct; attention_mode added. */
 /* 18: both GLB bakes take a t2_glb_options struct; export_flags + unit_scale added. */
 /* 17: t2_run_config added. */
 /* 16: T2_PIPE_1536 / T2_CAP_1536; t2_mesh_grid_resolution added. */
-#define T2_CAPI_ABI_VERSION 18
+#define T2_CAPI_ABI_VERSION 19
 
 TRELLIS2_CAPI int t2_abi_version();
 
@@ -109,6 +110,50 @@ typedef struct t2_glb_options {
 	float unit_scale;
 } t2_glb_options;
 
+/* Which scaled-dot-product attention the flow DiTs use.
+**
+** Exact materializes the [L_k, L_q, heads] score matrix in query blocks and
+** accumulates in F32. Flash never materializes it, but ggml's CUDA/HIP kernels
+** accumulate in F16 and ignore GGML_PREC_F32 — measured on ROCm/gfx1201 that is
+** 89.8% latent sign agreement against exact's 99.9%, which the decoder's
+** threshold-at-zero subdivision turns into lost thin structure at 1024 and above.
+**
+** AUTO keeps the historical size gate: exact where its score matrix fits the
+** cap, flash where it does not. That gate answered a memory question which
+** query-blocking has since removed, so on a card that can afford the time EXACT
+** is the better answer at the cascade tiers — measured 2.3x wall clock for a
+** finest-level expansion ratio that moves from 3.55 into the healthy 4.00-4.04
+** band. See docs/progress/backend-parity_1024-exact-attention.md. */
+enum t2_attention_mode {
+	T2_ATTENTION_AUTO  = 0, /* size-gated (TRELLIS2_SDPA_* still override) */
+	T2_ATTENTION_EXACT = 1, /* always exact, built in query blocks         */
+	T2_ATTENTION_FLASH = 2	/* always flash                                */
+};
+
+/* Per-generation parameters for t2_generate.
+**
+** A struct rather than more arguments: t2_generate already carried 15, which is
+** exactly the limit purego can bind, so the next option would have broken the Go
+** host at run time rather than compile time. Fields are ordered so the layout
+** carries no interior padding on LP64 and Windows alike.
+**
+**   seed             sampler seed
+**   pipeline_type    enum t2_pipeline_type
+**   background_mode  enum t2_background_mode
+**   steps            shape flow steps
+**   texture_steps    PBR texture flow steps; 0 skips texturing
+**   attention_mode   enum t2_attention_mode
+**   guidance         classifier-free guidance scale */
+typedef struct t2_gen_options {
+	uint64_t seed;
+	int		 pipeline_type;
+	int		 background_mode;
+	int		 steps;
+	int		 texture_steps;
+	int		 attention_mode;
+	float	 guidance;
+} t2_gen_options;
+
 /* Load-time flags for t2_pipeline_load. */
 enum t2_load_flags {
 	T2_LOAD_LOW_VRAM = 1 /* reserved: load DiTs on demand (follow-on)     */
@@ -169,29 +214,17 @@ TRELLIS2_CAPI void			  t2_pipeline_free( t2_pipeline* p );
 TRELLIS2_CAPI const char*	  t2_pipeline_backend( t2_pipeline* p );
 
 /* image bytes (PNG/JPEG/...; anything stb_image decodes) -> triangle mesh.
-** pipeline_type is a t2_pipeline_type (T2_PIPE_AUTO picks the best available).
-** background_mode is a t2_background_mode (normally T2_BACKGROUND_AUTO).
-** steps <= 0, guidance < 0, and texture_steps <= 0 select the pipeline defaults
-** (12 / 7.5 / 12 respectively).
+** `opts` may be NULL for all defaults. Within it, steps <= 0, guidance < 0 and
+** texture_steps <= 0 select the pipeline defaults (12 / 7.5 / 12 respectively).
+** Note guidance is < 0, not <= 0: guidance 0 means no CFG, which is a request
+** rather than an omission, so a zeroed struct is NOT the same as NULL for it.
 ** `preview` (may be NULL) streams live intermediate 3D previews as the sparse
 ** structure emerges; `preview_user` is passed back to it. The T2_PREVIEW_STRIDE
 ** env var (default: ~4 previews across the SS steps) tunes the per-step cadence.
-** NOT thread-safe per pipeline: serialize calls on one t2_pipeline. */
-TRELLIS2_CAPI t2_mesh_result* t2_generate( t2_pipeline* p,
-	const void*											image_bytes,
-	int													image_len,
-	int													pipeline_type,
-	int													background_mode,
-	uint64_t											seed,
-	int													steps,
-	float												guidance,
-	int													texture_steps,
-	t2_progress_fn										progress,
-	void*												user,
-	t2_preview_fn										preview,
-	void*												preview_user,
-	char*												err,
-	int													err_len );
+** NOT thread-safe per pipeline: serialize calls on one t2_pipeline. attention_mode
+** is process-wide while a generation runs, which the same rule already covers. */
+TRELLIS2_CAPI t2_mesh_result* t2_generate(
+	t2_pipeline* p, const void* image_bytes, int image_len, const t2_gen_options* opts, t2_progress_fn progress, void* user, t2_preview_fn preview, void* preview_user, char* err, int err_len );
 
 /* Mesh accessors. Vertices are in a centered unit cube ([-0.5, 0.5]^3, same
 ** axes as the voxel grid); normals are per-vertex unit vectors. Buffers stay

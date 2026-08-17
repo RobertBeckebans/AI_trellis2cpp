@@ -18,7 +18,7 @@ import (
 	"github.com/ebitengine/purego"
 )
 
-const abiVersion = 18
+const abiVersion = 19
 
 // glbOptions mirrors struct t2_glb_options field for field (five 4-byte fields,
 // no padding on either side). Passed by pointer, which is what keeps both bake
@@ -29,6 +29,27 @@ type glbOptions struct {
 	NormalMap       int32
 	ExportFlags     int32
 	UnitScale       float32
+}
+
+// Attention path for the flow DiTs (enum t2_attention_mode). Exact accumulates
+// in F32; flash is faster but ggml's HIP kernels accumulate in F16, which costs
+// thin structure at the cascade tiers.
+const (
+	attentionAuto  = 0
+	attentionExact = 1
+	attentionFlash = 2
+)
+
+// Mirrors struct t2_gen_options. Seed leads so the 8-byte field is aligned
+// without interior padding on either side of the boundary; keep the order.
+type genOptions struct {
+	Seed           uint64
+	PipelineType   int32
+	BackgroundMode int32
+	Steps          int32
+	TextureSteps   int32
+	AttentionMode  int32
+	Guidance       float32
 }
 
 // Progress stages (enum t2_stage).
@@ -100,9 +121,8 @@ type engine struct {
 	pipelineBackend func(p uintptr) string
 	pipelineCaps    func(p uintptr) int32
 	runConfig       func(p uintptr) string
-	generate        func(p uintptr, img unsafe.Pointer, imgLen int32, pipelineType, backgroundMode int32,
-		seed uint64, steps int32, guidance float32, textureSteps int32, cb uintptr, user unsafe.Pointer,
-		preview uintptr, previewUser unsafe.Pointer,
+	generate        func(p uintptr, img unsafe.Pointer, imgLen int32, opts *genOptions,
+		cb uintptr, user unsafe.Pointer, preview uintptr, previewUser unsafe.Pointer,
 		err unsafe.Pointer, errLen int32) uintptr
 	meshNVerts   func(r uintptr) int32
 	meshNTris    func(r uintptr) int32
@@ -355,7 +375,7 @@ type meshData struct {
 // Generate runs the full image->mesh pipeline. onProgress and onPreview may be
 // nil. onPreview receives live intermediate 3D preview blobs (T2VOX01 voxel
 // sets) as the sparse structure emerges.
-func (e *engine) Generate(image []byte, pipelineType, backgroundMode int, seed uint64, steps int, guidance float32, textureSteps int,
+func (e *engine) Generate(image []byte, pipelineType, backgroundMode int, seed uint64, steps int, guidance float32, textureSteps, attentionMode int,
 	onLoading func(),
 	onProgress func(stage, step, total int),
 	onPreview func(stage, step, total int, blob []byte)) (*meshData, error) {
@@ -391,10 +411,18 @@ func (e *engine) Generate(image []byte, pipelineType, backgroundMode int, seed u
 		pv = previewCallback
 	}
 
+	opts := genOptions{
+		Seed:           seed,
+		PipelineType:   int32(pipelineType),
+		BackgroundMode: int32(backgroundMode),
+		Steps:          int32(steps),
+		TextureSteps:   int32(textureSteps),
+		AttentionMode:  int32(attentionMode),
+		Guidance:       guidance,
+	}
 	errBuf := make([]byte, 512)
-	r := e.generate(e.pipeline, unsafe.Pointer(&image[0]), int32(len(image)), int32(pipelineType),
-		int32(backgroundMode), seed, int32(steps), guidance, int32(textureSteps), cb, nil, pv, nil,
-		unsafe.Pointer(&errBuf[0]), int32(len(errBuf)))
+	r := e.generate(e.pipeline, unsafe.Pointer(&image[0]), int32(len(image)), &opts,
+		cb, nil, pv, nil, unsafe.Pointer(&errBuf[0]), int32(len(errBuf)))
 	if r == 0 {
 		return nil, fmt.Errorf("%s", cstr(errBuf))
 	}

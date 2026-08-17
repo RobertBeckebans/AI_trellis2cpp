@@ -13,6 +13,7 @@
 #include <vector>
 #include <algorithm>
 #include <array>
+#include <atomic>
 
 #include <chrono>
 #include <cmath>
@@ -30,6 +31,36 @@
 /*****************************************************************************
 ** Helpers
 *****************************************************************************/
+
+// Which path to take: 0 auto (sdpa_auto's size gate), 1 exact, 2 flash. The host
+// sets it per generation via t2_gen_options; TRELLIS2_SDPA_EXACT / _FLASH seed
+// the default so existing scripts and tests are unaffected. Read once and cached
+// because the env answer cannot change, then overwritten by whoever calls the
+// setter — a generation therefore never inherits the previous one's choice.
+static std::atomic<int> g_sdpa_mode { -1 };
+
+int						trellis2_sdpa_mode()
+{
+	int m = g_sdpa_mode.load( std::memory_order_relaxed );
+	if( m < 0 ) {
+		m = std::getenv( "TRELLIS2_SDPA_EXACT" ) ? 1 : ( std::getenv( "TRELLIS2_SDPA_FLASH" ) ? 2 : 0 );
+		g_sdpa_mode.store( m, std::memory_order_relaxed );
+	}
+	return m;
+}
+
+void trellis2_set_sdpa_mode( int mode )
+{
+	// AUTO from the host must not silently override a pinned env var: the env is
+	// how a test or a bisect fixes the path, and a host that simply does not know
+	// about the knob sends 0. So 0 means "whatever the environment says".
+	if( mode <= 0 ) {
+		g_sdpa_mode.store( -1, std::memory_order_relaxed );
+		( void )trellis2_sdpa_mode();
+		return;
+	}
+	g_sdpa_mode.store( mode, std::memory_order_relaxed );
+}
 
 namespace
 {
@@ -571,8 +602,9 @@ ggml_tensor* sdpa_auto( ggml_context* ctx, ggml_tensor* q3, ggml_tensor* k3, ggm
 	ggml_tensor*		kp = ggml_cont( ctx, ggml_permute( ctx, k3, 0, 2, 1, 3 ) ); // [hd, Lk, H]
 	ggml_tensor*		vp = ggml_cont( ctx, ggml_permute( ctx, v3, 0, 2, 1, 3 ) ); // [hd, Lk, H]
 
-	static const bool	force_exact = std::getenv( "TRELLIS2_SDPA_EXACT" ) != nullptr;
-	static const bool	force_flash = std::getenv( "TRELLIS2_SDPA_FLASH" ) != nullptr;
+	const int			mode		= trellis2_sdpa_mode();
+	const bool			force_exact = mode == 1;
+	const bool			force_flash = mode == 2;
 	static const size_t exact_cap	= []() -> size_t {
 		  if( const char* env = std::getenv( "TRELLIS2_SDPA_EXACT_MAX_MB" ) )
 			  return ( size_t )std::strtoull( env, nullptr, 10 ) * 1024u * 1024u;
@@ -3062,12 +3094,11 @@ std::string trellis2_effective_config()
 		 s += '\n';
 	};
 
-	// Mirrors sdpa_auto()'s gate. Re-read rather than shared, because those are
-	// function-local statics inside the attention path; the getenv calls are the
-	// same ones, so the answer is the same.
-	const bool force_exact = std::getenv( "TRELLIS2_SDPA_EXACT" ) != nullptr;
-	const bool force_flash = std::getenv( "TRELLIS2_SDPA_FLASH" ) != nullptr;
-	add( "sdpa", force_exact ? "exact-pinned" : ( force_flash ? "flash-pinned" : "auto" ) );
+	// The same value sdpa_auto() reads, not a re-derivation of it: the host can
+	// now set this per generation, so re-reading the environment here would
+	// report the wrong path in exactly the manifests that need it right.
+	const int mode = trellis2_sdpa_mode();
+	add( "sdpa", mode == 1 ? "exact-pinned" : ( mode == 2 ? "flash-pinned" : "auto" ) );
 
 	size_t exact_cap_mb = 1024;
 	if( const char* env = std::getenv( "TRELLIS2_SDPA_EXACT_MAX_MB" ) )
@@ -3732,6 +3763,14 @@ static bool shape_dec_run( trellis2_shape_dec_model* m,
 			// four, so nothing was logged. Losing voxels is as diagnostic as
 			// adding them.
 			//
+			// The lower threshold was first placed at 3.5, which was chosen
+			// against that 2.82 and left far too much room: a broken 1024 run
+			// measured 3.547 and said nothing, while a second one at 3.432
+			// did warn — the same failure, on either side of the line. Three
+			// points bracket it now (3.432 broken, 3.547 broken, 4.055 healthy
+			// once the attention path was fixed), so it sits at 3.8. See
+			// docs/progress/backend-parity_1024-exact-attention.md.
+			//
 			// So both thresholds are heuristics drawn from a handful of points,
 			// not derived constants, placed with room either side of the
 			// healthy band. They only warn; the caller keeps its mesh, because a
@@ -3748,12 +3787,14 @@ static bool shape_dec_run( trellis2_shape_dec_model* m,
 						" The decoder is adding volume rather than surface, and this mesh is likely to come out"
 						" torn (many non-manifold edges). A different seed, or the next tier down, usually avoids it.\n",
 						ratio );
-				else if( ratio < 3.5 )
+				else if( ratio < 3.8 )
 					std::fprintf( stderr,
 						"[shape_dec] WARNING: the finest subdivision expanded only %.2fx where a surface gives ~4."
 						" The decoder is dropping voxels rather than following a surface, and this mesh is likely to"
 						" come out full of holes. This is what a compute backend losing accuracy at high resolution"
-						" looks like; the next tier down, or a different backend, usually avoids it.\n",
+						" looks like. On ROCm the known cause is flash attention accumulating in F16: set attention"
+						" to exact (or TRELLIS2_SDPA_EXACT=1) and expect ~2x the wall clock. Failing that, the next"
+						" tier down or a different backend usually avoids it.\n",
 						ratio );
 			}
 

@@ -79,6 +79,18 @@ upsample, a second flow model, the 1024 conditioning, one more decoder
 subdivision level, and the row counts at which chunking engages. The
 measurement narrows the search to that set. It does not name the culprit.
 
+**Update 2026-08-18 — it is named, and it is fixed.** What the 1024 tier adds is
+*token count*, and the token count decides which attention runs. At 23,358 tokens
+and 12 heads the `[L_k, L_q, H]` score matrix is 26 GB in one allocation, so
+`sdpa_auto`'s 1 GiB gate always chose flash — whose HIP kernels accumulate in F16
+and ignore `GGML_PREC_F32`. Building the exact path in blocks of query rows
+removes the memory wall (the split is exact with no correction term, because
+`soft_max` runs along keys and every query row is independent), and the finest-level
+expansion ratio at 1024 moves from **3.55 to 4.06**, into the healthy band, with
+7.9M voxels against 4.3M and *fewer* non-manifold edges. Chunking was never
+implicated; it is the attention. One fixture so far. Detail in
+[`docs/progress/backend-parity_1024-exact-attention.md`](../progress/backend-parity_1024-exact-attention.md).
+
 ## Non-goals
 
 - **Making Vulkan the equal of ROCm.** Its floor is a kernel property; this plan
@@ -209,12 +221,44 @@ that gate cannot certify "the backends agree". Whatever bound is chosen for
 backend-vs-backend must be justified by what survives 24 chained forwards, not
 inherited from the port gate.
 
+**D5 — The attention path is a per-generation choice, and its default does not
+move yet.** Added 2026-08-18 with the finding above.
+
+`sdpa_auto`'s 1 GiB gate answered a *memory* question: exact where the score
+matrix fits, flash where it cannot be allocated. Query-blocking has removed that
+wall, so the gate now answers nothing it was designed for. What is left is a time
+question — exact costs 2.3x end to end at 1024 — and there is exactly one
+measurement of the quality it buys, on one fixture at one seed.
+
+So: the mode becomes a per-job option (`t2_gen_options.attention_mode`, exposed in
+the server UI) rather than a new default, and the gate stays where it is until two
+or three further fixtures say what it should be. A default chosen from one sample
+is an extrapolation wearing a measurement's clothes, and this plan exists because
+that has already cost the project once.
+
+Two consequences worth stating. **Every parity number in this plan was taken on
+the flash path** unless it says otherwise, which for the cascade tiers means it
+measured a defect rather than the backend. And an option that changes geometry
+belongs in the manifest, not just in the process environment — `attention` is
+recorded per job for the same reason `background` is (D0).
+
 **D4 — Diagnostics must fire in both directions.** The finest-level expansion
 warning triggers on `ratio > 4`. Vulkan's 1536 collapse ran at **2.82** — below
 four — so nothing was logged for the worst failure observed. A ratio well under
 4 means the decoder is losing voxels, which is as diagnostic as adding volume.
 `tris/verts` (2.39 healthy, 0.075 collapsed) is a second, cheaper tell that
 nothing currently reads.
+
+**D4 addendum, 2026-08-18 — a two-sided warning still needs its threshold in the
+right place.** The lower bound went in at 3.5, chosen against the 2.82 collapse,
+and that left far too much room on a metric whose healthy band is 4.00–4.04: a
+broken 1024 run measured **3.547 and said nothing**, while a second one at 3.432
+warned. Same failure, opposite sides of the line, and the silent one was the run
+that started this investigation. It is now 3.8, bracketed by three points (3.432
+and 3.547 broken, 4.055 healthy). The general lesson is the one D4 already
+implies and did not follow through: a threshold placed relative to the *worst*
+observed failure is not placed relative to the healthy band, and it is the healthy
+band that defines what "abnormal" means.
 
 ## Acceptance criteria
 
@@ -248,6 +292,9 @@ nothing currently reads.
 | `docs/bugs/ggml-rocm-mul-mat-column-limit.md` | the separate rocBLAS defect |
 | `scripts/ref_common.py` | produces every reference this plan gates on — and carries its own sparse conv, which is wrong on ROCm (D2 addendum) |
 | `tests/test_slat.cpp` | the tap that exposed it; reports per-channel cos/rms on a failure and dumps a tap with `TRELLIS2_DUMP_TAPS` |
+| `src/trellis2.cpp` — `sdpa_auto` | the size gate and the query-blocked exact path (D5); `TRELLIS2_SDPA_BLOCK_MB` sizes the blocks |
+| `src/trellis2_capi.h` — `t2_gen_options` | per-job `attention_mode`; ABI 19 |
+| `tests/test_ss_flow_forward.cpp` | runs the exact path by default, so a forced multi-block split tests the blocking against an unchanged reference |
 
 ## Plan (phases)
 
@@ -402,6 +449,21 @@ nothing currently reads.
   anything.
 - **The CPU is slow enough to distort the plan.** Every ground-truth point costs
   100 minutes. Budget them deliberately.
+- **The cascade numbers in this plan predate the attention fix.** Every ROCm and
+  Vulkan figure at 1024 and 1536 above was taken on the flash path, i.e. with the
+  defect D5 describes still in it. They are not wrong, but they measure a
+  configuration nobody should now run, and the ROCm-vs-CPU gap at 1024 (−0.56 %
+  vertices, −47 % non-manifold) in particular needs re-measuring on the exact path
+  before anything is concluded from it. The 512 rows are unaffected — that tier
+  ran flash too, but at 5,121 tokens it does not move enough voxels to matter.
+- **The exact path is measured on one fixture.** Expansion 3.55 → 4.06 on a
+  TV-on-a-stand at seed 42, plus `test_ss_flow_forward` at 3.050e-06 across block
+  sizes. That is enough to name the mechanism and not enough to move a default;
+  two or three further fixtures decide it (D5).
+- **Whether Vulkan has the same defect is unknown.** Its flash kernels are a
+  different implementation, and it was never measured with attention pinned
+  either way. If it does, its 1024/1536 numbers carry two faults at once and
+  separating them needs the option D5 added.
 
 ## Release note
 

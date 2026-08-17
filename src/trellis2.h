@@ -548,6 +548,14 @@ TRELLIS2_API size_t							   trellis2_gpu_free_vram();
 // to be the one reporting it.
 TRELLIS2_API std::string trellis2_effective_config();
 
+// Attention path for the flow DiTs: 0 auto (size-gated), 1 exact, 2 flash.
+// Process-wide, so it must be set before a generation and not during one; the
+// "serialize calls on one pipeline" rule in the C API already requires that.
+// Setting 0 restores whatever TRELLIS2_SDPA_EXACT / _FLASH say, so a host that
+// does not know about the knob cannot override a deliberately pinned path.
+TRELLIS2_API int		 trellis2_sdpa_mode();
+TRELLIS2_API void		 trellis2_set_sdpa_mode( int mode );
+
 /*****************************************************************************
 ** Public API – DINOv3 ViT-L/16 image-conditioning encoder
 **

@@ -78,9 +78,16 @@ because there is more of it.
 ## Affected files
 
 - `src/trellis2.cpp` — `sdpa_auto` builds the score matrix in query blocks;
-  `TRELLIS2_SDPA_BLOCK_MB` (default 1 GiB) sizes them; `trellis2_effective_config`
-  reports `sdpa_block_mb`, which is also how a manifest shows whether a run used
-  this code.
+  `TRELLIS2_SDPA_BLOCK_MB` (default 1 GiB) sizes them; `trellis2_sdpa_mode` /
+  `trellis2_set_sdpa_mode` replace the function-local statics so the host can
+  choose per generation; `trellis2_effective_config` reports `sdpa_block_mb` and
+  reads the live mode rather than re-deriving it from the environment. The
+  subdivision warning's lower threshold moves 3.5 → 3.8.
+- `src/trellis2_capi.h/.cpp` — `t2_gen_options` replaces seven `t2_generate`
+  arguments (15 → 10, back under purego's limit); `enum t2_attention_mode`;
+  ABI 18 → 19.
+- `server/engine.go`, `server/main.go`, `server/web/index.html` — the `attention`
+  select, the job field, and the manifest entry.
 
 ## Deviations / fixed along the way
 
@@ -144,13 +151,16 @@ accurate").
   blocking has removed that wall; what is left is a time question, and there is
   exactly one measurement of it. `TRELLIS2_SDPA_EXACT=1` selects the new path
   today.
-- **An env var is the wrong interface for this.** It is a per-job quality
-  decision and needs a server restart to change. It belongs in the UI, which
-  means bundling `t2_generate`'s parameters into a struct first — the function
-  already carries 15 arguments, exactly purego's limit.
-- **The subdivision warning's lower threshold is too permissive.** It fires below
-  3.5 and let 3.547 through. Three points now bracket it: 3.432 broken, 3.547
-  broken, 4.055 healthy. 3.8 separates them.
+- ~~**An env var is the wrong interface for this.**~~ **Done.** `t2_generate`'s
+  parameters moved into a `t2_gen_options` struct (ABI 18 → 19) — it carried 15
+  arguments, exactly purego's limit, so the next option would have broken the Go
+  host at run time rather than compile time. `attention_mode` is a field on it,
+  a select in the server UI, and recorded per job in the manifest because it
+  changes geometry rather than only speed. `TRELLIS2_SDPA_EXACT`/`_FLASH` still
+  win over a host that sends AUTO, so a pinned path stays pinned.
+- ~~**The subdivision warning's lower threshold is too permissive.**~~ **Done**,
+  3.5 → 3.8, and the warning now names the cause and the remedy instead of only
+  suggesting a lower tier.
 - **Why the 512 tier was fine all along** is worth one sentence somewhere: its
   self-attention score is 1.26 GB, so it misses the 1 GiB gate by 18 % and also
   ran on flash — but at 5,121 tokens flash's F16 accumulation does not move

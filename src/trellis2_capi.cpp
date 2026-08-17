@@ -771,27 +771,31 @@ int t2_preprocess_image_bytes( const void* image_bytes, int image_len, int out_s
 	return preprocess_image_bytes_mode( image_bytes, image_len, out_size, out_rgb, T2_BACKGROUND_AUTO, err, err_len );
 }
 
-t2_mesh_result* t2_generate( t2_pipeline* p,
-	const void*							  image_bytes,
-	int									  image_len,
-	int									  pipeline_type,
-	int									  background_mode,
-	uint64_t							  seed,
-	int									  steps,
-	float								  guidance,
-	int									  texture_steps,
-	t2_progress_fn						  progress,
-	void*								  user,
-	t2_preview_fn						  preview,
-	void*								  preview_user,
-	char*								  err,
-	int									  err_len )
+t2_mesh_result* t2_generate(
+	t2_pipeline* p, const void* image_bytes, int image_len, const t2_gen_options* opts, t2_progress_fn progress, void* user, t2_preview_fn preview, void* preview_user, char* err, int err_len )
 {
 	if( !p ) {
 		copy_err( err, err_len, "null pipeline" );
 		return nullptr;
 	}
-	std::string e;
+	std::string			 e;
+
+	// NULL means every default. The guidance sentinel stays < 0 rather than
+	// becoming <= 0, because guidance 0 is a legal request (no CFG) and folding
+	// it into "default" would silently turn that into 7.5.
+	const t2_gen_options defaults { 0, T2_PIPE_AUTO, T2_BACKGROUND_AUTO, 0, 0, T2_ATTENTION_AUTO, -1.0f };
+	const t2_gen_options o				 = opts ? *opts : defaults;
+	const int			 pipeline_type	 = o.pipeline_type;
+	const int			 background_mode = o.background_mode;
+	const uint64_t		 seed			 = o.seed;
+	const int			 steps			 = o.steps;
+	const float			 guidance		 = o.guidance;
+	const int			 texture_steps	 = o.texture_steps;
+
+	// Process-wide for the duration of this call, which the "serialize calls on
+	// one pipeline" contract already requires. Set every time rather than only
+	// when non-AUTO, so one generation cannot inherit the previous one's choice.
+	trellis2_set_sdpa_mode( o.attention_mode );
 
 	// Reload any flow DiT a previous GPU decode freed for VRAM (usually a no-op).
 	if( !reload_flows( p, e ) ) {

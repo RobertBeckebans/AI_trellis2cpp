@@ -205,6 +205,11 @@ type job struct {
 	Steps        int     `json:"shapeSteps"`
 	TextureSteps int     `json:"textureSteps"`
 	Background   int     `json:"background"`
+	// Which attention the flow DiTs use: "" / "auto" size-gates it, "exact"
+	// accumulates in F32 throughout, "flash" never materializes the scores.
+	// It changes the geometry, not just the speed, so it belongs beside the
+	// sampling parameters a client reads back to reproduce a generation.
+	Attention string `json:"attention,omitempty"`
 
 	image        []byte // processed image passed to TRELLIS
 	source       []byte // exact original upload, used for display and future edits
@@ -358,7 +363,7 @@ func (s *server) worker() {
 		// manifest is written the pipeline may be gone (-unload-idle), and
 		// RunConfig needs it loaded to report the placement decisions.
 		var runCfgUsed map[string]string
-		mesh, err := s.eng.Generate(j.image, j.pipeline, j.Background, j.Seed, j.Steps, j.Guidance, j.TextureSteps,
+		mesh, err := s.eng.Generate(j.image, j.pipeline, j.Background, j.Seed, j.Steps, j.Guidance, j.TextureSteps, attentionMode(j.Attention),
 			func() {
 				setStage("loading models", 0, 0)
 			},
@@ -603,6 +608,7 @@ func (s *server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		Steps:        int(formUint(r, "steps", 12)),
 		TextureSteps: int(formUint(r, "texture_steps", 12)),
 		Guidance:     formFloat(r, "guidance", 7.5),
+		Attention:    r.FormValue("attention"),
 		LivePreview:  r.FormValue("preview") == "1", // expensive preview decodes are explicitly opt-in
 		keyframes:    int(formUint(r, "keyframes", 0)),
 	}
@@ -619,6 +625,20 @@ func readImage(r io.Reader) ([]byte, error) {
 		return nil, fmt.Errorf("image exceeds %d MiB", maxImage>>20)
 	}
 	return data, nil
+}
+
+// attentionMode maps the form value onto enum t2_attention_mode. Anything
+// unrecognised, including the empty string an older client sends, means auto —
+// the engine then falls back to the TRELLIS2_SDPA_* environment, so a pinned
+// path stays pinned rather than being overridden by a client that predates this.
+func attentionMode(s string) int {
+	switch s {
+	case "exact":
+		return attentionExact
+	case "flash":
+		return attentionFlash
+	}
+	return attentionAuto
 }
 
 func pipelineForQuality(quality string) int {

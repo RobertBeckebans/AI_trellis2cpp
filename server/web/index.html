@@ -252,6 +252,14 @@
         <option value="white">remove white</option>
       </select>
     </div>
+    <div>
+      <label for="attention">attention</label>
+      <select id="attention" title="exact accumulates in F32 throughout; flash is faster but accumulates in F16 on ROCm, which loses thin structure at 1024 and above" style="width:100%;background:var(--bg);color:var(--text);border:1px solid var(--edge);border-radius:6px;padding:6px 8px">
+        <option value="auto" selected>auto — exact where it fits</option>
+        <option value="exact">exact — slower, keeps thin detail</option>
+        <option value="flash">flash — fastest</option>
+      </select>
+    </div>
     <div class="row">
       <div><label for="seed">seed</label><input id="seed" type="number" value="42" min="0"></div>
       <div><label for="steps">shape steps</label><input id="steps" type="number" value="12" min="1" max="50"></div>
@@ -695,6 +703,7 @@ $("go").addEventListener("click", async () => {
   fd.append("steps", $("steps").value);
   fd.append("texture_steps", $("texsteps").value);
   fd.append("guidance", $("guidance").value);
+  fd.append("attention", $("attention").value);
   fd.append("preview", stepsOn ? "1" : "0");
   fd.append("keyframes", (stepsOn && kfOn) ? "3" : "0");
 
