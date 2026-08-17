@@ -139,8 +139,64 @@ only because the dump on disk was written with `--skip-hr-sampler` and therefore
 has no `hr_slat` to decode from. Producing the full dump is
 `rocm-native-reference` phase 3, and this plan depends on it.
 
-So: taps against PyTorch always. The decoded voxel set against PyTorch as soon
-as the full dump exists. The CPU stays useful for the one thing PyTorch cannot
+**D2 addendum, 2026-08-17 — "PyTorch is the reference" needs a device, and it is
+the CPU.** The decision above says which *implementation* is authoritative and
+says nothing about where it runs. That gap cost two days.
+`rocm-native-reference` phase 3 produced the SLAT dump on ROCm, and
+`tests/test_slat` failed `out7` at rel-L2 1.103 — in the port, apparently. The
+same taps come out at 4.3e-07 against a dump from the same script with
+`--device cpu`, 18 of 18 green. The reference's own convolution is wrong on
+ROCm; the port never was. Detail in
+`docs/progress/rocm-native-reference_3-slat-dump-and-out7.md`.
+
+Two consequences for this plan. **Every numeric reference this plan gates on is
+produced on the CPU** — phase 1's tap table and phase 1b's voxel set included.
+And a reference disagreement is no longer read as a port defect by default: the
+cheap first move is to reproduce the reference's own step from its own captured
+tensors, which is what finally separated the two here.
+
+**D2b — which implementation a backend name actually selects.** "PyTorch" is
+not always upstream PyTorch, and the selector strings in
+`trellis2/modules/sparse/config.py` have accumulated from three sources. A tap
+means nothing until it is clear which of these produced it, so the provenance
+is recorded here rather than rediscovered:
+
+| Selector | Vanilla (Microsoft) | ROCm fork | Apple port |
+|---|---|---|---|
+| `spconv`, `torchsparse`, `flex_gemm` | allowed, module shipped | — | — |
+| **`none`** | **allowed, no module shipped** | adds `conv_none.py` | — |
+| **`pytorch`** | — | — | adds selector + `conv_pytorch.py` |
+| `xformers`, `flash_attn`, `flash_attn_3` | allowed, module shipped | — | — |
+| **`sdpa`** | — | **adds selector** (`SDPBackend.MATH`) | inherited |
+| `flex_gemm_sparse_attn` | — | — | adds selector |
+
+Three things follow.
+
+**`none` is an empty slot upstream.** Microsoft allows the name and ships no
+`conv_none.py`, so selecting it in vanilla dies in
+`importlib.import_module('..conv_none')`. Two parties fill that slot
+independently and differently: the ROCm fork by shipping the file, and
+`scripts/ref_common.py` by assigning `conv_dispatch._backends["none"]` directly.
+The assignment **bypasses the import**, so it wins — the dispatcher finds the
+entry already cached and never loads the file. That is why the dumps this plan
+gates on report `Conv backend: none` while running neither Microsoft's code nor
+the ROCm fork's, but `ref_common`'s own ~35 lines. The name was right and the
+module behind it was not, which cost most of a day.
+
+**`sdpa` and `pytorch` are both portability fallbacks Microsoft does not need.**
+Upstream targets CUDA with `flex_gemm` and `flash_attn`; each fork had to replace
+one CUDA dependency with something that runs anywhere — `sdpa` swaps flash
+attention for the exact materialized softmax (the ROCm fork's answer to F16
+accumulation on gfx1201), `pytorch` swaps the Triton sparse convolution for
+plain PyTorch (the Apple port's answer to Metal having no Triton). That is the
+same move this port makes with ggml, one layer up, and it is why both forks are
+worth reading when a kernel here misbehaves.
+
+**Reading a `[SPARSE]` banner is not enough.** It prints the selector, not the
+module. When provenance matters, check whether `_backends` was patched.
+
+So: taps against PyTorch always, on the CPU. The decoded voxel set against
+PyTorch as soon as the full dump exists. The CPU stays useful for the one thing PyTorch cannot
 answer — mesh topology after dual-grid extraction, which has no reference dump
 at all — and there it is a proxy, labelled as such. "Closest to ROCm" is never a
 criterion; ROCm is a candidate, not a reference. CPU runs cost 6,038 s against
@@ -190,6 +246,8 @@ nothing currently reads.
 | `docs/VERIFICATION.md` | the parity table and its platform caveat |
 | `docs/plan/rocm-native-reference.md` | where these findings were first recorded |
 | `docs/bugs/ggml-rocm-mul-mat-column-limit.md` | the separate rocBLAS defect |
+| `scripts/ref_common.py` | produces every reference this plan gates on — and carries its own sparse conv, which is wrong on ROCm (D2 addendum) |
+| `tests/test_slat.cpp` | the tap that exposed it; reports per-channel cos/rms on a failure and dumps a tap with `TRELLIS2_DUMP_TAPS` |
 
 ## Plan (phases)
 
@@ -230,6 +288,13 @@ nothing currently reads.
       PyTorch directly — which is the mesh question asked properly, one stage
       before the dual-grid extraction blurs it into edge counters. Costs one
       full dump: a 1024-model sampler run over ~11k tokens.
+
+      **On the CPU** (D2 addendum), which changes the cost: the SLAT dump went
+      from ~4 min to ~75 at 24.6 of 32 cores busy, and this one is larger. Most
+      of that is the sampler, which the decoded voxel set does not need — a
+      variant that loads `hr_slat` from an existing dump and runs only the
+      decoder on the CPU would be both cheaper and a cleaner comparison, since
+      only one variable moves. Worth building before paying for the full run.
 - [x] **Phase 1c — A PyTorch generation in the viewer.** Done —
       `docs/progress/backend-parity_1c-2-pytorch-mesh-and-two-sided-diagnostics.md`.
       Einstein, seed 42, type `512`: 920,630 verts / 1,896,504 tris, 0.98 %

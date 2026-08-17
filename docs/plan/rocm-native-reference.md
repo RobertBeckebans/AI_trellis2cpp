@@ -77,6 +77,30 @@ Consequence: numeric rows regenerated on ROCm must say so in
 baseline rather than in place of it. A number that proves less than it appears
 to is worse than no number.
 
+**D1 addendum, 2026-08-17 — it happened, in the mirror image, and that is the
+worse direction.** The failure mode anticipated above is a *shared* defect that
+cancels and turns a test green while both sides are wrong. What phase 3 actually
+hit is a defect only the **reference** carries, which turns a test red and reads
+as a port defect. `tests/test_slat` failed `out7` at rel-L2 1.103 and
+`lvl4.pre_up` at 0.979 against a ROCm-generated reference; the same taps come
+out at 4.3e-07 and 4.0e-07 against a CPU-generated one, 18 of 18 green. The port
+was correct throughout.
+
+Two things make this direction harder than the one D1 was written for. A green
+test invites no investigation, so a shared defect costs nothing until someone
+looks; a red one sends the search into the port, where it finds nothing, for as
+long as it takes to doubt the reference. And the yardstick here is not upstream
+at all: `scripts/ref_common.py` monkey-patches its own sparse convolution in as
+backend `"none"` and hard-assigns `sp.config.CONV`, so at that stage the parity
+test compares two of this project's implementations and calls one of them the
+reference.
+
+So the consequence above is not enough, and is superseded: **numeric reference
+dumps are produced on the CPU on this hardware.** Not labelled as ROCm-derived —
+not produced on ROCm. The cost is ~75 min against ~4 for the SLAT dump, and most
+of it is the sampler, which the decoder taps do not need. See
+`docs/progress/rocm-native-reference_3-slat-dump-and-out7.md`.
+
 **D2 — Skip the HR sampler for the coordinate captures.** `hr_coords_1536`
 depends only on `up_coords`, which exists *before* the HR flow:
 
@@ -178,12 +202,23 @@ Phase 1 checks it before any numeric tap is trusted.
       `dump_texture_reference.py`. Every row this turns green is a ROCm
       measurement and must be labelled as one. Decide *before* running whether
       that is wanted — see D1.
-      **Half done.** All six f32 GGUFs exist (`dino`, `ss_dec`, `ss_flow`,
+      **Mostly done.** All six f32 GGUFs exist (`dino`, `ss_dec`, `ss_flow`,
       `shape_dec`, `slat_flow`, `slat_flow_1024`) — they were needed in phase 1
       to compare against anything at all, and a lossless conversion of a
       checkpoint is not a measurement, so D1 does not apply to them.
-      Outstanding: `dump_slat_reference.py` and `dump_texture_reference.py`,
-      which are what `slat` and `texture` skip for. Those two *are* D1-affected.
+
+      `dump_slat_reference.py` is **done**, and is what produced the D1 addendum
+      above: `test_slat` is **18 of 18 green** against a CPU-generated reference
+      (`--device cpu`), where the ROCm-generated one failed `out7` at 1.103. It
+      also gained the taps that made the bisection possible — the finest level's
+      `pre_up`, the up-block's `in_hch` / `in_xch`, and its `norm2` / `conv2`.
+      The last three are investigation aids and should come back out; only
+      `pre_up` earns a permanent place.
+
+      Outstanding: `dump_texture_reference.py` (input pair identified, but
+      `tex_slat_flow_512` exists only as f16), and the **full** cascade dump
+      without `--skip-hr-sampler`, which `backend-parity` phase 1b needs. Both
+      on the CPU.
 
 ## What running the suite revealed
 
@@ -229,10 +264,19 @@ CPU/HIP split per test; this is the tracking list.
       Not a regression against `e87069e` — that suspicion is withdrawn. What
       remains is a decision rather than a fix: the test asserts bit-identity,
       which is right on CPU and unattainable on HIP. Either the gate becomes
-      backend-aware, or the shape-dependence is chased into ggml. Note the
-      practical consequence before choosing: at f16 on ROCm the chunk size
-      changes the mesh, and the chunk size comes from the backend's column
-      limit, so production output depends on it.
+      backend-aware, or the shape-dependence is chased into ggml.
+
+      **2026-08-16, two corrections to the paragraph this replaces.** It said
+      "at f16 on ROCm the chunk size changes the mesh, and the chunk size comes
+      from the backend's column limit, so production output depends on it."
+      Neither half holds. Measured at 1024: taking the encoder's level 1 out of
+      the chunked path leaves the output **bit-identical**, PBR block included,
+      so the 3.86e-03 above is a property of `block=37` on a small model rather
+      than of production shapes. And the block size does not come from the
+      column limit: `min(chunk_rows_limit(), max_rows)` is `min(2^18, 2^19|2^21)`,
+      so the limit never binds and the block is always 262,144 — which is
+      `512 x 512`, ggml-vulkan's 2D dispatch plane, and half of the 524,288 that
+      upstream's own `ROCM_SAFE_CHUNK` calls confirmed-safe on this GPU.
 - [~] **Does f16 weight noise fray the geometry?** The question that follows
       from the entry above: the `to_subdiv` head is thresholded at zero, and f16
       leaves ~1e-3 of noise on those logits where f32 leaves ~1e-6. Measured
@@ -372,6 +416,23 @@ CPU/HIP split per test; this is the tracking list.
 
 ## Risks / open questions
 
+- **`ref_common`'s own sparse convolution is wrong on ROCm, and it is not
+  pinned to a line.** Same code, same weights, same model: on the CPU it matches
+  a direct reimplementation at cos +1.000000, on ROCm at +0.164 with 4.9x the
+  amplitude, while its input (`norm2`) and its composition
+  (`pre_up = conv2 + skip`) check out at +1.000000 on both. Leading suspect is
+  the masked scatter-add `out[hit] += contrib`, which goes through atomics on
+  the GPU and would explain the amplitude *and* the run-to-run drift
+  (`intersected frac` 0.5654 → 0.5628 → 0.5527 across three runs at one seed).
+  `torch.searchsorted` is the second candidate. A minimal reproducer would be
+  reportable upstream and would say whether anything in the port touches the
+  same op.
+- **`ref_common.setup()` overrides `SPARSE_CONV_BACKEND` rather than honouring
+  it.** Line 35 sets it as a default, line 260 hard-assigns `sp.config.CONV`
+  after registering its own module as backend `"none"`. So the documented knob
+  does nothing, `trellis2/modules/sparse/conv/conv_none.py` never runs, and an
+  attempt to compare against a real upstream backend silently measures the same
+  path twice. Worth fixing before any backend comparison is attempted here.
 - ~~**D4 is unanswered.**~~ **Answered in phase 0, favourably.** The switches
   are not silent no-ops (they flip `cudnn.allow_tf32`, the `fp32_precision`
   strings, and the SDPA backend selection), and measured against float64 the
