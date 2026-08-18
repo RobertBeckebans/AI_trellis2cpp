@@ -160,6 +160,39 @@ For a ticket this is the strongest single item: two unrelated stacks, two
 independent discoveries, one architecture, and the same mitigation shipped in
 both.
 
+### 2026-08-18: the ceiling depends on the row width, and rises with it
+
+`tests/test_large_rows --sweep` now varies the weight width. Same card, same
+ggml, L = 2,200,000:
+
+| `src0` | C = 32 | C = 64 | C = 128 | C = 256 |
+|---|---|---|---|---|
+| f32 | 2^19 | 2^19 | **2^20** | **2^20** |
+| f16 | 2^21 | 2^21 | *no break* | 2^21 |
+| bf16 | 2^21 | 2^21 | *no break* | *no break* |
+
+Three things follow.
+
+**It is not an element or byte wrap.** Neither `rows × C` (2^24, 2^25, 2^27,
+2^28 for f32) nor `rows × C × sizeof` (2^26, 2^27, 2^29, 2^30) is constant
+across the widths. The earlier speculation at the bottom of this note — a grid
+dimension times a per-block column tile — survives, but only if the tile is
+chosen per shape, which is what the jump between C = 64 and C = 128 looks like.
+
+**The ceiling rises with width, so a single row number is safe as long as it is
+the lowest one.** `mul_mat_max_rows()` states 2^19 for f32 and 2^21 for f16/bf16,
+which are the C ≤ 64 values, i.e. the minimum of each row. The encoder's wider
+convs (128, 256) are therefore over-protected rather than under-protected. That
+was the open worry and it is answered in the favourable direction.
+
+**f16 at C = 128 is non-monotonic** — no break where both 64 and 256 break at
+2^21 — which rules out any simple monotone width→ceiling function and is further
+evidence for shape-dependent kernel selection.
+
+Caveat: "no break" means none below L = 2,200,000. A ceiling above that is
+invisible to this run and would need a larger L, which costs memory
+proportionally.
+
 ### What was still not measured
 
 - NVIDIA/CUDA was not tested at all. The title says ROCm/HIP because that is

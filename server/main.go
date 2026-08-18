@@ -134,7 +134,7 @@ func (sl *stageLog) trackLive(name, verb string, fn func() error) error {
 			case <-done:
 				return
 			case <-ticker.C:
-				log.Printf("    ... still %s (%s)", verb, dur(time.Since(started).Seconds()))
+				log.Printf("    ... still %s (%s)", verb, durShort(time.Since(started).Seconds()))
 			}
 		}
 	}()
@@ -284,7 +284,7 @@ func (s *server) worker() {
 			if total > 0 && stage != stageNames[stageUpsample] &&
 				(now.Sub(lastProgressLog) >= 2*time.Second || step >= total) {
 				lastProgressLog = now
-				log.Printf("    ... %d / %d (%s)", step, total, dur(now.Sub(stageStarted).Seconds()))
+				log.Printf("    ... %d / %d (%s)", step, total, durShort(now.Sub(stageStarted).Seconds()))
 			}
 		}
 		finishTiming := func() {
@@ -1642,14 +1642,28 @@ func main() {
 
 // dur renders a duration for a human reading a log. Seconds alone stop being
 // legible somewhere past a minute — "1307.54 s" has to be divided in the head
-// before it means anything — so anything a minute or longer gains an m/s form
-// and keeps the raw seconds beside it, because the seconds are what gets
-// compared against another run.
+// before it means anything — so anything a minute or longer gains an m/s form.
+// The summary keeps the raw seconds beside it, because that is the number one
+// run gets compared against another by; a live counter is only read to see that
+// something is still moving, so there it would be noise inside a parenthesis
+// that is already inside a parenthesis.
 func dur(seconds float64) string {
+	return durFmt(seconds, true)
+}
+
+// durShort is dur without the raw-seconds suffix, for text already in brackets.
+func durShort(seconds float64) string {
+	return durFmt(seconds, false)
+}
+
+func durFmt(seconds float64, withRaw bool) string {
 	if seconds < 60 {
 		return fmt.Sprintf("%.2f s", seconds)
 	}
 	m := int(seconds) / 60
 	s := seconds - float64(m*60)
+	if !withRaw {
+		return fmt.Sprintf("%dm %04.1fs", m, s)
+	}
 	return fmt.Sprintf("%dm %04.1fs (%.0f s)", m, s, seconds)
 }

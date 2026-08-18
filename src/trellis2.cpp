@@ -4939,7 +4939,17 @@ bool trellis2_shape_enc_encode( trellis2_shape_enc_model* m,
 		// intermediates this path never forms.
 		if( !chunking_disabled() && has_down && !taps && ( int64_t )L > enc_chunk_gate() ) {
 			std::vector<float> lvl_out;
-			if( !shape_enc_level_chunked( m, hp, lvl, C_in, C_out, L, Lc, lvl == 0 ? in_shift : feats, nfine, ncoarse, childidx, chunk_rows_limit(), lvl_out, error ) )
+			// Bound the block by this level's own mul_mat ceiling, the way the
+			// decoder does at its split (see shape_dec's `block`). Today
+			// chunk_rows_limit() is 2^18 and every ceiling is 2^19 or 2^21, so the
+			// min never binds and this changes nothing — which is exactly why it
+			// belongs here now rather than after someone raises the block size and
+			// discovers that only one of the two paths was ever guarded.
+			const std::string  bw	  = "blocks." + std::to_string( lvl ) + "." + std::to_string( hp.num_blocks[lvl] ) + ".conv1.weight";
+			auto			   bwit	  = m->tensors.find( bw );
+			const int64_t	   bcap	  = bwit == m->tensors.end() ? mul_mat_max_rows( GGML_TYPE_F32 ) : mul_mat_max_rows( bwit->second->type );
+			const int64_t	   bblock = std::min( chunk_rows_limit(), bcap );
+			if( !shape_enc_level_chunked( m, hp, lvl, C_in, C_out, L, Lc, lvl == 0 ? in_shift : feats, nfine, ncoarse, childidx, bblock, lvl_out, error ) )
 				return false;
 			feats = std::move( lvl_out );
 			// Same bookkeeping the single-graph path does at the end of a level

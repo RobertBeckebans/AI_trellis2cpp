@@ -18,7 +18,14 @@
 // while the known one passes. A backend that stopped breaking also passes — the
 // split just becomes unnecessarily conservative.
 //
-// Usage: test_large_rows [L]        (default 2200000, just above 2^21)
+// --sweep additionally varies the weight width, because mul_mat_max_rows()
+// states a row count per weight TYPE and the measurement behind it was taken at
+// one width. Measured 2026-08-18 on gfx1201 the ceiling rises with the width
+// (f32: 2^19 at C<=64, 2^20 at C>=128), so the stated numbers are the minimum
+// and the split is conservative at the encoder's wider convs rather than short.
+// Only a width that breaks EARLIER than the stated number fails.
+//
+// Usage: test_large_rows [L] [--sweep]   (default L 2200000, just above 2^21)
 // Exit:  0 as expected, 1 an assumption broke, 77 no GPU backend.
 
 #include "ggml.h"
@@ -36,8 +43,17 @@
 namespace
 {
 
-// Channels of the finest shape-decoder level (hp.channels[4]).
-const int C = 64;
+// Channels of the finest shape-decoder level (hp.channels[4]). The pass/fail
+// gate runs at this width, because it is the shape mul_mat_max_rows() was
+// measured at and therefore the only one it can honestly claim.
+//
+// --sweep varies it, and that is the more interesting run. trellis2.cpp states
+// the ceiling as a ROW COUNT for every width, while the powers of two it lands
+// on suggest a grid dimension times a tile height. If the real bound is on
+// elements or bytes rather than rows, the row count has to fall as the row gets
+// wider — and a limit measured at 64 channels is then wrong for the encoder's
+// 128- and 256-channel convs in the unsafe direction.
+const int C_DEFAULT = 64;
 
 enum op_id { OP_GET_ROWS, OP_MUL_MASK, OP_MUL_MAT, OP_MUL_MAT_F16, OP_MUL_MAT_BF16, OP_ADD, OP_NORM, OP_SILU, OP_REPEAT, OP_COUNT };
 
@@ -110,6 +126,7 @@ float lcg( uint32_t& s )
 // Every graph mirrors how trellis2.cpp's shape_dec_run drives that op.
 bool run_op( ggml_backend_t		backend,
 	int							op,
+	int							C,
 	int64_t						L,
 	const std::vector<float>&	xdata,
 	const std::vector<int32_t>& idata,
@@ -210,11 +227,117 @@ bool run_op( ggml_backend_t		backend,
 	return ok;
 }
 
+// One op at one width: the first row where the GPU stops agreeing with the CPU.
+// -1 means no divergence, which is the healthy answer; -2 means it would not run
+// at all, which at these sizes is usually the allocator refusing.
+int64_t break_row( ggml_backend_t gpu, ggml_backend_t cpu, int op, int C, int64_t L )
+{
+	uint32_t		   s = 12345;
+	std::vector<float> xdata( ( size_t )C * L );
+	for( auto& v : xdata )
+		v = lcg( s );
+	std::vector<int32_t> idata( ( size_t )L );
+	for( int64_t i = 0; i < L; ++i )
+		idata[( size_t )i] = ( int32_t )( ( i * 7919 + 13 ) % L );
+	std::vector<float> mdata( ( size_t )L );
+	for( int64_t i = 0; i < L; ++i )
+		mdata[( size_t )i] = ( i % 5 ) ? 1.0f : 0.0f;
+	std::vector<float> wdata( ( size_t )C * C );
+	for( auto& v : wdata )
+		v = lcg( s );
+
+	std::vector<float> g, c;
+	if( !run_op( gpu, op, C, L, xdata, idata, mdata, wdata, g ) )
+		return -2;
+	if( !run_op( cpu, op, C, L, xdata, idata, mdata, wdata, c ) )
+		return -2;
+	if( g.size() != c.size() )
+		return -3;
+
+	const double tol = op_tol( op );
+	for( size_t i = 0; i < g.size(); ++i ) {
+		const double d = ( double )g[i] - ( double )c[i];
+		if( ( d < 0 ? -d : d ) > tol )
+			return ( int64_t )( i / ( size_t )C );
+	}
+	return -1;
+}
+
+// The ceiling as a function of row width, for the three ops that have one.
+// Prints the break as rows, as elements and as bytes, because which of the three
+// stays constant across widths IS the question: a constant row count means the
+// bound really is on rows and mul_mat_max_rows() is shaped right; a constant
+// element or byte count means its per-type row numbers only hold at the width
+// they were measured at, and the encoder runs wider than that.
+int sweep_widths( ggml_backend_t gpu, ggml_backend_t cpu, int64_t L )
+{
+	const int widths[] = { 32, 64, 128, 256 };
+	const int ops[]	   = { OP_MUL_MAT, OP_MUL_MAT_F16, OP_MUL_MAT_BF16 };
+	const int esize[]  = { 4, 2, 2 }; // src0 element size, for the byte column
+
+	std::printf( "\nSweep over row width. L = %" PRId64 ", weight [C, C].\n", L );
+	std::printf( "  %-16s %5s  %13s  %14s  %14s\n", "op", "C", "first bad row", "rows*C", "rows*C*size" );
+
+	// Only a ceiling BELOW what trellis2.cpp assumes is a defect. One above it
+	// means the split is conservative at that width, which this file already
+	// treats as a pass for the single-width case ("a backend that stopped
+	// breaking also passes"), and the same reasoning has to apply here or the
+	// sweep is permanently red for a safe condition.
+	int unsafe = 0;
+	for( size_t o = 0; o < sizeof( ops ) / sizeof( ops[0] ); ++o ) {
+		const int64_t assumed = expected_break( ops[o] );
+		int64_t		  seen	  = -1;
+		bool		  varies  = false;
+		for( size_t i = 0; i < sizeof( widths ) / sizeof( widths[0] ); ++i ) {
+			const int	  w = widths[i];
+			const int64_t r = break_row( gpu, cpu, ops[o], w, L );
+			if( r == -2 ) {
+				std::printf( "  %-16s %5d  %13s\n", op_name( ops[o] ), w, "not run" );
+				continue;
+			}
+			if( r < 0 ) {
+				std::printf( "  %-16s %5d  %13s   (none below L)\n", op_name( ops[o] ), w, "no break" );
+				continue;
+			}
+			const char* verdict = r < assumed ? "  <-- BELOW mul_mat_max_rows" : "";
+			std::printf( "  %-16s %5d  %13" PRId64 "  %14" PRId64 "  %14" PRId64 "%s\n", op_name( ops[o] ), w, r, r * w, r * w * esize[o], verdict );
+			if( r < assumed )
+				++unsafe;
+			if( seen < 0 )
+				seen = r;
+			else if( seen != r )
+				varies = true;
+		}
+		if( varies )
+			std::printf( "  %-16s  ^ ceiling varies with width; mul_mat_max_rows() states one number\n"
+						 "  %-16s    per weight type, so it has to be the LOWEST of these to be safe.\n",
+				"",
+				"" );
+	}
+
+	std::printf( "\n  Note: \"no break\" means none below L = %" PRId64 ", not that there is none.\n", L );
+	if( unsafe )
+		std::printf( "  %d width(s) break EARLIER than mul_mat_max_rows() assumes -- the split is\n"
+					 "  not conservative there, and trellis2.cpp needs the lower number.\n",
+			unsafe );
+	else
+		std::printf( "  No width breaks earlier than mul_mat_max_rows() assumes, so the split is\n"
+					 "  conservative everywhere measured.\n" );
+	return unsafe;
+}
+
 } // namespace
 
 int main( int argc, char** argv )
 {
-	const int64_t L = argc > 1 ? std::atoll( argv[1] ) : 2200000;
+	bool	sweep = false;
+	int64_t L	  = 2200000;
+	for( int i = 1; i < argc; ++i ) {
+		if( std::strcmp( argv[i], "--sweep" ) == 0 )
+			sweep = true;
+		else
+			L = std::atoll( argv[i] );
+	}
 	if( L <= 0 ) {
 		std::fprintf( stderr, "bad L\n" );
 		return 1;
@@ -239,6 +362,9 @@ int main( int argc, char** argv )
 	}
 	ggml_backend_t cpu = ggml_backend_cpu_init();
 
+	// The gate runs at one width; --sweep varies it afterwards.
+	const int	   C = C_DEFAULT;
+
 	std::printf( "GPU: %s\n", gpu_name.c_str() );
 	std::printf( "L = %" PRId64 "  (2^21 = 2097152, %s)  matrix [%d, %" PRId64 "] = %" PRId64 " elements\n\n", L, L > 2097152 ? "above" : "below", C, L, ( int64_t )C * L );
 
@@ -260,11 +386,11 @@ int main( int argc, char** argv )
 	int failures = 0, skipped = 0;
 	for( int op = 0; op < OP_COUNT; ++op ) {
 		std::vector<float> g, c;
-		if( !run_op( gpu, op, L, xdata, idata, mdata, wdata, g ) ) {
+		if( !run_op( gpu, op, C, L, xdata, idata, mdata, wdata, g ) ) {
 			++skipped;
 			continue;
 		}
-		if( !run_op( cpu, op, L, xdata, idata, mdata, wdata, c ) ) {
+		if( !run_op( cpu, op, C, L, xdata, idata, mdata, wdata, c ) ) {
 			++skipped;
 			continue;
 		}
@@ -328,6 +454,14 @@ int main( int argc, char** argv )
 	}
 
 	std::printf( "\n%d op(s) diverged, %d skipped\n", failures, skipped );
+	// Opt-in: three more runs per width, and it answers a different question
+	// than the gate. Not "did the ceiling move since last time" but "is a row
+	// count the right unit for it at all". A ceiling that varies with the width
+	// fails on the same principle as a changed break row — trellis2.cpp would be
+	// carrying an assumption that does not hold.
+	if( sweep )
+		failures += sweep_widths( gpu, cpu, L );
+
 	ggml_backend_free( gpu );
 	ggml_backend_free( cpu );
 	return failures ? 1 : 0;

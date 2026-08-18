@@ -60,6 +60,8 @@ ctest --test-dir build                  # full parity (needs ggufs/ + dumps/)
 | **1536 cascade** — end-to-end run on the R9700 | manual (`server/`, 2026-08-13) | achieved resolution, stage wall clock, mesh size, VRAM ceiling | **RUNS at full 1536³**, 2 of 2 objects, no budget reduction. 315 s total, 1536³ decode 20.2 s, 6.66M-tri mesh, VRAM ceiling < 16 GB of 32 GB. See `docs/progress/1536-cascade_phase3-measure.md` |
 | **1536 cascade** — mesh topology across tiers and seeds | manual, `[mesh]` line under `TRELLIS2_TIMING` | non-manifold and boundary edge fraction of the extracted mesh | **Usually fine, one measured failure.** 4 of 5 runs land at 0.36–1.03 % non-manifold regardless of tier; the best result of all is a 1536 one (0.357 %, cleaner than every 1024 run). The outlier is a 9.7M-voxel 1536 mesh at **7.47 %**, where the finest subdivision ran away (L4/L3 = 4.52 against ~4.0 everywhere else). See `docs/progress/1536-cascade_backend-limits.md` |
 | **1536 cascade** — early warning for that failure | same | finest-level expansion ratio L4/L3 in the `[shape_dec]` lines | 4.00–4.04 on every clean run, **4.52** on the broken one. Above 4 means the subdivision is thickening rather than following a surface. Flags the catastrophic case before mesh extraction; it is **not** a fine-grained quality score |
+| **cascade attention path** — geometry quality at 1024 and 1536 | manual (`server/`, 2026-08-18), `[shape_dec]` expansion line + `[mesh]` counters | finest-level expansion ratio, voxel and triangle counts, edge fractions | **Flash loses roughly half the surface; exact recovers it.** Same image and seed 42 at 1024: flash 3.547/3.553 expansion, 4,311,749 voxels, 0.87 % non-manifold — against exact-blocked **4.055/4.058**, 7,923,512 voxels, **0.69 %**. At 1536: exact **4.008/4.012**, 8,049,970 voxels, 16.1M triangles, 0.265 % boundary and 0.662 % non-manifold, the lowest boundary fraction recorded here. More geometry at *better* topology, so the flash runs were dropping surface rather than exact inventing it. Cost 2.3x wall clock. Two fixtures, two tiers, one seed each. See `docs/progress/backend-parity_1024-exact-attention.md` |
+| **cascade attention path** — blocked exact vs. unblocked exact | `test_ss_flow_forward` with `TRELLIS2_SDPA_BLOCK_MB` | full output against the fp32 reference | **PASS at every block size.** 3.050e-06 in one block; 3.042 / 3.098 / 3.083e-06 at 16 / 4 / 1 MB blocks, i.e. reduction order only, three orders below the 2e-03 gate. Flash pinned on the same test is **5.198e-02, FAIL** — the contrast that makes the row above matter |
 | **1536 cascade** — decode VRAM peak, host RAM high-water | — | — | **NOT INSTRUMENTED.** The < 16 GB ceiling is an external reading, so it bounds but does not pin the decode transient; `decode_vram_peak`'s 1536 entry stays the conservative extrapolation. Host RAM: generation side ~0.5 GB (derived from the mesh size), export side (plan D5) still unmeasured |
 
 Notes:
@@ -123,6 +125,16 @@ Notes:
   524,288-row limit the ROCm fork observes everywhere else
   (`trellis2/modules/sparse/linear.py`); unconfirmed. This does not apply to the
   1536 row above, where both sides compute the same integer quantization.
+- **Flash attention is not a precision detail at the cascade tiers.** ggml's
+  CUDA/HIP flash kernels accumulate in F16 and ignore
+  `ggml_flash_attn_ext_set_prec(GGML_PREC_F32)` — nothing under `ggml-cuda`
+  reads it for that op. Measured on ROCm: 89.8 % latent sign agreement against
+  exact's 99.9 %. The decoder thresholds subdivision at zero, so the voxels that
+  flip are the marginal ones thin structure is made of; massive parts survive and
+  thin parts die. Every cascade number in the table above that does not say
+  otherwise was taken on the flash path and therefore measured that defect as
+  well as the backend. 512 ran flash too, but at 5,121 tokens it does not move
+  enough voxels to matter.
 - **Sampler drift.** The 12-step Euler + CFG-rescale loop chaotically amplifies
   per-step fp differences between backends; it validates tightly on CPU and
   drifts to ~0.1 rel-L2 on GPU. The decoder gate therefore decodes the
