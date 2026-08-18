@@ -111,12 +111,12 @@ func (sl *stageLog) dump(title string) {
 	for _, name := range sl.order {
 		// Names starting with "-" are sub-stages of the entry above them.
 		if strings.HasPrefix(name, "-") {
-			log.Printf("    %-30s %6.2f s", name, float64(sl.ms[name])/1000)
+			log.Printf("    %-30s %16s", name, dur(float64(sl.ms[name])/1000))
 			continue
 		}
-		log.Printf("  %-32s %6.2f s", name, float64(sl.ms[name])/1000)
+		log.Printf("  %-32s %16s", name, dur(float64(sl.ms[name])/1000))
 	}
-	log.Printf("  %-32s %6.2f s", "total", time.Since(sl.started).Seconds())
+	log.Printf("  %-32s %16s", "total", dur(time.Since(sl.started).Seconds()))
 }
 
 // track runs fn under a heartbeat: none of the export stages report progress
@@ -134,7 +134,7 @@ func (sl *stageLog) trackLive(name, verb string, fn func() error) error {
 			case <-done:
 				return
 			case <-ticker.C:
-				log.Printf("    ... still %s (%.0f s)", verb, time.Since(started).Seconds())
+				log.Printf("    ... still %s (%s)", verb, dur(time.Since(started).Seconds()))
 			}
 		}
 	}()
@@ -284,7 +284,7 @@ func (s *server) worker() {
 			if total > 0 && stage != stageNames[stageUpsample] &&
 				(now.Sub(lastProgressLog) >= 2*time.Second || step >= total) {
 				lastProgressLog = now
-				log.Printf("    ... %d / %d (%.1f s)", step, total, now.Sub(stageStarted).Seconds())
+				log.Printf("    ... %d / %d (%s)", step, total, dur(now.Sub(stageStarted).Seconds()))
 			}
 		}
 		finishTiming := func() {
@@ -454,9 +454,9 @@ func (s *server) worker() {
 		j.mu.Unlock()
 		log.Printf("─── Generation timings (job %s) ───", j.ID)
 		for _, timing := range timings {
-			log.Printf("  %-32s %6.2f s", timing.Stage, float64(timing.Milliseconds)/1000)
+			log.Printf("  %-32s %16s", timing.Stage, dur(float64(timing.Milliseconds)/1000))
 		}
-		log.Printf("  %-32s %6.2f s", "total", float64(duration)/1000)
+		log.Printf("  %-32s %16s", "total", dur(float64(duration)/1000))
 		log.Printf("job %s finished in %.1fs (live preview: %t)", j.ID, float64(duration)/1000, preview)
 	}
 }
@@ -1638,4 +1638,18 @@ func main() {
 
 	log.Printf("listening on %s", *addr)
 	log.Fatal(http.ListenAndServe(*addr, mux))
+}
+
+// dur renders a duration for a human reading a log. Seconds alone stop being
+// legible somewhere past a minute — "1307.54 s" has to be divided in the head
+// before it means anything — so anything a minute or longer gains an m/s form
+// and keeps the raw seconds beside it, because the seconds are what gets
+// compared against another run.
+func dur(seconds float64) string {
+	if seconds < 60 {
+		return fmt.Sprintf("%.2f s", seconds)
+	}
+	m := int(seconds) / 60
+	s := seconds - float64(m*60)
+	return fmt.Sprintf("%dm %04.1fs (%.0f s)", m, s, seconds)
 }
