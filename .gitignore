@@ -94,4 +94,5 @@ docs/bugs/*
 !docs/bugs/.gitkeep
 docs/screenshots/*
 !docs/screenshots/.gitkeep
+docs/ref/
 profile.json*

@@ -208,6 +208,15 @@ reference regenerated in `rocm-native-reference` phase 1 — verified correct to
 float64 — the port measures `embd` **4.618e-04** and `cond` **1.623e-04**,
 identical on CPU and GPU, `ggml_conv_2d`'s F16 im2col suspected and unconfirmed.
 
+**Resolved 2026-08-18: the gate does not move, the im2col does.** Of the three
+resolutions below the reviewer took the third — fix the patch-embedding precision
+before Phase 1, rather than isolating NAF from it or loosening 1e-5 to 2e-04. It
+is the only one that leaves the plan's fidelity claim intact, and the stage is one
+every `proj` path reads pointwise, so the fix is worth more than this plan. It
+becomes a **precondition**: `rocm-native-reference`'s open `dino` item is now
+named as blocking Phase 1 and Phase 4 here, and `docs/VERIFICATION.md`'s ≤ 7e-7
+row is what the fix has to restore.
+
 Under `cross` that is tolerable: 1029 tokens enter as a permutation-invariant K/V
 set and an error of that size diffuses. Under `proj` the same patch map is sampled
 **pointwise** at projected pixel positions, fed through NAF and added per block —
@@ -245,20 +254,10 @@ not bind; retaining the licence text and attributing the source discharges it.
 already carried, so no `torch.hub` fetch is needed at reference time and Phase 4
 converts a file rather than a download.
 
-One file inside that repository carries a different header, and it is worth a
-line because it is the only one: `src/layers/rope.py` opens with *"Copyright (c)
-Meta Platforms, Inc. … may be used and distributed in accordance with the terms
-of the DINOv3 License Agreement"*. It is the **only** file under `src/` or
-`utils/` with any copyright header at all, and Valeo shipping their copy under
-Apache-2.0 does not relicense Meta's code. So D0's derivation permission does not
-reach that one file.
-
-This changes no work. D5 already says the RoPE is built from this port's own
-DINOv3 implementation, the project already carries the DINOv3 License for the
-DINOv3 *weights* (`THIRD_PARTY.md` §4), and nothing here needs Meta's source
-text. It is recorded only so that a later file-by-file transcription under D0
-knows which single file to skip — `backend-parity` D2b one level further down: a
-repository licence is not a file licence.
+The RoPE needs no source from either reference in any case:
+`image_encoder.rope.periods` is a stored buffer in the checkpoint, so the 16
+frequencies are read from the GGUF rather than derived, and this port already has
+its own DINOv3 RoPE for the rest (D5, D10).
 
 **2. D4's exactness argument is false, and the cause is `GroupNorm`.** D4 stated
 that NAF's parts "are all local", so evaluating it at the projected sample
@@ -450,10 +449,12 @@ return proj_out + global_out
       1029 cross-attention tokens. Either this criterion measures NAF in
       isolation, against the reference's DINO features, or it waits on the
       `ggml_conv_2d` im2col precision. Decide which; do not quietly
-      loosen the number (Update point 7). The "exact against a dense
-      pass" half of this criterion now applies to the **attention only**:
-      the image encoder is not sparsely evaluable at all, because its
-      `GroupNorm` statistics are global (Update 2026-08-18b point 2, D4).
+      loosen the number. **Decided 2026-08-18: neither** — the
+      `ggml_conv_2d` im2col precision is fixed first and 1e-5 stands
+      (Update point 7). The "exact against a dense pass" half of this
+      criterion applies to the **attention only**: the image encoder is not
+      sparsely evaluable at all, because its `GroupNorm` statistics are
+      global (Update 2026-08-18b point 2, D4).
 - [ ] A Pixal3D generation runs end to end through `t2_generate` and
       produces a mesh visibly closer to the input image than the
       TRELLIS.2 path on the same seed, with `attention_mode` pinned and
@@ -615,11 +616,11 @@ to reproduce.
 Two revisions from reading the source. The RoPE question is **answered**:
 it is the DINOv3 axial formulation verbatim, `rope_base=100.0`,
 `normalize_coords="separate"`, `periods = base^(2i/(D_head/2))`, with
-`rope_rescale` inert outside training. And it must nevertheless be built
-from **our** DINOv3 RoPE rather than NAF's, because
-`docs/ref/NAF/src/layers/rope.py` is under the DINOv3 License Agreement
-rather than the repository's Apache-2.0 (Update 2026-08-18b point 1) —
-the one file in either reference that D0's permission does not cover.
+`rope_rescale` inert outside training. It is nevertheless built from
+**our** DINOv3 RoPE, for two reasons that have nothing to do with
+transcription: the port already has that code, and the 16 frequencies are
+a stored buffer in the checkpoint (D10), so nothing has to be derived from
+a formula at all.
 
 What still has to be read out of `natten` rather than inferred is the
 **border rule** for a window that would leave the grid. Neighborhood

@@ -318,6 +318,17 @@ CPU/HIP split per test; this is the tracking list.
       rather than a backend. `ggml_conv_2d`'s F16 im2col is the suspect and is
       **not** verified. Note `ss_dec`'s dense 3D convolutions measure 6.172e-07
       on the same build, so it is not a blanket "ggml convolutions are f16".
+
+      **Promoted 2026-08-18: this now blocks another plan.** It was the least
+      urgent item on this list — one stage, one order of magnitude, and the
+      `cross` conditioning diffuses it across 1029 permutation-invariant K/V
+      tokens. Under Pixal3D's `proj` conditioning the same patch map is sampled
+      **pointwise** at projected pixel positions and added per block, so the
+      port's least accurate stage becomes the geometry conditioning's input.
+      `docs/plan/pixal3d-proj-conditioning.md` phases 1 and 4 are gated on it, by
+      the reviewer's decision of 2026-08-18 to fix the precision rather than
+      loosen that plan's NAF gate. Target: restore `docs/VERIFICATION.md`'s
+      ≤ 7e-07 row.
 - [ ] **`test_ss_dec` loads the decoder on the GPU** where `trellis2_capi.cpp`
       pins it to the CPU, so it hits the `CONV_3D` gap the shipped code never
       reaches (`docs/PLAN.md` documents that stage as CPU-only by design). One

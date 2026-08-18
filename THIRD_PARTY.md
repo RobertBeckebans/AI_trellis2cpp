@@ -248,13 +248,6 @@ reviewed.
 - **License:** Apache License 2.0 (`docs/ref/NAF/LICENSE`). The repository ships
   **no `NOTICE` file**, so §4(d) imposes no notice-propagation duty; retaining
   the licence text and attributing the source discharges it.
-- **One file differs:** `src/layers/rope.py` carries its own header — Copyright
-  (c) Meta Platforms, under the **DINOv3 License Agreement** — and is the only
-  file under `src/` or `utils/` with a copyright header at all. Valeo's
-  Apache-2.0 does not relicense Meta's code, so that file is not adopted or
-  translated; this port's existing DINOv3 RoPE is the source for the same
-  mathematics, which is what the plan specified anyway. Noted so a later
-  file-by-file transcription knows the one file to skip.
 - **Weights:** `models/NAF/naf_release.pth`, 2,664,431 B, from the project's own
   releases. Not redistributed by this repository.
 - **Status:** reference only, under `docs/ref/NAF/`. Nothing imported.

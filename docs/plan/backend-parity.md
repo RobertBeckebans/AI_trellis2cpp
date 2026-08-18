@@ -561,13 +561,24 @@ question needs a generation.
   carry the F16-accumulation defect the HIP ones do. Vulkan's 1024/1536 numbers
   therefore carry one fault, not two — but it is the fault f32 weights address,
   so they still want re-measuring at f32.
-- **A `transformers` upgrade silently invalidates every DINO reference** (D2c).
-  It is not currently pinned anywhere that a person would look before upgrading.
-- **`docs/ref/` is untracked.** The provenance table (D2b), D2c and the
-  `conv_pytorch.py` proposal all cite a third-party MIT repository that is not in
-  the repository. Either commit it or write down where it came from; the plans
-  already carry the same complaint about `docs/ideas/`, which suggests this is a
-  habit rather than an oversight.
+- ~~**A `transformers` upgrade silently invalidates every DINO reference** (D2c).
+  It is not currently pinned anywhere that a person would look before upgrading.~~
+  **It is pinned** — `pyproject.toml` at `transformers==4.57.1`, with
+  `docs/reference-environment.md` explaining it. Corrected 2026-08-18. What was
+  missing is the *reason*: both places gave only the Windows one (AMD's torch has
+  no distributed support, and transformers 5 imports `torch.distributed.fsdp` at
+  module level), so the pin would be lifted the day that is fixed — taking every
+  DINO reference with it. Both now carry D2c as the second, independent reason,
+  and name the Apple port's `_encoder` lookup as the change that would make the
+  pin unnecessary.
+- ~~**`docs/ref/` is untracked.**~~ **Deliberate, decided 2026-08-18.** The
+  reference trees stay out of the repository and `docs/ref/` is now in
+  `.gitignore` beside `docs/ideas/`. They are public GitHub projects, so citing a
+  local path costs nothing as long as the citation also names the project a reader
+  can clone — which is the one obligation this decision carries, and the reason
+  `THIRD_PARTY.md`'s NAF entry leads with the URL rather than the path. Each tree
+  keeps its own `.git`, so committing them was never a `git add` away in any
+  case.
 
 ## Release note
 

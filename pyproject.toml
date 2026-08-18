@@ -22,9 +22,15 @@ requires-python = ">=3.12,<3.13"
 
 # The pip set of docker/Dockerfile.ref. torch is deliberately not here: the
 # container gets it from its base image, and natively it comes from the backend
-# extra below. transformers is pinned as in the Dockerfile — it also has to stay
-# below 5.x on Windows, where AMD's torch is built without distributed support
-# and transformers 5's module-level `torch.distributed.fsdp` import crashes.
+# extra below. transformers is pinned as in the Dockerfile, for two independent
+# reasons — do not lift it because one of them goes away:
+#  1. On Windows AMD's torch is built without distributed support, and
+#     transformers 5 imports `torch.distributed.fsdp` at module level.
+#  2. It is reference-affecting. On 5.x `DINOv3ViTModel` nests one level deeper,
+#     which makes the reference's image_feature_extractor take a branch that
+#     returns `last_hidden_state` (an affine LayerNorm) instead of iterating the
+#     layers by hand. Different features, no error, every DINO reference moved —
+#     and `test_dino` reports it as a port failure. See docs/reference-environment.md.
 dependencies = [
     "transformers==4.57.1",
     "safetensors",

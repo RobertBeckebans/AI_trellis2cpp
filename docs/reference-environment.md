@@ -51,6 +51,27 @@ Backend-specific notes:
   PyTorch index. AMD's Windows torch is built without distributed support, so
   `transformers` has to stay below 5.x, which imports `torch.distributed.fsdp`
   at module level. The 4.57.1 pin from the Dockerfile already satisfies this.
+
+**The `transformers` pin has a second reason, and it outlives the first.**
+A 5.x upgrade is a **reference-affecting change** on any platform.
+`trellis2/modules/image_feature_extractor.py` branches on
+`hasattr(self.model, 'model')`: not taken it iterates the transformer layers by
+hand, taken it returns `last_hidden_state` — `self.norm(hidden_states)`, a
+LayerNorm *with* affine parameters — and then applies a second, affine-free
+`F.layer_norm` over it. Two different feature tensors, and no error either way.
+On 4.57.1 the branch is not taken (`DINOv3ViTModel` declares `self.layer` at the
+top level and has no `.model`), which is why `dumps/reference_dino.gguf` and
+`test_dino` are honest today. On 5.x it fires, every DINO reference moves, and
+`test_dino` points at the port — the same shape of trap as the `out7` episode in
+`docs/progress/rocm-native-reference_3-slat-dump-and-out7.md`, which sent two
+days of searching to the side that had nothing to find.
+
+So the Windows reason is platform-specific and the distributed-support gap will
+eventually close; this one will not. If the pin ever has to move, adopt the Apple
+port's resolution first (`docs/ref/trellis2-apple/`): its `_encoder` property
+looks for `.layer` on the model and then on `.model`, so both layouts iterate
+manually and no library version selects a different mathematical path. Then
+regenerate the DINO reference and re-measure, in that order.
 - **Linux/ROCm** uses the PyTorch ROCm index and additionally needs
   `triton-rocm`, which the Linux ROCm torch wheels hard-depend on and which
   exists only on that index.
