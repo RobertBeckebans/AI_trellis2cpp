@@ -207,6 +207,34 @@ worth reading when a kernel here misbehaves.
 **Reading a `[SPARSE]` banner is not enough.** It prints the selector, not the
 module. When provenance matters, check whether `_backends` was patched.
 
+**D2c — a library *version* selects an implementation too, and one already does.**
+Added 2026-08-18 from the Apple-port comparison. D2b is about a backend name not
+naming a module; this is the same failure one layer up, and it is live rather
+than historical.
+
+`trellis2/modules/image_feature_extractor.py:97` branches on
+`hasattr(self.model, 'model')`. Not taken, it iterates the transformer layers by
+hand. Taken, it returns `last_hidden_state` — which is `self.norm(hidden_states)`,
+a LayerNorm **with** affine parameters (`modeling_dinov3_vit.py:529`) — and then
+applies a *second*, affine-free `F.layer_norm` over it. The manual path never
+touches `self.norm` at all. Two different feature tensors, no error either way.
+
+The installed **transformers 4.57.1** does not take the branch (`DINOv3ViTModel`
+has `.layer` at the top level and no `.model`), so `dumps/reference_dino.gguf`
+and `test_dino`'s 7e-7 are honest today. A 5.x upgrade takes it, moves every DINO
+reference, and turns `test_dino` red — pointing at the port. Exactly the shape of
+the `out7` episode, and the reason that one cost two days.
+
+Consequence: a `transformers` upgrade is a **reference-affecting change** and must
+be treated as one. Either adopt the Apple port's resolution — it looks for
+`.layer` on the model and then on `.model`, so both layouts iterate manually and
+no version picks a different mathematical path — or pin the version and record
+why. `docs/reference-environment.md` is where that belongs.
+
+The general rule the two decisions share: **provenance is not what the code
+selects, it is what actually ran.** A selector string, a patched dispatch table
+and a library version can each break that link without saying so.
+
 So: taps against PyTorch always, on the CPU. The decoded voxel set against
 PyTorch as soon as the full dump exists. The CPU stays useful for the one thing PyTorch cannot
 answer — mesh topology after dual-grid extraction, which has no reference dump
@@ -291,6 +319,8 @@ band that defines what "abnormal" means.
 | `docs/plan/rocm-native-reference.md` | where these findings were first recorded |
 | `docs/bugs/ggml-rocm-mul-mat-column-limit.md` | the separate rocBLAS defect |
 | `scripts/ref_common.py` | produces every reference this plan gates on — and carries its own sparse conv, which is wrong on ROCm (D2 addendum) |
+| `trellis2/modules/image_feature_extractor.py` | the version-dependent DINOv3 path (D2c); gitignored working copy |
+| `docs/ref/trellis2-apple/` | the second fork the provenance table and D2c were derived from; see `docs/progress/apple-port-comparison.md` |
 | `tests/test_slat.cpp` | the tap that exposed it; reports per-channel cos/rms on a failure and dumps a tap with `TRELLIS2_DUMP_TAPS` |
 | `src/trellis2.cpp` — `sdpa_auto` | the size gate and the query-blocked exact path (D5); `TRELLIS2_SDPA_BLOCK_MB` sizes the blocks |
 | `src/trellis2_capi.h` — `t2_gen_options` | per-job `attention_mode`; ABI 19 |
@@ -464,6 +494,13 @@ band that defines what "abnormal" means.
   different implementation, and it was never measured with attention pinned
   either way. If it does, its 1024/1536 numbers carry two faults at once and
   separating them needs the option D5 added.
+- **A `transformers` upgrade silently invalidates every DINO reference** (D2c).
+  It is not currently pinned anywhere that a person would look before upgrading.
+- **`docs/ref/` is untracked.** The provenance table (D2b), D2c and the
+  `conv_pytorch.py` proposal all cite a third-party MIT repository that is not in
+  the repository. Either commit it or write down where it came from; the plans
+  already carry the same complaint about `docs/ideas/`, which suggests this is a
+  habit rather than an oversight.
 
 ## Release note
 

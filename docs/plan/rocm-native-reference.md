@@ -164,6 +164,7 @@ Phase 1 checks it before any numeric tap is trusted.
 | `docs/VERIFICATION.md` | rows must name the backend a reference came from (D1) |
 | `docs/plan/1536-cascade.md` | criteria 2 and 5 |
 | `docs/ideas/TRELLIS-2_rocm/` | the reference implementation the scripts import (gitignored) |
+| `docs/ref/trellis2-apple/` | a second independent fork of the same upstream; supplies `conv_pytorch.py` and the row-limit evidence above, and its DINOv3 handling is the one to copy |
 
 ## Plan (phases)
 
@@ -420,19 +421,36 @@ CPU/HIP split per test; this is the tracking list.
   pinned to a line.** Same code, same weights, same model: on the CPU it matches
   a direct reimplementation at cos +1.000000, on ROCm at +0.164 with 4.9x the
   amplitude, while its input (`norm2`) and its composition
-  (`pre_up = conv2 + skip`) check out at +1.000000 on both. Leading suspect is
-  the masked scatter-add `out[hit] += contrib`, which goes through atomics on
-  the GPU and would explain the amplitude *and* the run-to-run drift
-  (`intersected frac` 0.5654 → 0.5628 → 0.5527 across three runs at one seed).
-  `torch.searchsorted` is the second candidate. A minimal reproducer would be
-  reportable upstream and would say whether anything in the port touches the
-  same op.
+  (`pre_up = conv2 + skip`) check out at +1.000000 on both. The **leading suspect
+  changed on 2026-08-17**, and the new one comes from the ROCm fork's own source:
+  `trellis2/modules/sparse/linear.py` documents hipBLASLt/rocBLAS corrupting
+  `[N, K] @ [K, M]` with small K/M past ~800k rows and chunks at 524,288 in three
+  places, while `ref_common.py:243`'s per-offset GEMM — `feats[src] @ w.t()`, the
+  same shape — runs unchunked to 1.19M rows. The level boundary fits without
+  remainder: levels 0–3 and `conv1` sit under the threshold and pass, `norm2` has
+  no GEMM and passes, and `conv2` is the first step over it and is the one that
+  fails. The masked scatter-add `out[hit] += contrib` explains the amplitude and
+  the run-to-run drift (`intersected frac` 0.5654 → 0.5628 → 0.5527) but *not*
+  why the break lands exactly at that row count, so it drops to second;
+  `torch.searchsorted` is third. Neither is confirmed. The one-line test is to
+  chunk `ref_common`'s conv at 524,288 and regenerate on ROCm — if it passes,
+  numeric dumps cost 4 minutes again instead of 75, which would materially
+  loosen D1's consequence. See
+  [`docs/progress/apple-port-comparison.md`](../progress/apple-port-comparison.md).
 - **`ref_common.setup()` overrides `SPARSE_CONV_BACKEND` rather than honouring
   it.** Line 35 sets it as a default, line 260 hard-assigns `sp.config.CONV`
   after registering its own module as backend `"none"`. So the documented knob
   does nothing, `trellis2/modules/sparse/conv/conv_none.py` never runs, and an
   attempt to compare against a real upstream backend silently measures the same
   path twice. Worth fixing before any backend comparison is attempted here.
+  A ready replacement now exists:
+  `docs/ref/trellis2-apple/trellis2/modules/sparse/conv/conv_pytorch.py` is pure
+  PyTorch, device-agnostic and deterministic (gather → `bmm` → sum, no masked
+  scatter-add). Two caveats: it shares an algorithm shape with this port, so it is
+  less independent than an alien implementation — though `ref_common`'s own conv
+  was also written for this project, so it is a step sideways, not backwards — and
+  it neither chunks nor bounds its `batch·D·H·W` int64 lookup table, 8.6 GB at
+  1024³.
 - ~~**D4 is unanswered.**~~ **Answered in phase 0, favourably.** The switches
   are not silent no-ops (they flip `cudnn.allow_tf32`, the `fp32_precision`
   strings, and the SDPA backend selection), and measured against float64 the
