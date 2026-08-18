@@ -202,18 +202,26 @@ The LGPL components are consumed as unmodified shared libraries.
 
 ## 4. Reproduced behaviour — no source adopted
 
-Per [`AGENTS.md`](AGENTS.md): behaviour, tensor layouts,
-hyperparameters, and numerical results are reproduced; source text is
-not.
+Everything in this section was built by reproducing behaviour, tensor
+layouts, hyperparameters and numerical results; no foreign source text is
+present. That describes how these components *were* made. It is a
+licence requirement only for copyleft upstreams — for a permissively
+licensed reference, [`AGENTS.md`](AGENTS.md) allows direct derivation
+with attribution, and such a component would be listed under §1 with its
+notice rather than here.
 
 ### TRELLIS.2 reference pipeline
 
+- **License:** MIT License, Copyright (c) Microsoft Corporation
+  (`docs/ref/TRELLIS-2/LICENSE`, and identically in the ROCm fork).
 - **Relationship:** trellis2.cpp is a from-scratch C++/ggml
   implementation. Stage structure, tensor layouts, hyperparameters and
   numerical results are reproduced so that the taps in
   [`docs/VERIFICATION.md`](docs/VERIFICATION.md) match the PyTorch
-  reference — **no reference source is adopted**, including where its
-  license would be incompatible with MIT.
+  reference, and **no reference source is adopted**. Note that this is
+  independence by construction, not by obligation: MIT would have
+  permitted translating the reference directly, with its notice carried
+  along.
 - **Weights** are separate artefacts with their own terms; see the
   model links and license notes in [`README.md`](README.md). The DINOv3
   weights in particular are under the DINOv3 License, not MIT.
@@ -234,7 +242,24 @@ Proposed components are listed here and **not yet imported**. They become
 real entries above only once the corresponding phase is implemented and
 reviewed.
 
-**None at present.** AutoRemesher, isotropicremesher and Eigen were the last
-entries here and moved into §1 and §3 with
+### NAF — feature upsampler, proposed by `docs/plan/pixal3d-proj-conditioning.md`
+
+- **Project:** <https://github.com/valeoai/NAF>
+- **License:** Apache License 2.0 (`docs/ref/NAF/LICENSE`). The repository ships
+  **no `NOTICE` file**, so §4(d) imposes no notice-propagation duty; retaining
+  the licence text and attributing the source discharges it.
+- **One file differs:** `src/layers/rope.py` carries its own header — Copyright
+  (c) Meta Platforms, under the **DINOv3 License Agreement** — and is the only
+  file under `src/` or `utils/` with a copyright header at all. Valeo's
+  Apache-2.0 does not relicense Meta's code, so that file is not adopted or
+  translated; this port's existing DINOv3 RoPE is the source for the same
+  mathematics, which is what the plan specified anyway. Noted so a later
+  file-by-file transcription knows the one file to skip.
+- **Weights:** `models/NAF/naf_release.pth`, 2,664,431 B, from the project's own
+  releases. Not redistributed by this repository.
+- **Status:** reference only, under `docs/ref/NAF/`. Nothing imported.
+
+AutoRemesher, isotropicremesher and Eigen were the previous entries here and
+moved into §1 and §3 with
 [`docs/plan/autoremesher-quad-remesh.md`](docs/plan/autoremesher-quad-remesh.md)
 Phase 5.

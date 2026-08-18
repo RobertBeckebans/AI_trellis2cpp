@@ -44,6 +44,14 @@ torch 2.9.1+rocmsdk, CPython 3.12). ROCm PyTorch presents itself as device
 - **Changing `docker/Dockerfile.ref`.** The container stays as the documented,
   reproducible reference environment. This plan adds a second way to run the
   same scripts, it does not replace the first.
+
+  **Overtaken 2026-08-18.** It did replace it, in practice. There is no CUDA
+  device in this machine and none in reach, so the container is documentation of
+  an environment nobody here can run; PyTorch work goes through `uv`, and numeric
+  dumps go through `--device cpu` (D1 addendum). The one consequence worth
+  spelling out: D1 asks for ROCm-derived numeric rows to sit *beside* "the
+  documented CUDA baseline", and that baseline can no longer be refreshed or
+  extended on this hardware. The CPU is the authority, not a second opinion.
 - **Regenerating the whole parity table on ROCm and calling it canonical.**
   See D1 — that is a separate decision, and this plan deliberately stops short
   of it.
@@ -356,6 +364,15 @@ CPU/HIP split per test; this is the tracking list.
       ROCm subdivides consistently and only overshoots at the finest level —
       the known runaway from `1536-cascade_backend-limits.md`, worse than the
       7.47 % recorded there, and the built-in early warning **fired correctly**.
+
+      **Superseded for ROCm, 2026-08-18.** Both columns ran the flash path, and
+      the 1024 investigation later showed those kernels accumulate in F16
+      (`docs/progress/backend-parity_1024-exact-attention.md`). The reviewer
+      reports 1536 on ROCm behaving like 1024 once exact attention is selected,
+      so the 4.51 above is that defect at a higher token count, not a ceiling of
+      the tier. The Vulkan column is not explained this way — `backend-parity` D6
+      measured that Vulkan's flash kernels do not carry the defect — so its
+      collapse stands as recorded and unexplained.
       Vulkan's growth rates are incoherent from level 2 onward: it collapses
       long before the finest level, and the extractor then finds almost no
       closed surface.

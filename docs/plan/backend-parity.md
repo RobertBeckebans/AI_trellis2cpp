@@ -34,6 +34,12 @@ the CPU fp32 golden, tolerance 2e-03:
 That is one forward, no sampler, no chaining. Over 24 chained forwards and four
 subdivision levels thresholded at zero it becomes a different object.
 
+Both cells above are the **exact** attention path, which is what SS-flow takes by
+default — its score matrix is ~0.8 GiB and fits the gate. Pin the path the other
+way and the picture changes completely for one backend and barely at all for the
+other; that measurement is D6, and it is what says the two backends need
+different recommendations rather than one.
+
 **Vulkan has two separate problems.** Its floor even at f32 is 8.717e-04 against
 ROCm's 3.050e-06 — a factor of 286 that is the kernel itself, most likely f16
 accumulation in the `KHR_coopmat` path. On top of that, f16 weights cost it
@@ -207,6 +213,19 @@ worth reading when a kernel here misbehaves.
 **Reading a `[SPARSE]` banner is not enough.** It prints the selector, not the
 module. When provenance matters, check whether `_backends` was patched.
 
+**The table is incomplete on one row, found 2026-08-18 in a third package.**
+Pixal3D (`docs/ideas/Pixal3D/`, built on a *newer* TRELLIS.2 base than the vanilla
+copy on disk) already ships `sdpa`: the selector is in its accepted list
+(`pixal3d/modules/sparse/config.py:24`, alongside a `flash_attn_4` this project
+has not seen) and it is implemented at
+`pixal3d/modules/sparse/attention/full_attn.py:232`. So `sdpa` is not the ROCm
+fork's invention — either upstream adopted it later or both answered the same need
+independently, and the table above cannot tell which. Pixal3D also *allows*
+`CONV = 'none'` while shipping no `conv_none.py`, which is the vanilla empty slot
+again, in a third package. The lesson is the one this decision already teaches,
+one level up: a fork's diff against **the copy you happen to have** is not its
+diff against upstream.
+
 **D2c — a library *version* selects an implementation too, and one already does.**
 Added 2026-08-18 from the Apple-port comparison. D2b is about a backend name not
 naming a module; this is the same failure one layer up, and it is live rather
@@ -288,6 +307,32 @@ implies and did not follow through: a threshold placed relative to the *worst*
 observed failure is not placed relative to the healthy band, and it is the healthy
 band that defines what "abnormal" means.
 
+**D6 — The two backends fail for opposite reasons, so one recommendation cannot
+cover both.** Added 2026-08-18. `test_ss_flow_forward`, one seed, gate 2e-03:
+
+| | f16 flash | f16 exact | f32 flash | f32 exact |
+|---|---|---|---|---|
+| **ROCm** | 5.198e-02 | 5.463e-04 | 5.198e-02 | **3.050e-06** |
+| **Vulkan** | 1.776e-02 | 1.769e-02 | **1.210e-03** | 8.717e-04 |
+
+Read the rows, not the cells. **On ROCm the attention path decides everything and
+the weights decide nothing on flash**: f32 and f16 give the identical 5.198e-02,
+which is what an error entirely produced by F16 accumulation inside the kernel
+looks like. Switch to exact and the weights start mattering again — 3.050e-06
+against 5.463e-04, a factor of 180.
+
+**On Vulkan it is the exact opposite.** The attention path is worth almost
+nothing (1.776e-02 → 1.769e-02), while f32 weights are worth a factor of 15.
+Its flash kernels are a different implementation and evidently do not accumulate
+in F16.
+
+Three consequences. The recommendation is per backend, not global: **ROCm wants
+exact attention, Vulkan wants f32 weights**, and neither setting helps the other
+much. The best configuration measured anywhere is ROCm + f32 + exact at
+3.050e-06, and ROCm + f16 + exact (5.463e-04) still beats every Vulkan cell. And
+D1's warning applies to this table too — it measures one forward, and the mesh
+question needs a generation.
+
 ## Acceptance criteria
 
 - [ ] Every parity tap measured on all three backends **against the PyTorch
@@ -295,11 +340,19 @@ band that defines what "abnormal" means.
       on one and fails on another is recorded as such rather than averaged away.
 - [ ] The decoded voxel set (`out7`, `out_coords`) gated against PyTorch per
       backend, not against our own CPU run.
-- [ ] Vulkan's SS-flow forward inside the 2e-03 gate in whatever configuration
+- [x] Vulkan's SS-flow forward inside the 2e-03 gate in whatever configuration
       is recommended for it, or the recommendation is "do not use Vulkan" with
-      the number that justifies it.
-- [ ] The question "do f32 flow weights move Vulkan's mesh toward the CPU"
-      answered with a measurement, not an argument.
+      the number that justifies it. — **Inside, with f32 flow weights**:
+      1.210e-03 on flash, 8.717e-04 on exact. With f16 it fails either way
+      (1.776e-02 / 1.769e-02). So the recommendation for Vulkan is f32 weights,
+      and the attention path is nearly free to choose there. Measured
+      2026-08-18, full matrix under D6.
+- [~] The question "do f32 flow weights move Vulkan's mesh toward the CPU"
+      answered with a measurement, not an argument. — **Half of it is measured.**
+      On the forward, f32 weights are worth a factor of 15 to Vulkan
+      (1.776e-02 -> 1.210e-03 on flash). Whether that carries through 24 chained
+      forwards to the *mesh* still needs a generation, which is what this
+      criterion actually asks for.
 - [x] The expansion warning fires on both collapse and runaway, verified against
       the two recorded failures (2.82 and 4.51).
 - [x] `ctest --test-dir build -C Release -LE model` green throughout. A `SKIP`
@@ -486,14 +539,28 @@ band that defines what "abnormal" means.
   vertices, −47 % non-manifold) in particular needs re-measuring on the exact path
   before anything is concluded from it. The 512 rows are unaffected — that tier
   ran flash too, but at 5,121 tokens it does not move enough voxels to matter.
+
+  **This applies to 1536, and there it has already been overtaken.** The reviewer
+  reports that tier behaving like 1024 once exact attention is selected, on images
+  with enough detail to warrant it — so the recorded subdivision runaway
+  (4.08 → 4.21 → 4.24 → **4.51**, 9.87 % non-manifold) is the flash defect one
+  tier up rather than a limit of the tier, which is what the mechanism predicts:
+  1536 only raises the token count, and the token count is what chose the kernel.
+  Not yet re-measured here, and the cost at 49,152 tokens is untimed. Vulkan's
+  1536 collapse is **not** covered by this — D6 measured that its flash kernels do
+  not carry the F16 defect, so that failure remains unexplained and the non-goal
+  "never Vulkan at 1536" stands.
 - **The exact path is measured on one fixture.** Expansion 3.55 → 4.06 on a
   TV-on-a-stand at seed 42, plus `test_ss_flow_forward` at 3.050e-06 across block
   sizes. That is enough to name the mechanism and not enough to move a default;
   two or three further fixtures decide it (D5).
-- **Whether Vulkan has the same defect is unknown.** Its flash kernels are a
-  different implementation, and it was never measured with attention pinned
-  either way. If it does, its 1024/1536 numbers carry two faults at once and
-  separating them needs the option D5 added.
+- ~~**Whether Vulkan has the same defect is unknown.**~~ **Measured 2026-08-18:
+  it does not.** Pinning the path moves Vulkan by 1.776e-02 -> 1.769e-02 at f16
+  and 1.210e-03 -> 8.717e-04 at f32, i.e. almost nothing, where the same switch
+  moves ROCm by four orders of magnitude. ggml's Vulkan flash kernels do not
+  carry the F16-accumulation defect the HIP ones do. Vulkan's 1024/1536 numbers
+  therefore carry one fault, not two — but it is the fault f32 weights address,
+  so they still want re-measuring at f32.
 - **A `transformers` upgrade silently invalidates every DINO reference** (D2c).
   It is not currently pinned anywhere that a person would look before upgrading.
 - **`docs/ref/` is untracked.** The provenance table (D2b), D2c and the

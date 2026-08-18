@@ -186,12 +186,28 @@ Example: `docs/PLAN.md`, phase "texture stage" →
   `src/trellis2.h`, `src/trellis2_capi.h`, `src/mesh_export.h`, or in
   unconditionally compiled code paths.
 - No adoption of code from third-party projects whose license is
-  incompatible with the project (in particular no GPL/AGPL/LGPL code
-  in the MIT library). Behavior, file formats, and algorithms must
-  only be implemented in a license-safe manner under own design — this
-  explicitly applies to the original TRELLIS reference as well: what is
-  reproduced is the *behavior* (tensor layouts, hyperparameters,
-  numerical results), not the source text.
+  incompatible with the project — in particular no GPL/AGPL/LGPL code in
+  the MIT library. For such a source, behavior, file formats, and
+  algorithms may only be reimplemented from observation, under own
+  design.
+- **Permissively licensed references may be derived from directly.** MIT,
+  BSD and Apache-2.0 sources permit translating their source text into
+  this repository, provided the copyright notice travels with it: an
+  entry in [`THIRD_PARTY.md`](THIRD_PARTY.md), attribution in the touched
+  files, and the upstream notice retained — Apache-2.0 additionally
+  carries a `NOTICE` obligation. This covers the reference
+  implementations on disk: TRELLIS.2 and its ROCm fork are MIT
+  (Copyright Microsoft Corporation), Pixal3D is MIT (Copyright 2026
+  Tencent). Until 2026-08-18 the rule above extended the copyleft
+  clean-room constraint to those references as well; that came from the
+  generic project template this repository was started from, where the
+  concern is hard copyleft, and it is not a licence requirement here.
+  The existing stages are independent reimplementations because that is
+  how they were built, not because they had to be.
+- A code license says nothing about the published **weights**. Those are
+  separate artefacts with their own terms — the DINOv3 weights in
+  particular are not MIT — and must be checked before anything converted
+  from them is redistributed.
 - Feedback, cross-check, audit, or idea is not a build order unless an
   explicit Go follows.
 
