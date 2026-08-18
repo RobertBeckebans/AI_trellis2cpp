@@ -165,10 +165,26 @@ accurate").
   self-attention score is 1.26 GB, so it misses the 1 GiB gate by 18 % and also
   ran on flash — but at 5,121 tokens flash's F16 accumulation does not move
   enough voxels to matter.
-- **The alpha matte defect is real and unfixed.** Automatic background removal
-  fills the arch openings and removes the VCR on a white-on-white image with
-  through-holes. It cost this investigation an hour and will cost someone else
-  more on a harder object.
+- ~~**The alpha matte defect is real and unfixed.**~~ **Not a defect — closed
+  2026-08-18.** Two claims made during the investigation were wrong. The VCR is
+  *not* removed: it is fully opaque, and the black band read as its removal was
+  the background beside the object. And the arch openings are not a failure of
+  the matte but its documented behaviour:
+  `trellis2_remove_solid_background_rgba` flood-fills from the image border
+  (`src/trellis2.cpp:2058`), so only border-connected background is cleared and
+  enclosed same-colour regions are deliberately preserved as subject detail.
+
+  Measured on this fixture: 4.2 % of the white pixels are white *and*
+  unreachable from the border. They are the two arch openings **and the sky in
+  the pictured skyline on the TV screen**. One is a through-hole, the other is
+  subject, and from a single image there is no local test that separates them —
+  which is what the 3D model is for. The rule as written gets the more common
+  case right.
+
+  It also cost nothing: the 512 run built both the arches and the VCR correctly
+  from this exact matte, because the model reads RGB and the matte only drives
+  the crop and the premultiply. `background: keep` with a hand-matted RGBA
+  remains the escape hatch for an object where that does not hold.
 
 ## What this means for the plans
 

@@ -627,9 +627,15 @@ ggml_tensor* sdpa_auto( ggml_context* ctx, ggml_tensor* q3, ggml_tensor* k3, ggm
 
 	bool		 exact = force_exact;
 	if( !force_exact && !force_flash && score_bytes <= exact_cap ) {
-		exact				   = true;
-		const size_t needed	   = 2u * score_bytes + ( size_t )64u * 1024u * 1024u; // score + softmax + slack
-		const size_t free_vram = trellis2_gpu_free_vram();						   // 0 on a CPU-only host
+		exact = true;
+		// Peak is one block plus its softmax, not the whole score matrix: the
+		// exact path below builds it in pieces of at most block_cap. Estimating
+		// the unblocked size here would fall back to flash precisely when the
+		// blocking is what makes exact affordable — the check would be measuring
+		// a quantity the code no longer allocates.
+		const size_t peak	   = score_bytes < block_cap ? score_bytes : block_cap;
+		const size_t needed	   = 2u * peak + ( size_t )64u * 1024u * 1024u; // block + softmax + slack
+		const size_t free_vram = trellis2_gpu_free_vram();					// 0 on a CPU-only host
 		if( free_vram && needed > free_vram ) {
 			exact			 = false;
 			static bool said = false;
@@ -3715,6 +3721,17 @@ static bool shape_dec_run( trellis2_shape_dec_model* m,
 		// loudly — that is exactly the case that used to cost the 1024^3 mesh a
 		// quarter of its faces without a word. The ceiling follows the type of
 		// the weights this level's matmuls actually use.
+		//
+		// The split is NOT skipped on backends without the ceiling. The CPU has
+		// none — two comments further down say so, and the warning is suppressed
+		// there for exactly that reason — so chunking it is arguably redundant
+		// work on the one device where a reference dump already costs 75 minutes.
+		// It stays anyway, deliberately: every backend then evaluates the same
+		// shapes in the same order, which is what makes a CPU run usable as the
+		// yardstick for a GPU one. Dropping it would also swap a 67 MB
+		// intermediate for a 2.06 GB one at the 1536 finest level (8.05M voxels x
+		// 64 channels x 4 B, ~31x), and neither the saving nor that peak has been
+		// measured. Uniform beats faster-in-theory here.
 		{
 			const std::string wname	   = lvl == 0 ? std::string( "from_latent.weight" ) : ( "blocks." + std::to_string( lvl - 1 ) + "." + std::to_string( hp.num_blocks[lvl - 1] ) + ".conv2.weight" );
 			auto			  wit	   = m->tensors.find( wname );

@@ -94,17 +94,30 @@ rem off; comment the line out or clear it with "set TRELLIS2_XXX=".
 
 rem Pin the attention path. Default is size-gated: the exact materialized
 rem [L_k, L_q, heads] softmax while that matrix stays under 1 GiB - SS-flow
-rem (~0.8 GiB) and 512-SLAT (~0.4 GiB) - and ggml_flash_attn_ext above it, where
-rem exact is not an option at all (~7.7 GB at 1024, >100 GB at 1536).
+rem (~0.8 GiB) and 512-SLAT (~0.4 GiB) - and ggml_flash_attn_ext above it.
+rem
+rem That gate answered a MEMORY question and no longer does. The exact path now
+rem builds its score matrix in blocks of query rows (TRELLIS2_SDPA_BLOCK_MB,
+rem default 1 GiB), which is exact without any correction term because soft_max
+rem runs along keys and every query row is independent. So EXACT at the cascade
+rem tiers allocates fine - measured 13-15 GB of 32 at 1024 - and it is what
+rem restores the geometry there: finest-level expansion 3.55 -> 4.06 into the
+rem healthy band, 4.3M -> 7.9M voxels, and FEWER non-manifold edges, at ~2.3x
+rem wall clock. The server UI exposes this per job as "attention"; these
+rem variables are the headless equivalent and win over a host that sends AUTO.
+rem See docs/progress/backend-parity_1024-exact-attention.md.
 rem
 rem The two are NOT interchangeable. ggml's CUDA/HIP flash kernels accumulate in
 rem F16 and ignore ggml_flash_attn_ext_set_prec() outright, so on ROCm flash
 rem costs 5.198e-02 rel-L2 per SS-flow forward against 3.050e-06 exact, and
 rem 89.8% latent sign agreement against 99.9% - roughly one voxel in ten flips
 rem in the coarse occupancy structure. FLASH is therefore a deliberate choice of
-rem the less faithful kernel (it does produce smoother-looking meshes); EXACT
-rem everywhere will fail to allocate on the HR cascade tiers.
-rem TRELLIS2_SDPA_EXACT_MAX_MB moves the gate, 0 disables exact entirely.
+rem the less faithful kernel, and it is the faster one.
+rem
+rem TRELLIS2_SDPA_EXACT_MAX_MB moves the gate, 0 disables exact entirely. On its
+rem own it is rarely what you want: it only lets a bigger score through the gate,
+rem which without the blocking meant more memory and more time for no visible
+rem change. TRELLIS2_SDPA_EXACT is the switch that matters.
 ::set TRELLIS2_SDPA_FLASH=1
 ::set TRELLIS2_SDPA_EXACT=1
 ::set TRELLIS2_SDPA_EXACT_MAX_MB=16384
